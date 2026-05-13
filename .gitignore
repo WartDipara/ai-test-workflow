@@ -1,0 +1,66 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / install
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+pip-wheel-metadata/
+.eggs/
+
+# Test & type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# --- Secrets & local config ---
+.env
+.env.*
+!.env.example
+secrets/
+config/settings.yaml
+config/credentials.yaml
+*.local.yaml
+
+# --- Runtime (game_agent) ---
+artifacts/
+
+# --- IDE & editors ---
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Project-specific ---
+res/
+
+# --- GameTurbo-Native Not Tracked ---
+GameTurbo-Native/
+*.iml
+local.properties

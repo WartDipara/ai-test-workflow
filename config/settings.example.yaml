@@ -1,0 +1,31 @@
+# 复制为 config/settings.yaml 后填写；api_key 可用 ${ENV_NAME} 从环境变量读取
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: "${OPENAI_API_KEY}"
+  model_name: "gpt-4o"
+  # openai_multimodal：OpenAI 风格多模态（image_url）。text_base64：截图以 Base64 放进纯文本（适配拒绝 image_url 的网关）。
+  image_transport: "openai_multimodal"
+  skip_vision_probe: false
+
+adb:
+  # 留空或 null 表示使用默认设备（adb 未指定 -s 时）
+  serial: null
+
+game:
+  package_name: "com.example.game"
+  # 可选；为空时用 monkey 冷启动包
+  activity: null
+
+credentials:
+  # 相对路径以「本 YAML 所在目录」为基准（此处即 config/）
+  # 推荐与 settings 同目录：复制 credentials.example.yaml 为 credentials.yaml 后填写
+  file_path: "./credentials.yaml"
+
+agent:
+  max_rounds: 35
+  artifacts_dir: "./artifacts"
+  # image_transport=text_base64 时，截图最长边缩小到该值以内再编码，控制 token
+  screenshot_max_edge: 768
+
+logging:
+  level: "INFO"
