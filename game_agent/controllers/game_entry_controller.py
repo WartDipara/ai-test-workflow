@@ -31,7 +31,7 @@ class GameEntryDetectResult:
 
 @dataclass(slots=True)
 class GameEntryDetector:
-    """独立 AI 判定：是否已进入游戏内（不含按键精灵逻辑）。"""
+    """独立 AI 判定：是否已进入游戏内。"""
 
     adb: AdbService
     app_config: AppConfig

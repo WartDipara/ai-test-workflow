@@ -13,5 +13,4 @@ class RunState:
     last_error: str | None = None
     round_hint: str = field(default="", repr=False)
     game_started: bool = False
-    script_launch_claimed: bool = False
     launch_wait_invoked: bool = False

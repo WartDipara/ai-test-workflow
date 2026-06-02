@@ -4,7 +4,6 @@ pre_controller：预处理阶段总控。
 编排流程：
 1. 从 apk_cache/apks.txt 读取 APK 下载链接并下载
 2. ABI 剥离 → 移动至 packages/
-3. （脚本推送暂留空，待后续接入）
 """
 
 from __future__ import annotations
@@ -31,16 +30,13 @@ class PreprocessingController:
         self,
         cache_dir: Path,
         packages_dir: Path,
-        adb_serial: str | None = None,
     ) -> None:
         self._cache_dir = cache_dir
         self._packages_dir = packages_dir
-        self._adb_serial = adb_serial
 
         self._preprocessor = Preprocessor(
             cache_dir=cache_dir,
             packages_dir=packages_dir,
-            adb_serial=adb_serial,
         )
 
     def run(self) -> PreprocessResult:
@@ -65,7 +61,4 @@ class PreprocessingController:
             )
 
         # ── 阶段 2：ABI 剥离 + 移动至 packages ──
-        return self._preprocessor.run(
-            apk_path=apk_path,
-            script_dir=None,
-        )
+        return self._preprocessor.run(apk_path=apk_path)

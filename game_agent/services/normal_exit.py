@@ -39,7 +39,7 @@ async def confirm_in_game_normal_exit(
     observe_seconds: float | None = None,
 ) -> NormalExitResult:
     """
-    AI 判定已进入游戏后调用：标记正常退出 → 等待观察窗口 → force-stop 游戏与按键精灵。
+    AI 判定已进入游戏后调用：标记正常退出 → 等待观察窗口 → force-stop 游戏。
     不卸载游戏（失败收尾才卸载）。用于加速验证通过后的干净退出。
     """
     wait_s = (
@@ -71,17 +71,15 @@ async def confirm_in_game_normal_exit(
 
     await asyncio.sleep(wait_s)
 
-    packages = [cfg.keywizard.package_name]
     game_pkg = (cfg.game.package_name or "").strip()
-    if game_pkg:
-        packages.append(game_pkg)
+    packages = [game_pkg] if game_pkg else []
 
     logger.info("[NormalExit] 观察结束，force-stop: %s", packages)
     msg = adb.force_stop_packages(packages)
     if audit is not None:
         audit.log_phase(
             "normal_exit",
-            "已 force-stop 游戏与按键精灵",
+            "已 force-stop 游戏",
             packages=packages,
             output=msg[:500],
         )

@@ -31,10 +31,10 @@ graph TD
   subgraph "GameTestOrchestrator [重试循环]"
     MOVE --> RETRY_LOOP{进入 retry 循环}
     RETRY_LOOP --> INIT[Init<br/>bootstrap + deploy.sh]
-    INIT --> KEYWIZARD[KeyWizard<br/>AI 操作按键精灵启动游戏]
+    INIT --> EXECUTOR[Executor<br/>AI + OCR + adb tap 登录启动游戏]
 
     subgraph "观察者阶段 - 并行 4 路"
-      KEYWIZARD --> OBSERVER{OBSERVER}
+      EXECUTOR --> OBSERVER{OBSERVER}
       OBSERVER --> LM[LogMonitor<br/>logcat 异常检测]
       OBSERVER --> SM[ScreenMonitor<br/>截图+AI 画面分析]
       OBSERVER --> GE[GameEntryDetector<br/>AI 判定进入游戏内]
@@ -46,7 +46,7 @@ graph TD
 
     GE -->|连续 N 轮 confirmed| NORMAL_EXIT[正常退出<br/>force-stop]
     OBSERVER -->|异常| FAILURE[失败]
-    KEYWIZARD -->|失败| FAILURE
+    EXECUTOR -->|失败| FAILURE
     INIT -->|失败| FAILURE
   end
 
@@ -71,7 +71,7 @@ graph TD
 |------|-----------|------|-------------|
 | **0** — 预处理 | `PreprocessingController` | 从 `apks.txt` 下载 APK → ABI 剥离 → 移至 `packages/`，清理 `apk_cache/` | **否**，仅执行一次 |
 | **1** — Init | `GameTestOrchestrator` 内部 | GameTurbo 配置 → `deploy.sh` 打包安装 | 每轮 |
-| **2** — 执行者 | `KeyWizardFlowController` | AI 操作按键精灵；`pidof` 判定进程已启动 | 每轮 |
+| **2** — 执行者 | `ExecutorFlowController` | 纯 AI：按通用登录阶段（隐私/公告/登录/选服等）OCR+tap；`skills/game-launch-ocr`；`pidof` 判定进程 | 每轮 |
 | **3** — 观察者 | `GameEntryDetector` / `LogMonitor` / `ScreenMonitor` / `SessionCoordinator` | 并行监控（日志/画面/进游戏判定/crash） | 每轮 |
 | **4** — 失败收尾 | `AnomalyHandler` → `FailureCleanup` | 导出日志、域名分析、杀进程、卸载游戏 | 每轮失败 |
 | **5** — 修改重试 | `RetryConfigHandler` | AI 分析日志 → 修改配置 → `deploy.sh` → 下一轮 | `retry_on_failure: true` |
@@ -82,13 +82,17 @@ graph TD
 
 | 判定 | 含义 | 实现 | 结束执行者？ |
 |------|------|------|-------------|
-| **开启游戏** | 游戏 APK 进程已拉起 | `adb pidof` / `pgrep`，`wait_for_game_after_script_launch` | 是 |
-| **进入游戏内** | 登录完成，处于游戏内场景（含强制新手引导蒙层） | 多模态 `VisionWorker` + OCR；**不依赖按键精灵** | 否（属观察者） |
+| **开启游戏** | 游戏 APK 进程已拉起 | `adb pidof` / `pgrep`，`wait_for_game_running` | 是 |
+| **进入游戏内** | 登录完成，处于游戏内场景（含强制新手引导蒙层） | 多模态 `VisionWorker` + OCR | 否（属观察者） |
 
 **进入游戏内** 的否定项（OCR + 模型）：登录/选服/下载/创角（OCR 命中「创建角色」等硬排除）、纯加载页。
 **肯定项**：游戏内 3D/HUD；有全屏新手引导蒙层仍算已进入。
 
-确认进入游戏后调用 **`confirm_in_game_normal_exit`**：标记状态 → 等待 `game.normal_exit_observe_s`（默认 10s，观察加速）→ `force-stop` 游戏与按键精灵。
+确认进入游戏后调用 **`confirm_in_game_normal_exit`**：标记状态 → 等待 `game.normal_exit_observe_s`（默认 10s，观察加速）→ `force-stop` 游戏。
+
+### 执行者：通用登录链（无 per-game 脚本）
+
+多款游戏 UI 不同，但阶段类似。主脑每轮归类阶段（`splash` / `privacy` / `announcement` / `login` / `server_select` / `download` 等），按 OCR 坐标点击；细则见 [skills/game-launch-ocr/SKILL.md](skills/game-launch-ocr/SKILL.md)。Agent 可调用 `read_login_flow_guide` 读取全文。成功仅要求游戏进程出现，进入游戏内主场景由观察者判定。
 
 ---
 
@@ -264,9 +268,10 @@ llm_multimodal:
   api_key: "你的key"              # ← 填写多模态模型的 API Key
   model_name: "model/qwen3.6-plus" # ← 必填，支持视觉的模型
 
-keywizard:
-  activity: "com.cyjh.mobileanjian.vip.activity.GuiActivity"  # 按键精灵启动 Activity
-  script_display_name: "爱琳诗篇-免费版自动截图"               # 按键精灵脚本名称
+executor:
+  post_launch_wait_s: 2.0       # am start 游戏后等待界面稳定
+  ad_initial_wait_s: 3.0        # 疑似广告页初次等待
+  max_foreground_retries: 4
 ```
 
 #### 各配置段详解
@@ -317,7 +322,7 @@ gameturbo:
 
 ```yaml
 modules:
-  keywizard: true              # 按键精灵执行者阶段
+  executor: true               # OCR + AI + adb tap 执行者阶段
   game_entry_detect: true      # AI 进入游戏判定 + 正常退出
   log_monitor: true            # GameTurbo 日志监控
   screen_monitor: true         # 画面异常检测
@@ -329,7 +334,7 @@ modules:
 
 ```yaml
 agent:
-  max_rounds: 30                        # KeyWizard 最大操作轮数
+  max_rounds: 30                        # 执行者最大操作轮数
   artifacts_dir: "./artifacts"          # 过程数据存储目录
   persist_learned_skill_on_success: true  # 成功后自动总结技能到 experiences/
   tap_observe_count: 2                  # tap_and_observe 默认连拍 OCR 次数
@@ -423,7 +428,7 @@ artifacts/retry_1_20260528_100000/
 ├── audit/                       # AI 审计
 │   ├── events.jsonl
 │   └── ai_trace.md
-├── keywizard/                   # KeyWizard 阶段截图
+├── executor/                    # 执行者阶段截图
 ├── entry_detect_s0_*.png        # 进入游戏判定截图
 ├── gameturbo.log                # GameTurbo 日志
 ├── gameturbo_session_*.log      # crash 归档日志
@@ -449,7 +454,7 @@ game_agent/
 ├── controllers/                     # C: 编排控制（流水线阶段）
 │   ├── orchestrator.py              # GameTestOrchestrator — 主编排 + retry 循环
 │   ├── pre_controller.py            # PreprocessingController — 预处理（下载+ABI剥离）
-│   ├── keywizard_controller.py      # KeyWizardFlowController — 按键精灵执行者
+│   ├── executor_controller.py       # ExecutorFlowController — OCR+AI 执行者
 │   ├── game_entry_controller.py     # GameEntryDetector — 进入游戏判定
 │   ├── session_controller.py        # SessionCoordinator — 进程 crash/重启监控
 │   ├── log_monitor_controller.py    # LogMonitor — 日志异常监控
@@ -463,23 +468,21 @@ game_agent/
 │   ├── game_entry_judgment.py       # GameEntryJudgment — 进入游戏判定结果
 │   ├── gameturbo_config.py          # GameTurboConfigPatch — AI 配置修改补丁
 │   ├── failure_report.py            # 失败诊断报告模型（含 to_markdown()）
-│   └── worker_task.py               # 职员任务生命周期状态
+│   └── deploy_recovery.py           # deploy 失败 AI 恢复补丁模型
 │
 ├── modules/                         # 纯业务逻辑（与 Controller 解耦）
-│   ├── keywizard/
-│   │   └── agent.py                 # Pydantic-AI Agent 定义 + 14+ 工具函数
+│   ├── executor/
+│   │   └── agent.py                 # Pydantic-AI Agent + OCR/tap 工具
 │   ├── preprocessing/
-│   │   ├── preprocessor.py          # ABI 剥离 + packages 移动 + 脚本推送
+│   │   ├── preprocessor.py          # ABI 剥离 + packages 移动
 │   │   └── assets_preparer.py       # APK 下载（apks.txt → httpx）
 │   ├── retry/
 │   │   ├── analysis.py              # AnalysisAgent — AI 根因分析与配置补丁
+│   │   ├── deploy_retry.py          # deploy 失败 AI 重试
 │   │   ├── cleanup.py               # FailureCleanup — 失败收尾（日志+卸载）
 │   │   └── retry_config.py          # RetryConfigHandler — 配置修改+重新 deploy
-│   ├── observer_session/
-│   │   └── state.py                 # ObserverSessionState — 共享会话状态
-│   ├── game_entry/                  # 兼容导入层（实际引用 controllers/）
-│   ├── log_monitor/                 # 兼容导入层
-│   └── screen_monitor/              # 兼容导入层
+│   └── observer_session/
+│       └── state.py                 # ObserverSessionState — 共享会话状态
 │
 ├── services/                        # 基础设施服务
 │   ├── adb_service.py               # AdbService — ADB 命令封装（截图/点击/启动等）
@@ -501,12 +504,9 @@ game_agent/
 │   ├── pipeline_trace.py            # 流水线调用追踪
 │   ├── session_memory.py            # Pydantic-AI 对话记忆持久化
 │   ├── learned_skill_store.py       # AI 工具：读取已学技能
-│   ├── success_skill_summarizer.py  # 成功时为 AI 总结生成技能文档
-│   └── worker_task_registry.py      # 异步 Worker 任务管理
+│   └── success_skill_summarizer.py  # 成功时为 AI 总结生成技能文档
 │
-├── agents/                          # Agent 兼容导入
-│   ├── agent.py                     # → keywizard/agent.py
-│   └── analysis_agent.py            # → retry/analysis.py
+├── agents/                          # 对外 Agent 导出（__init__.py）
 │
 ├── utils/                           # 工具函数
 │   ├── apk_util.py                  # aapt 提取包名/启动 Activity
@@ -519,7 +519,7 @@ game_agent/
 │   ├── settings_yaml.py             # YAML 安全更新工具
 │   ├── packages_cleanup.py          # packages/ 目录清理（deploy 产物+原包）
 │   ├── target_stability.py          # 域名稳定性探测
-│   └── adb_push_util.py             # 按键精灵脚本推送
+│   └── tools/adb_tap.py             # CLI：adb input tap
 │
 ├── workers/                         # 异步 Worker
 │   └── vision_worker.py             # 多模态视觉分析 Worker
@@ -539,7 +539,7 @@ config/                              # 项目配置文件
 
 skills/                              # 人工编写的技能文档
 ├── gameturbo-log-baseline/SKILL.md  # 日志基线判定规则
-└── keywizard-run-script/SKILL.md    # 按键精灵操作指引
+└── game-launch-ocr/SKILL.md         # 执行者 OCR+tap 指引
 
 experiences/                         # AI 自动总结的已学技能
 └── agent_skills/                    # 每个成功 run 生成一个 skill_*.md
@@ -570,10 +570,10 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 ## 感知与决策
 
 - **OCR**：PaddleOCR（`ocr.model_profile`: mobile / server）。
-- **主脑 LLM**：按键精灵阶段（`llm`）。
+- **主脑 LLM**：执行者阶段（`llm`）。
 - **多模态 LLM**：`game_entry_detect`、`screen_monitor`（`llm_multimodal`）。
-- **进入游戏判定**：独立 prompt，与按键精灵脚本无关；创角 OCR 硬规则见 `character_creation_ocr.py`。
-- **技能**：`skills/keywizard-run-script`、`skills/gameturbo-log-baseline`；`experiences/agent_skills/` 为历史成功摘要。
+- **进入游戏判定**：独立 prompt；创角 OCR 硬规则见 `character_creation_ocr.py`。
+- **技能**：`skills/game-launch-ocr`、`skills/gameturbo-log-baseline`；`experiences/agent_skills/` 存放成功 run 自动生成的摘要（可为空）。
 
 ---
 
@@ -592,7 +592,7 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 
 **FailureCleanup：** finalize **gameturbo.log** → 域名分析 → force-stop → 卸载游戏。
 
-**retry_on_failure: true：** AI 读日志/域名 JSON 补丁 `games/gameturbo_{gid}_*.json` → `deploy.sh`（更新 `.gameturbo_merged.json`）→ 下一轮从 keywizard 重跑。
+**retry_on_failure: true：** AI 读日志/域名 JSON 补丁 `games/gameturbo_{gid}_*.json` → `deploy.sh`（更新 `.gameturbo_merged.json`）→ 下一轮从 executor 重跑。
 
 Modify 改的是 `games/*.json`；**成功交付**固定为 deploy 合并后的 `.gameturbo_merged.json`。
 
@@ -616,7 +616,7 @@ A：`GameTurbo-Native/.gameturbo_merged.json` 的副本，不是 `games/gameturb
 A：不一定，见 [gameturbo-log-baseline](skills/gameturbo-log-baseline/SKILL.md)。
 
 **Q：怎么只测某一模块？**  
-A：在 `modules` 中关闭其它项；测观察者前需先有游戏进程（keywizard 或手动启动）。
+A：在 `modules` 中关闭其它项；测观察者前需先有游戏进程（executor 或手动启动）。
 
 **Q：apk_cache 中的 APK 为什么处理完还在？**  
 A：正常情况下预处理完成后 APK 已移动到 `packages/` 且原始文件会被清理。如果残留，请检查上一次运行的日志确认预处理阶段是否正常完成。

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class FailureCleanup:
-    """失败收尾：导出 GameTurbo 日志、结束按键精灵/游戏进程、卸载游戏。"""
+    """失败收尾：导出 GameTurbo 日志、结束游戏进程、卸载游戏。"""
 
     adb: AdbService
     app_config: AppConfig
@@ -104,12 +104,10 @@ class FailureCleanup:
                         error=str(e)[:500],
                     )
 
-        packages = [cfg.keywizard.package_name]
         game_pkg = (cfg.game.package_name or "").strip()
-        if game_pkg:
-            packages.append(game_pkg)
+        packages = [game_pkg] if game_pkg else []
         with trace_operation("cleanup", "force_stop_packages", packages=packages) as rec:
-            logger.info("中止按键精灵与游戏进程: %s", packages)
+            logger.info("中止游戏进程: %s", packages)
             self.adb.force_stop_packages(packages)
             rec.ok()
         if self.audit is not None:

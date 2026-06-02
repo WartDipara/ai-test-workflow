@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# 命中任一词则视为仍在创角/局外流程，不得判为已进入游戏（与按键精灵脚本无关）。
+# 命中任一词则视为仍在创角/局外流程，不得判为已进入游戏。
 CHARACTER_CREATION_OCR_MARKERS: tuple[str, ...] = (
     "创建角色",
     "新建角色",
@@ -14,6 +14,8 @@ CHARACTER_CREATION_OCR_MARKERS: tuple[str, ...] = (
     "外观设定",
     "性别选择",
     "开始冒险",
+    "进入游戏",
+    "选择服务器",
     "Create Character",
     "Createcharacter",
     "Select Class",

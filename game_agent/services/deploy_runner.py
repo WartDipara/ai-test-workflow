@@ -42,6 +42,7 @@ def run_deploy(
     *,
     serial: str | None = None,
     artifact_root: Path | None = None,
+    log_filename: str = "deploy.log",
     timeout_s: float = 900.0,
 ) -> DeployResult:
     """Run GameTurbo android deploy in Git Bash and wait for it to finish."""
@@ -52,7 +53,7 @@ def run_deploy(
     if serial:
         cmd.extend(["-d", serial])
 
-    log_path = artifact_root / "deploy.log" if artifact_root else None
+    log_path = (artifact_root / log_filename) if artifact_root else None
     logger.info("执行 GameTurbo deploy: %s", " ".join(cmd))
     with trace_operation(
         "deploy",

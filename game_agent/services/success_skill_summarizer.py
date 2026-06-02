@@ -16,13 +16,13 @@ from game_agent.services.llm_transcript import format_new_llm_messages
 
 logger = logging.getLogger(__name__)
 
-_SUMMARY_SYSTEM = """你是「经验压缩器」，为同一套按键精灵自动化主脑编写可复用的短技能笔记。
+_SUMMARY_SYSTEM = """你是「经验压缩器」，为同一套 OCR+AI 游戏登录执行者编写可复用的短技能笔记。
 
 输出要求（必须遵守）：
 1. 只输出 Markdown 正文，不要前言后语、不要用 markdown 代码围栏包裹全文。
 2. 第一行必须是形如 `# 已学技能：<10 字内标题>` 的一级标题。
-3. 正文控制在 1200 汉字以内；用短列表写：推荐步骤顺序、关键 OCR 词、等待/广告处理、易错点。
-4. 可对照仓库内人工规范 `skills/keywizard-run-script/SKILL.md` 写「补充/差异」，但不要照抄大段。
+3. 正文控制在 1200 汉字以内；用短列表写：阶段 ID 顺序、关键 OCR 词、各阶段按钮、易错点。
+4. 可对照 `skills/game-launch-ocr/SKILL.md` 的通用阶段模型写「本游戏差异」，不要照抄大段。
 5. 不得编造对话里未出现的操作；不要输出任何 API key、token、账号。
 6. 不要粘贴整段 OCR，只提关键词即可。"""
 
@@ -39,7 +39,7 @@ async def write_skill_from_success_run(
     app_config: AppConfig,
     history: list[ModelMessage],
     *,
-    script_display_name: str,
+    task_label: str,
     final_summary: str,
     rounds_used: int,
     artifact_run_dir: str,
@@ -53,7 +53,7 @@ async def write_skill_from_success_run(
     if len(transcript) > max_transcript:
         transcript = transcript[:max_transcript] + "\n…[对话转写已截断]"
 
-    user_block = f"""脚本显示名（配置）: {script_display_name!r}
+    user_block = f"""任务标识: {task_label!r}
 完成轮数: {rounds_used}
 artifact 目录名: {artifact_run_dir!r}
 最终 report_flow_done 摘要:
@@ -79,7 +79,7 @@ artifact 目录名: {artifact_run_dir!r}
         return None
 
     stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-    h = hashlib.sha256(script_display_name.encode("utf-8")).hexdigest()[:10]
+    h = hashlib.sha256(task_label.encode("utf-8")).hexdigest()[:10]
     basename = f"skill_{stamp}_{h}.md"
     try:
         path = write_skill_markdown(basename=basename, body=body)

@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class GameEntryJudgment(BaseModel):
-    """多模态对「是否已进入游戏内」的判定（与按键精灵逻辑无关）。"""
+    """多模态对「是否已进入游戏内」的判定。"""
 
     in_game_main: bool = Field(
         description="True 表示已离开局外流程并处于游戏内场景（含强制新手引导蒙层）。",

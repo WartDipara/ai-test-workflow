@@ -3,7 +3,7 @@ from game_agent.models.settings import (
     AgentSection,
     AdbSection,
     AppConfig,
-    KeyWizardSection,
+    ExecutorSection,
     LLMSection,
     LoggingSection,
 )
@@ -12,7 +12,7 @@ __all__ = [
     "AgentSection",
     "AdbSection",
     "AppConfig",
-    "KeyWizardSection",
+    "ExecutorSection",
     "LLMSection",
     "LoggingSection",
     "RunState",

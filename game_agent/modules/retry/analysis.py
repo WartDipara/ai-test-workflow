@@ -8,6 +8,7 @@ from typing import Any
 from pydantic_ai import Agent
 from pydantic_ai.messages import BinaryImage
 
+from game_agent.models.deploy_recovery import DeployRecoveryPatch
 from game_agent.models.failure_report import AttemptRoundDiagnosis, FailureDiagnosisReport
 from game_agent.models.gameturbo_config import GameTurboConfigPatch
 from game_agent.models.settings import LLMSection
@@ -24,7 +25,6 @@ class AnalysisAgent:
     """
     def __init__(self, llm_config: LLMSection) -> None:
         self._llm_config = llm_config
-        self._agent = Agent(build_llm_model(llm_config), output_type=str)
         self._patch_agent = Agent(build_llm_model(llm_config), output_type=GameTurboConfigPatch)
         self._failure_report_agent = Agent(
             build_llm_model(llm_config),
@@ -34,56 +34,68 @@ class AnalysisAgent:
             build_llm_model(llm_config),
             output_type=AttemptRoundDiagnosis,
         )
+        self._deploy_recovery_agent = Agent(
+            build_llm_model(llm_config),
+            output_type=DeployRecoveryPatch,
+        )
 
-    async def analyze_and_rewrite(
+    async def analyze_deploy_failure(
         self,
         *,
-        anomaly_reason: str,
-        log_content: str,
-        domain_analysis: dict[str, Any] | None = None,
-        domain_script_output: str | None = None,
-        screenshot_paths: list[Path],
-    ) -> str:
-        logger.info("AnalysisAgent 开始分析异常原因...")
-
-        domain_block = format_domain_analysis_for_ai(domain_analysis)
-        if domain_analysis is None and domain_script_output:
-            domain_block = domain_script_output
-
+        gid: str,
+        attempt: int,
+        max_attempts: int,
+        deploy_log_tail: str,
+        current_config: dict[str, Any],
+        last_error: str,
+    ) -> DeployRecoveryPatch:
+        """根据 deploy.log 分析失败原因并给出恢复补丁（可改配置或仅重试）。"""
+        config_block = json.dumps(current_config, ensure_ascii=False, indent=2)
         prompt = f"""
-{gameturbo_log_baseline_prompt_block()}
+你是 GameTurbo Android deploy.sh 故障恢复助手。deploy 打包/注入/安装失败，流程不应直接终止，需要给出可执行的恢复建议。
 
-你是一个负责异常排查与配置重写的高级 AI 助手。
-游戏加速流程中发生了异常，流程已被中止。你需要根据域名/区域分析 JSON、GameTurbo 日志片段与截图，
-判断加速路由、归属地、pending-SNI 等问题，并给出配置修改建议。
-判定前须对照上述基线：勿将 recv buffer full、单次 heartbeat timeout、FEC 恢复等正常噪声判为根因。
+目标 gid: {gid}
+当前为第 {attempt}/{max_attempts} 次 deploy 尝试。
+最近一次 Python 侧错误摘要: {last_error[:2000]}
 
-异常概览:
-{anomaly_reason}
+当前游戏配置 JSON（games/gameturbo_{gid}_*.json）:
+{config_block}
 
-域名/区域分析 JSON（由 gameturbo.log 提取，含 tunnel/direct/unknown、归属地、pending IP）:
-{domain_block}
+deploy.sh 日志（末尾截断，含 stdout/stderr）:
+{deploy_log_tail[-20000:]}
 
-GameTurbo 日志片段（末尾截断）:
-{log_content[-10000:]}
+## 常见失败类型与对策
 
-请给出:
-1. 错误根因分析（结合 JSON 中的 route、geo_summary、non_china_domains、unmatched_pending_ips）。
-2. 针对 GameTurbo / 节点配置的修改建议。
+1. **找不到配置** `No game config found` / `gameturbo_*`：检查 game_id 是否与 gid 一致；JSON 是否合法。
+2. **merge_config / Python**：检查 JSON 语法、必填字段；修正后 retry。
+3. **build.sh / NDK / 编译**：多为环境或瞬时问题，可 `retry_only=true` 重试；若日志明确缺依赖则写在 analysis。
+4. **APK 未找到**：检查 packages 目录原包是否存在，通常无法靠改 games JSON 修复，analysis 说明即可。
+5. **adb / 签名 / 安装**：设备或 keystore 问题，retry_only 可试一次。
+
+## 输出 DeployRecoveryPatch
+
+- **analysis**（必填）：根因 + 本次建议动作。
+- **retry_only**：true 表示不修改配置，仅立即重试 deploy。
+- **game_id**：仅当配置中 game_id 错误时填写正确 gid 字符串。
+- **direct_patterns / port_rules**：仅当确信 merge 失败由配置内容引起时少量追加；多数 build 失败应留空。
+
+禁止建议修改 _platform、default_action、tunnel_patterns（deploy 阶段无效）。
 """
-        
-        # We can append images
-        messages = [prompt]
-        for sp in screenshot_paths[-3:]:  # only last 3 screenshots to save context
-            if sp.exists():
-                messages.append(BinaryImage.from_path(sp))
-                
         try:
-            result = await self._agent.run(messages)
-            return result.output or "未输出结论"
+            with trace_operation("llm", "analyze_deploy_failure", attempt=attempt) as rec:
+                result = await self._deploy_recovery_agent.run(prompt)
+                patch = result.output or DeployRecoveryPatch(
+                    analysis="模型未输出 deploy 恢复建议",
+                    retry_only=True,
+                )
+                rec.ok(retry_only=patch.retry_only, game_id=patch.game_id)
+                return patch
         except Exception as e:
-            logger.error("AnalysisAgent 分析失败: %s", e)
-            return f"分析失败: {e}"
+            logger.error("deploy 失败 AI 分析异常: %s", e)
+            return DeployRecoveryPatch(
+                analysis=f"AI 分析失败，将直接重试 deploy: {e}",
+                retry_only=True,
+            )
 
     async def analyze_and_propose_patch(
         self,

@@ -68,9 +68,9 @@ def _collect_attempt_bundle(
     transcripts = sorted(artifact_root.glob("audit/round_*_transcript.txt"))
 
     screenshots = sorted(artifact_root.glob("monitor_screen_*.png"))
-    keywizard_dir = artifact_root / "keywizard"
-    keywizard_shots = (
-        sorted(keywizard_dir.glob("**/*.png")) if keywizard_dir.is_dir() else []
+    executor_dir = artifact_root / "executor"
+    executor_shots = (
+        sorted(executor_dir.glob("**/*.png")) if executor_dir.is_dir() else []
     )
 
     attempt_report_md = _read_text(
@@ -95,7 +95,7 @@ def _collect_attempt_bundle(
         "transcript_files": [str(p) for p in transcripts[-2:]],
         "transcript_excerpts": [_read_text(p, limit=6000) for p in transcripts[-2:]],
         "screenshot_paths": [str(p) for p in screenshots[-3:]],
-        "keywizard_screenshot_paths": [str(p) for p in keywizard_shots[-2:]],
+        "executor_screenshot_paths": [str(p) for p in executor_shots[-2:]],
     }
 
 
@@ -103,8 +103,8 @@ def _guess_failure_stage(reason: str) -> str:
     lower = reason.lower()
     if "前置处理" in reason or "deploy" in lower or "bootstrap" in lower:
         return "init"
-    if "按键精灵" in reason or "keywizard" in lower or "游戏进程" in reason:
-        return "keywizard"
+    if "执行者" in reason or "executor" in lower or "游戏进程" in reason:
+        return "executor"
     if "screen" in lower or "画面" in reason or "observer" in lower or "log anomaly" in lower:
         return "observer"
     if "retry" in lower or "配置" in reason:
@@ -185,7 +185,7 @@ async def generate_attempt_failure_report(
 
 gid: {gid}
 编排器记录原因: {reason}
-failure_stage 请从 init/keywizard/observer/modify/unknown 中选最贴切的一项。
+failure_stage 请从 init/executor/observer/modify/unknown 中选最贴切的一项。
 
 当前游戏配置 JSON:
 {config_block}
@@ -274,7 +274,7 @@ async def generate_failure_diagnosis_report(
 
 请输出 FailureDiagnosisReport 结构：
 1. executive_summary：2-4 句，人工先读这个就能行动
-2. overall_verdict：一句话归类（配置/路由/游戏画面/按键精灵/部署设备等）
+2. overall_verdict：一句话归类（配置/路由/游戏画面/执行者登录/部署设备等）
 3. confidence：high/medium/low
 4. attempts：每轮 failure_stage、immediate_trigger、log_highlights（3-8 条原文级关键行）、screen_summary、domain_summary
 5. gameturbo_log_analysis：综合所有轮次日志，指出 tunnel/direct/RTT/closed/rebuilt 等

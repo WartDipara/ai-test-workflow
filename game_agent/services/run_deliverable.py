@@ -121,9 +121,9 @@ def publish_failure_deliverable(
         if audit_src.is_dir():
             _copy_tree_if_exists(audit_src, attempt_dst / "audit")
 
-        keywizard_src = artifact_root / "keywizard"
-        if keywizard_src.is_dir():
-            _copy_tree_if_exists(keywizard_src, attempt_dst / "keywizard")
+        executor_src = artifact_root / "executor"
+        if executor_src.is_dir():
+            _copy_tree_if_exists(executor_src, attempt_dst / "executor")
 
         for png in sorted(artifact_root.glob("monitor_screen*.png")):
             _copy_if_exists(png, attempt_dst / png.name)

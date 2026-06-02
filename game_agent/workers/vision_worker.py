@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import Callable
 from pathlib import Path
 
 from pydantic_ai import Agent
@@ -11,7 +10,6 @@ from pydantic_ai.messages import BinaryImage
 
 from game_agent.models.game_entry_judgment import GameEntryJudgment
 from game_agent.models.settings import LLMSection
-from game_agent.models.worker_task import WorkerProgress, WorkerTaskResult
 from game_agent.services.llm_service import build_llm_model
 
 logger = logging.getLogger(__name__)
@@ -107,7 +105,7 @@ class VisionWorker:
     ) -> GameEntryJudgment:
         """
         独立判定：是否已进入游戏内（登录完成、局内场景；含强制新手引导蒙层也算进入）。
-        不参考按键精灵脚本。创角相关 OCR 命中时必须在 blockers 含 character_creation。
+        创角相关 OCR 命中时必须在 blockers 含 character_creation。
         """
         creation_block = ""
         if ocr_creation_hits:
@@ -129,7 +127,7 @@ class VisionWorker:
 
         prompt = f"""
 你是游戏自动化测试中的「进入游戏」判定器。只根据截图与 OCR 判断：玩家是否已经进入游戏内可玩场景。
-不要参考任何外部脚本、找色配置或按键精灵逻辑。
+不要参考任何外部自动化脚本或找色配置。
 
 画面 OCR（坐标+文字+置信度）：
 {ocr_summary}
@@ -211,120 +209,6 @@ login | server_select | resource_download | loading | character_creation | tutor
                 stage="unknown",
                 reason="多模态 API 调用失败",
             )
-
-    async def analyze_screen(
-        self,
-        *,
-        task_id: str,
-        round_id: int,
-        screenshot_path: Path,
-        ocr_summary: str,
-        foreground: str,
-        screen_size: tuple[int, int],
-        mission_context: str,
-        report_progress: Callable[[WorkerProgress], None],
-    ) -> WorkerTaskResult:
-        report_progress(
-            WorkerProgress(
-                status="running",
-                progress=15,
-                current_step="compose_prompt",
-                message="视觉职员正在整理截图、OCR 结果与前台应用上下文",
-            ),
-        )
-        prompt = _build_prompt(
-            task_id=task_id,
-            round_id=round_id,
-            ocr_summary=ocr_summary,
-            foreground=foreground,
-            screen_size=screen_size,
-            screenshot_path=screenshot_path,
-            mission_context=mission_context,
-        )
-        report_progress(
-            WorkerProgress(
-                status="running",
-                progress=35,
-                current_step="request_sent",
-                message="视觉职员已向多模态模型提交截图分析请求",
-            ),
-        )
-        try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-        except Exception:
-            logger.exception("vision worker failed: task_id=%s", task_id)
-            raise
-        report = (result.output or "").strip()
-        report_progress(
-            WorkerProgress(
-                status="reporting",
-                progress=90,
-                current_step="format_report",
-                message="视觉职员已收到模型输出，正在整理最终报告",
-            ),
-        )
-        if not report:
-            report = "视觉职员未返回有效内容，请主脑结合 OCR 结果保守决策。"
-        return WorkerTaskResult(
-            report=report,
-            metadata={
-                "round_id": round_id,
-                "screenshot_path": str(screenshot_path),
-                "foreground": foreground,
-            },
-        )
-
-
-def _build_prompt(
-    *,
-    task_id: str,
-    round_id: int,
-    ocr_summary: str,
-    foreground: str,
-    screen_size: tuple[int, int],
-    screenshot_path: Path,
-    mission_context: str,
-) -> str:
-    width, height = screen_size
-    return f"""
-你是多 Agent 协作系统里的视觉职员 Agent B。
-你的身份不是决策者，也不能直接操作设备；你的职责是观察截图、提取信息，并向主脑 Agent A 汇报。
-
-任务元数据：
-- task_id: {task_id}
-- round_id: {round_id}
-- screenshot_path: {screenshot_path}
-- screen_size: {width}x{height}
-- foreground: {foreground}
-
-当前任务上下文：
-{mission_context}
-
-当前界面的 OCR 识别结果（每条为「中心坐标 + 文字 + 置信度」，用于定位列表项与按钮）：
-{ocr_summary}
-
-请按以下结构汇报，避免输出无关解释：
-
-1. 当前页面类型：
-   在 keywizard_ad / keywizard_home / script_editor_entry / script_category_list / script_list / script_detail / root_permission / loading / unknown 中选择最接近的一项，并说明依据。
-
-2. 关键文本：
-   列出画面中可见的按钮、提示、广告文字、分类名、脚本名、加载/启动状态等。能推断位置时写出大致坐标。
-
-3. 关键交互目标：
-   列出主脑接下来可能要点击或输入的目标。每项包含：
-   - name
-   - suggested_action，例如 tap_coordinate(x,y)、tap_and_observe(x,y)、swipe_screen(direction)、wait_seconds
-   - reason
-   - confidence，0 到 1
-   如果 foreground 不是目标按键精灵包，或当前明显在桌面/启动器，请优先建议主脑调用 open_keywizard_app，而不是建议点击桌面图标坐标。
-
-4. 风险与不确定性：
-   如果坐标不确定、截图过渡中、OCR 与画面冲突，请明确说明。
-
-5. 给主脑的简短建议：
-    用 1-3 句话说明下一步最稳妥的动作。
-""".strip()
 
 
 def _parse_game_entry_judgment(raw: str) -> GameEntryJudgment:

@@ -9,7 +9,7 @@ _DEFAULT_SETTINGS = Path(__file__).resolve().parent.parent / "config" / "setting
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="KeyWizard script launcher agent (Pydantic-AI + ADB)")
+    parser = argparse.ArgumentParser(description="Game test agent (OCR + AI + ADB)")
     parser.parse_args(argv)
 
     from game_agent.controllers.orchestrator import run_orchestrator

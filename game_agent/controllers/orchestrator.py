@@ -8,7 +8,8 @@ from pathlib import Path
 
 from game_agent.config.loader import load_app_config
 from game_agent.controllers.game_entry_controller import GameEntryDetector
-from game_agent.controllers.keywizard_controller import run_keywizard_flow_sync
+from game_agent.controllers.executor_controller import run_executor_flow_sync
+from game_agent.exceptions import DeployPhaseError
 from game_agent.controllers.log_monitor_controller import LogMonitor
 from game_agent.controllers.pre_controller import PreprocessingController
 from game_agent.controllers.retry_controller import AnomalyHandler
@@ -19,7 +20,7 @@ from game_agent.models.settings import AppConfig, ModulesSection
 from game_agent.modules.observer_session import ObserverSessionState
 from game_agent.paths import GAMETURBO_MERGED_CONFIG_PATH
 from game_agent.services.adb_service import AdbService
-from game_agent.services.deploy_runner import run_deploy
+from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
 from game_agent.services.failure_report import (
     generate_and_save_attempt_failure_report,
     generate_failure_diagnosis_report,
@@ -75,7 +76,7 @@ class GameTestOrchestrator:
         self._adb: AdbService | None = None
         self._artifact_root: Path | None = None
         self._audit: RunAuditLogger | None = None
-        self._last_keywizard_failure_reason = ""
+        self._last_executor_failure_reason = ""
         self._task_id = ""
         self._task_gid = ""
         self._deliverable: RunDeliverablePaths | None = None
@@ -107,9 +108,9 @@ class GameTestOrchestrator:
     def _log_module_flags(self, cfg: AppConfig) -> None:
         m = cfg.modules
         logger.info(
-            "模块开关: keywizard=%s game_entry_detect=%s log_monitor=%s "
+            "模块开关: executor=%s game_entry_detect=%s log_monitor=%s "
             "screen_monitor=%s retry=%s max_retries=%s",
-            m.keywizard,
+            m.executor,
             m.game_entry_detect,
             m.log_monitor,
             m.screen_monitor,
@@ -162,7 +163,6 @@ class GameTestOrchestrator:
                         processed_apk=str(preprocess_result.processed_apk),
                         abis_kept=preprocess_result.abis_kept,
                         abis_removed=preprocess_result.abis_removed,
-                        scripts_pushed=preprocess_result.scripts_pushed,
                     )
 
             for retry in range(1, max_retries + 1):
@@ -246,17 +246,39 @@ class GameTestOrchestrator:
         try:
             with trace_operation("gameturbo", "prepare_context", retry=retry):
                 self._prepare_gameturbo_context(cfg)
+        except DeployPhaseError as e:
+            init_reason = f"GameTurbo deploy 失败: {e}"
+            logger.error("%s", init_reason)
+            self._handle_failure_sync(
+                retry,
+                init_reason,
+                run_retry_config=mods.retry_on_failure,
+                max_retries=max_retries,
+            )
+            if mods.retry_on_failure:
+                self._cleanup_packages_after_attempt()
+                return
+            if self._audit is not None:
+                self._audit.finalize(success=False, note=init_reason[:500])
+            raise _FinishRun(
+                success=False,
+                last_reason=init_reason,
+                max_retries=max_retries,
+            ) from e
         except Exception as e:
             logger.error("GameTurbo 前置处理失败: %s", e)
             init_reason = f"GameTurbo 前置处理失败: {e}"
-            if self._audit is not None:
-                self._audit.finalize(success=False, note=init_reason)
-            self._write_attempt_failure_report_sync(
-                cfg,
+            self._handle_failure_sync(
                 retry,
                 init_reason,
-                will_retry=False,
+                run_retry_config=mods.retry_on_failure,
+                max_retries=max_retries,
             )
+            if mods.retry_on_failure:
+                self._cleanup_packages_after_attempt()
+                return
+            if self._audit is not None:
+                self._audit.finalize(success=False, note=init_reason[:500])
             raise _FinishRun(
                 success=False,
                 last_reason=init_reason,
@@ -269,10 +291,10 @@ class GameTestOrchestrator:
         assert self._adb is not None
         self._sync_task_gid_from_config(cfg)
 
-        if not self._run_keywizard_phase(cfg):
+        if not self._run_executor_phase(cfg):
             self._handle_failure_sync(
                 retry,
-                self._last_keywizard_failure_reason,
+                self._last_executor_failure_reason,
                 run_retry_config=mods.retry_on_failure,
                 max_retries=max_retries,
             )
@@ -282,11 +304,11 @@ class GameTestOrchestrator:
             if self._audit is not None:
                 self._audit.finalize(
                     success=False,
-                    note=self._last_keywizard_failure_reason[:500],
+                    note=self._last_executor_failure_reason[:500],
                 )
             raise _FinishRun(
                 success=False,
-                last_reason=self._last_keywizard_failure_reason,
+                last_reason=self._last_executor_failure_reason,
                 max_retries=max_retries,
             )
 
@@ -335,7 +357,6 @@ class GameTestOrchestrator:
         controller = PreprocessingController(
             cache_dir=cfg.preprocessing.apk_cache_dir,
             packages_dir=PACKAGES_DIR,
-            adb_serial=cfg.adb.serial,
         )
         result = controller.run()
         if result.ok:
@@ -344,10 +365,10 @@ class GameTestOrchestrator:
             logger.error("预处理失败: %s", result.message)
         return result
 
-    def _run_keywizard_phase(self, cfg: AppConfig) -> bool:
+    def _run_executor_phase(self, cfg: AppConfig) -> bool:
         assert self._adb is not None
-        if not cfg.modules.keywizard:
-            logger.info("[模块 keywizard=false] 跳过阶段1")
+        if not cfg.modules.executor:
+            logger.info("[模块 executor=false] 跳过阶段1")
             if cfg.modules.log_monitor or cfg.modules.screen_monitor:
                 if not is_game_running(self._adb, cfg.game.package_name):
                     logger.warning(
@@ -356,34 +377,33 @@ class GameTestOrchestrator:
                     )
             return True
 
-        logger.info("阶段 1 [执行者 / 模块 keywizard]")
+        logger.info("阶段 1 [执行者 / 模块 executor]")
         if self._audit is not None:
             self._audit.log_phase(
-                PipelinePhase.KEYWIZARD.value,
-                "进入按键精灵执行者阶段",
+                PipelinePhase.EXECUTOR.value,
+                "进入 OCR+AI 执行者阶段",
                 gid=cfg.gameturbo.gid,
                 game_config_path=str(cfg.gameturbo.game_config_path or ""),
             )
-        kw_root = self._artifact_root / "keywizard" if self._artifact_root else None
-        state = run_keywizard_flow_sync(
+        ex_root = self._artifact_root / "executor" if self._artifact_root else None
+        state = run_executor_flow_sync(
             self._config_path,
-            artifact_root=kw_root,
+            artifact_root=ex_root,
             audit=self._audit,
         )
-        # 执行者阶段成功条件：仅当 AI 调用 wait_for_game_after_script_launch 后检测到进程
         if state.game_started:
             return True
 
         note = (state.note or "未知").strip()
         if state.launch_wait_invoked and not state.game_started:
-            self._last_keywizard_failure_reason = (
+            self._last_executor_failure_reason = (
                 f"等待游戏进程失败 ({cfg.game.package_name}): {note}"
             )
         elif not state.launch_wait_invoked:
-            self._last_keywizard_failure_reason = f"按键精灵阶段失败: {note}"
+            self._last_executor_failure_reason = f"执行者阶段失败: {note}"
         else:
-            self._last_keywizard_failure_reason = f"按键精灵阶段失败: {note}"
-        logger.warning("%s", self._last_keywizard_failure_reason)
+            self._last_executor_failure_reason = f"执行者阶段失败: {note}"
+        logger.warning("%s", self._last_executor_failure_reason)
         return False
 
     async def _run_observer_phase(self, cfg: AppConfig) -> str | None:
@@ -764,13 +784,15 @@ class GameTestOrchestrator:
                     source_apk=str(result.source_apk),
                     created_config=result.created_config,
                 )
-            deploy_result = run_deploy(
-                result.gid,
-                serial=cfg.adb.serial,
+            deploy_result = run_deploy_with_ai_retry_sync(
+                cfg,
+                self._config_path,
+                gid=result.gid,
+                game_config_path=result.game_config_path,
                 artifact_root=self._artifact_root,
-                timeout_s=cfg.gameturbo.deploy_timeout_s,
+                audit=self._audit,
+                phase=PipelinePhase.INIT.value,
             )
-            update_settings_yaml_from_apk(self._config_path, output_apk)
             if self._audit is not None:
                 self._audit.log_phase(
                     PipelinePhase.INIT.value,

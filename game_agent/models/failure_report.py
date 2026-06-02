@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class AttemptFailureInsight(BaseModel):
     attempt: int = Field(..., description="第几次尝试，从 1 开始")
-    failure_stage: str = Field("", description="init / keywizard / observer / modify / unknown")
+    failure_stage: str = Field("", description="init / executor / observer / modify / unknown")
     immediate_trigger: str = Field("", description="编排器记录的即时失败原因")
     log_highlights: list[str] = Field(default_factory=list, description="GameTurbo 日志关键行")
     screen_summary: str = Field("", description="画面/OCR/多模态观察摘要")
@@ -142,7 +142,7 @@ class AttemptRoundDiagnosis(BaseModel):
     """单轮失败时的 AI 诊断（写入 artifacts/retry_*/attempt_failure_report.md）。"""
 
     round_summary: str = Field("", description="本轮 2-3 句结论")
-    failure_stage: str = Field("", description="init / keywizard / observer / modify / unknown")
+    failure_stage: str = Field("", description="init / executor / observer / modify / unknown")
     immediate_verdict: str = Field("", description="本轮最可能原因归类")
     confidence: Literal["high", "medium", "low"] = "medium"
     log_highlights: list[str] = Field(default_factory=list, description="3-8 条关键日志原文")

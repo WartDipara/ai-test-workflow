@@ -1,5 +1,5 @@
 """
-预处理阶段：APK ABI 剥离 + 按键精灵脚本推送。
+预处理阶段：APK ABI 剥离。
 
 本模块在 retry 循环之前执行一次，不参与重试。
 
@@ -7,14 +7,12 @@
 1. 从 apk_cache/ 找到原始 APK
 2. 检查 lib/ 目录，直接移除非 arm64-v8a / armeabi-v7a 的 ABI 目录条目
 3. 将处理后的 APK 移动到 packages/ 目录
-4. 推送按键精灵脚本到设备
 """
 
 from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,12 +24,6 @@ logger = logging.getLogger(__name__)
 # GameTurbo 仅支持这两个 ARM 框架
 ALLOWED_ABIS = frozenset({"arm64-v8a", "armeabi-v7a"})
 
-# 按键精灵推送目标路径
-_MOBILEANJIAN_COMMANDLIB = "/sdcard/MobileAnJian/commandLib/"
-_MOBILEANJIAN_PLUGIN = "/sdcard/MobileAnJian/Plugin/"
-_MOBILEANJIAN_SCRIPT = "/sdcard/MobileAnJian/Script/"
-
-
 @dataclass(slots=True)
 class PreprocessResult:
     """预处理阶段的结果。"""
@@ -42,46 +34,29 @@ class PreprocessResult:
     processed_apk: Path | None = None
     abis_removed: list[str] = field(default_factory=list)
     abis_kept: list[str] = field(default_factory=list)
-    scripts_pushed: int = 0
 
 
 class Preprocessor:
-    """
-    APK 预处理 + 脚本推送。
-
-    设计目标：整个任务生命周期仅执行一次，运行于 retry 循环之前。
-    """
+    """APK 预处理：ABI 剥离并移动至 packages（任务开始前执行一次）。"""
 
     def __init__(
         self,
         cache_dir: Path | None = None,
         packages_dir: Path | None = None,
-        adb_serial: str | None = None,
     ) -> None:
         from game_agent.utils.gameturbo_bootstrap import PACKAGES_DIR
 
         self._cache_dir = Path(cache_dir) if cache_dir else APK_CACHE_DIR
         self._packages_dir = Path(packages_dir) if packages_dir else PACKAGES_DIR
-        self._adb_serial = adb_serial
 
-    # ------------------------------------------------------------------
-    # 公共入口
-    # ------------------------------------------------------------------
-
-    def run(
-        self,
-        apk_path: Path | None = None,
-        script_dir: Path | None = None,
-    ) -> PreprocessResult:
+    def run(self, apk_path: Path | None = None) -> PreprocessResult:
         """
-        执行 ABI 剥离 + 移动至 packages + 推送脚本。
+        执行 ABI 剥离 + 移动至 packages。
 
         Parameters
         ----------
         apk_path : Path | None
             待处理的 APK 路径。为 None 时自动从 cache_dir 中查找。
-        script_dir : Path | None
-            按键精灵脚本目录。为 None 时不推送脚本。
 
         Returns
         -------
@@ -119,22 +94,15 @@ class Preprocessor:
             source_apk.unlink()
             logger.info("已清理 apk_cache 中的原始 APK: %s", source_apk.name)
 
-        # 4. 推送脚本
-        scripts_pushed = 0
-        if script_dir and script_dir.is_dir():
-            scripts_pushed = self._push_scripts(script_dir)
-
         return PreprocessResult(
             ok=True,
             message=(
                 f"预处理完成: {source_apk.name} → {final_apk.name}, "
-                f"保留 ABI: {sorted(ALLOWED_ABIS)}, "
-                f"推送脚本: {scripts_pushed} 个"
+                f"保留 ABI: {sorted(ALLOWED_ABIS)}"
             ),
             source_apk=source_apk,
             processed_apk=final_apk,
             abis_kept=sorted(ALLOWED_ABIS),
-            scripts_pushed=scripts_pushed,
         )
 
     # ------------------------------------------------------------------
@@ -274,95 +242,3 @@ class Preprocessor:
         except OSError as e:
             logger.error("移动 APK 失败: %s → %s: %s", source, target, e)
             return None
-
-    # ------------------------------------------------------------------
-    # Step 4: 推送按键精灵脚本
-    # ------------------------------------------------------------------
-
-    def _push_scripts(self, script_dir: Path) -> int:
-        """
-        将脚本目录下的文件推送到设备上的按键精灵对应路径。
-
-        .mql  → commandLib
-        .lua / .luae / .info / .html → Plugin
-        .mqb  → 解压后扁平推送到 Script
-        """
-        if not script_dir.is_dir():
-            logger.warning("脚本目录不存在: %s", script_dir)
-            return 0
-
-        pushed = 0
-        for f in sorted(script_dir.iterdir()):
-            if not f.is_file():
-                continue
-            name = f.name
-            if name.endswith(".mql"):
-                pushed += self._adb_push_one(f, _MOBILEANJIAN_COMMANDLIB)
-            elif name.endswith((".lua", ".luae", ".info", ".html")):
-                pushed += self._adb_push_one(f, _MOBILEANJIAN_PLUGIN)
-            elif name.endswith(".mqb"):
-                pushed += self._push_mqb(f)
-            else:
-                logger.debug("跳过不支持的文件类型: %s", name)
-
-        logger.info("按键精灵脚本推送完成: %d 个文件", pushed)
-        return pushed
-
-    def _adb_push_one(self, local: Path, remote_dir: str) -> int:
-        """推送单个文件到设备指定目录。"""
-        remote = f"{remote_dir.rstrip('/')}/{local.name}"
-        if self._run_adb_push(local, remote):
-            logger.info("已推送: %s → %s", local.name, remote)
-            return 1
-        logger.warning("推送失败: %s → %s", local.name, remote)
-        return 0
-
-    def _push_mqb(self, mqb_path: Path) -> int:
-        """解压 .mqb 并扁平推送到 Script 目录。"""
-        temp_dir = mqb_path.parent / f"._{mqb_path.stem}_extracted"
-        try:
-            if not self._extract_mqb(mqb_path, temp_dir):
-                return 0
-
-            pushed = 0
-            base = _MOBILEANJIAN_SCRIPT.rstrip("/")
-            for f in sorted(temp_dir.rglob("*")):
-                if not f.is_file():
-                    continue
-                remote = f"{base}/{f.name}"
-                if self._run_adb_push(f, remote):
-                    pushed += 1
-            return pushed
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    @staticmethod
-    def _extract_mqb(mqb_path: Path, out_dir: Path) -> bool:
-        """解压 .mqb（本质是 ZIP 文件）。"""
-        out_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with zipfile.ZipFile(mqb_path, "r") as zf:
-                zf.extractall(out_dir)
-            return any(out_dir.iterdir())
-        except Exception as e:
-            logger.warning("解压 .mqb 失败: %s: %s", mqb_path.name, e)
-            return False
-
-    def _run_adb_push(self, local: Path, remote: str) -> bool:
-        """执行 adb push。"""
-        cmd = ["adb"]
-        if self._adb_serial:
-            cmd.extend(["-s", self._adb_serial])
-        cmd.extend(["push", str(local.resolve()), remote])
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            return result.returncode == 0
-        except FileNotFoundError:
-            logger.error("adb 命令未找到，请确认已加入 PATH")
-            return False

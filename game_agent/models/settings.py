@@ -60,18 +60,9 @@ class OcrSection(BaseModel):
     )
 
 
-class KeyWizardSection(BaseModel):
-    """按键精灵启动与脚本选择配置。"""
+class ExecutorSection(BaseModel):
+    """执行者阶段（OCR + AI tap）配置。"""
 
-    package_name: str = Field(
-        "com.cyjh.mobileanjian",
-        description="按键精灵包名，用于前台校验。",
-    )
-    activity: str = Field(
-        ...,
-        description="am start -n 的完整组件串；必须显式配置，禁止回退 monkey。",
-    )
-    script_display_name: str = Field(..., description="按键精灵内要加载的脚本显示名。")
     ad_initial_wait_s: float = Field(
         3.0,
         ge=0.5,
@@ -82,33 +73,14 @@ class KeyWizardSection(BaseModel):
         2.0,
         ge=0.5,
         le=10.0,
-        description="开局或 open_keywizard_app 后等待界面稳定的秒数（控制器自动启动时使用）。",
+        description="开局或 open_game_app 后等待界面稳定的秒数。",
     )
     max_foreground_retries: int = Field(
         4,
         ge=1,
         le=10,
-        description="连续非按键精灵前台轮数的提示阈值，供主脑判断是否需要重新打开 App。",
+        description="连续非游戏前台轮数的提示阈值，供主脑判断是否需要重新打开游戏。",
     )
-
-    @model_validator(mode="after")
-    def _require_explicit_component(self) -> KeyWizardSection:
-        package_name = self.package_name.strip()
-        activity = self.activity.strip()
-        if not package_name:
-            raise ValueError("keywizard.package_name 不能为空")
-        if not activity:
-            raise ValueError("keywizard.activity 必须配置，按键精灵链路禁止 monkey 启动")
-        if not self.script_display_name.strip():
-            raise ValueError("keywizard.script_display_name 不能为空")
-        if "/" not in activity:
-            activity = f"{package_name}/{activity}"
-        elif activity.startswith("/"):
-            activity = f"{package_name}{activity}"
-        self.package_name = package_name
-        self.activity = activity
-        self.script_display_name = self.script_display_name.strip()
-        return self
 
 
 class GameSection(BaseModel):
@@ -125,7 +97,7 @@ class GameSection(BaseModel):
         90.0,
         ge=15.0,
         le=600.0,
-        description="按键精灵点「启动」后 wait_for_game_after_script_launch 最长等待游戏进程秒数。",
+        description="执行者 wait_for_game_running 最长等待游戏进程秒数。",
     )
     launch_detect_poll_interval_s: float = Field(
         2.0,
@@ -223,6 +195,12 @@ class GameTurboSection(BaseModel):
         le=3600.0,
         description="GameTurbo deploy.sh 的最长等待时间。",
     )
+    deploy_max_ai_retries: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="单次 deploy 流程内失败时，AI 分析 deploy.log 后重试 deploy 的最大次数（含首次）。",
+    )
     run_outputs_dir: Path = Field(
         Path("./run_outputs"),
         description="单次任务最终产出目录根路径，子目录为 {gid}_{task_id}。",
@@ -261,9 +239,9 @@ class PreprocessingSection(BaseModel):
 class ModulesSection(BaseModel):
     """流水线模块开关；便于单独测试各子系统。默认均为 true。"""
 
-    keywizard: bool = Field(
+    executor: bool = Field(
         True,
-        description="阶段1 执行者：AI 操作按键精灵直至游戏进程启动。",
+        description="阶段1 执行者：AI + OCR + adb tap 直至游戏进程启动。",
     )
     log_monitor: bool = Field(
         True,
@@ -306,7 +284,7 @@ class AgentSection(BaseModel):
         2,
         ge=1,
         le=6,
-        description="tap_and_observe 默认连拍 OCR 次数（keywizard 阶段；越少越快）。",
+        description="tap_and_observe 默认连拍 OCR 次数（执行者阶段；越少越快）。",
     )
 
 
@@ -334,12 +312,12 @@ class AppConfig(BaseModel):
     """根配置，对应一份 YAML。"""
 
     @model_validator(mode="after")
-    def _require_game_when_keywizard(self) -> AppConfig:
-        if self.modules.keywizard:
+    def _require_game_when_executor(self) -> AppConfig:
+        if self.modules.executor:
             if not self.game.package_name.strip():
-                raise ValueError("game.package_name 不能为空（modules.keywizard 为 true 时）")
+                raise ValueError("game.package_name 不能为空（modules.executor 为 true 时）")
             if not self.game.launch_activity.strip():
-                raise ValueError("game.launch_activity 不能为空（modules.keywizard 为 true 时）")
+                raise ValueError("game.launch_activity 不能为空（modules.executor 为 true 时）")
         return self
 
     llm: LLMSection
@@ -352,7 +330,7 @@ class AppConfig(BaseModel):
     )
     adb: AdbSection = Field(default_factory=AdbSection)
     ocr: OcrSection = Field(default_factory=OcrSection)
-    keywizard: KeyWizardSection
+    executor: ExecutorSection = Field(default_factory=ExecutorSection)
     game: GameSection
     gameturbo: GameTurboSection = Field(default_factory=GameTurboSection)
     preprocessing: PreprocessingSection = Field(default_factory=PreprocessingSection)

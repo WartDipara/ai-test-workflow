@@ -1,7 +1,7 @@
 from game_agent.controllers.game_entry_controller import GameEntryDetector
-from game_agent.controllers.keywizard_controller import (
-    KeyWizardFlowController,
-    run_keywizard_flow_sync,
+from game_agent.controllers.executor_controller import (
+    ExecutorFlowController,
+    run_executor_flow_sync,
 )
 from game_agent.controllers.log_monitor_controller import LogMonitor
 from game_agent.controllers.orchestrator import GameTestOrchestrator, run_orchestrator
@@ -14,11 +14,11 @@ __all__ = [
     "AnomalyHandler",
     "GameEntryDetector",
     "GameTestOrchestrator",
-    "KeyWizardFlowController",
+    "ExecutorFlowController",
     "LogMonitor",
     "PreprocessingController",
     "ScreenMonitor",
     "SessionCoordinator",
-    "run_keywizard_flow_sync",
+    "run_executor_flow_sync",
     "run_orchestrator",
 ]

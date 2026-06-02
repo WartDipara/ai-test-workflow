@@ -23,19 +23,9 @@ ocr:
   max_image_width: 720
   warmup_on_start: false
 
-keywizard:
-  # 按键精灵包名基本固定，用于前台校验。
-  package_name: "com.cyjh.mobileanjian"
-  # 必须填写启动 Activity；可写完整组件名 pkg/.Main，也可只写 Activity 类名。
-  # 程序会规范化为 `adb shell am start -n <package>/<activity>`，禁止使用 monkey 兜底。
-  # 流水线应随按键精灵版本维护该值。
-  activity: "com.cyjh.mobileanjian.vip.activity.GuiActivity"
-  # 流水线写入当前需要加载并启动的脚本显示名。TODO 后续要自动识别脚本名，不需要人工维护
-  script_display_name: "示例脚本名"
+executor:
   ad_initial_wait_s: 3.0
-  # 开局/启动后等待界面稳定（控制器在非按键精灵前台时会自动 am start）
   post_launch_wait_s: 2.0
-  # 连续非按键精灵前台轮数的提示阈值，主脑可据此决定调用 open_keywizard_app。
   max_foreground_retries: 4
 
 game:
@@ -45,12 +35,12 @@ game:
   timeout_s: 300.0
   launch_detect_timeout_s: 90.0
   launch_detect_poll_interval_s: 2.0
-  # AI 判定「已进入游戏内」（进程已起之后；与按键精灵无关）
+  # AI 判定「已进入游戏内」（进程已起之后）
   main_screen_detect_timeout_s: 240.0
   main_screen_detect_poll_interval_s: 5.0
   main_screen_confirm_rounds: 2
   main_screen_min_confidence: 0.75
-  # 确认进入游戏后观察加速的秒数，随后 force-stop 游戏与按键精灵
+  # 确认进入游戏后观察加速的秒数，随后 force-stop 游戏
   normal_exit_observe_s: 10.0
   session_poll_interval_s: 1.5
   session_absent_threshold_s: 2.0
@@ -65,12 +55,13 @@ gameturbo:
   # 审计用：前置处理发现的原始 APK。
   source_apk: ""
   deploy_timeout_s: 900.0
+  deploy_max_ai_retries: 3   # deploy 失败后 AI 读 deploy.log 并重试（含首次）的次数
   # 单次任务最终产出：run_outputs/{gid}_{task_id}/（成功为配置文件，失败为日志包）
   run_outputs_dir: "./run_outputs"
 
 # 流水线模块开关（便于单独测试）；默认均为 true
 modules:
-  keywizard: true          # 阶段1：AI 操作按键精灵直至游戏进程启动（pidof）
+  executor: true           # 阶段1：AI + OCR + adb tap 直至游戏进程启动
   game_entry_detect: true  # 阶段2：AI 截图判定进入游戏 + 正常退出工具
   log_monitor: true        # 阶段2：GameTurbo 日志监控（与进入游戏判定并行）
   screen_monitor: true     # 阶段2：画面异常检测（与进入游戏判定并行）
@@ -80,15 +71,12 @@ modules:
 agent:
   max_rounds: 35
   artifacts_dir: "./artifacts"
-  # 按键精灵阶段固定 OCR+主脑；多模态仅由 modules.screen_monitor 使用 llm_multimodal
   persist_learned_skill_on_success: true
   tap_observe_count: 2
 
 logging:
   level: "INFO"
-  # 写入 artifacts/retry_*/audit/（思考、工具、阶段）与 process.log
   enable_run_audit: true
   enable_process_log_file: true
-  # 流水线调用追踪：记录了什么、结果、成功/失败（process.log + pipeline_trace.jsonl）
   enable_pipeline_trace: true
-  pipeline_trace_verbose: true   # 成熟后可改为 false 减少 detail 体积
+  pipeline_trace_verbose: true

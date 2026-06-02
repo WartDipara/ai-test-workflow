@@ -9,11 +9,11 @@ from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.settings import AppConfig
 from game_agent.modules.retry.analysis import AnalysisAgent
 from game_agent.services.adb_service import AdbService
-from game_agent.services.deploy_runner import run_deploy
+from game_agent.exceptions import DeployPhaseError
+from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry
 from game_agent.services.gameturbo_log import ensure_gameturbo_log_for_analysis
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.utils.apk_util import update_settings_yaml_from_apk
 from game_agent.utils.gameturbo_bootstrap import output_apk_path
 from game_agent.utils.gameturbo_config_apply import apply_gameturbo_config_patch
 from game_agent.utils.gameturbo_log_domain_extract import (
@@ -109,17 +109,21 @@ class RetryConfigHandler:
             )
 
         with trace_operation("modify", "deploy_after_patch", gid=gid) as rec:
-            deploy_result = run_deploy(
-                gid,
-                serial=self.app_config.adb.serial,
-                artifact_root=self.artifact_root,
-                timeout_s=self.app_config.gameturbo.deploy_timeout_s,
-            )
-            rec.ok(returncode=deploy_result.returncode, log_path=str(deploy_result.log_path))
+            try:
+                deploy_result = await run_deploy_with_ai_retry(
+                    self.app_config,
+                    gid=gid,
+                    game_config_path=game_config_path,
+                    settings_path=self.config_path,
+                    artifact_root=self.artifact_root,
+                    audit=self.audit,
+                    phase=PipelinePhase.MODIFY.value,
+                )
+                rec.ok(returncode=deploy_result.returncode, log_path=str(deploy_result.log_path))
+            except DeployPhaseError as e:
+                rec.fail(error=str(e)[:500])
+                raise
         apk_path = output_apk_path()
-        with trace_operation("modify", "sync_yaml_from_apk", apk=str(apk_path)) as rec:
-            ok = update_settings_yaml_from_apk(self.config_path, apk_path)
-            rec.ok(updated=ok)
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,

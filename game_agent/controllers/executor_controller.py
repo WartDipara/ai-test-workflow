@@ -10,7 +10,7 @@ from pydantic_ai.messages import ModelMessage
 from game_agent.config.loader import load_app_config
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
-from game_agent.modules.keywizard.agent import KeyWizardAgentDeps, build_keywizard_agent
+from game_agent.modules.executor.agent import ExecutorAgentDeps, build_executor_agent
 from game_agent.paths import REPO_ROOT
 from game_agent.services.adb_service import AdbService
 from game_agent.services.llm_transcript import (
@@ -27,6 +27,7 @@ from game_agent.services.session_memory import (
     save_conversation_history,
     save_session_memory,
 )
+from game_agent.services.login_flow_skill import COMPACT_STAGE_HINT
 from game_agent.services.success_skill_summarizer import write_skill_from_success_run
 from game_agent.utils.ocr_util import configure_ocr, extract_text_with_bounds, warmup_ocr
 from game_agent.views.console_view import ConsoleView
@@ -41,8 +42,8 @@ def configure_logging(level: str) -> None:
     )
 
 
-class KeyWizardFlowController:
-    """Controller：驱动多轮「截图+视觉职员+主脑工具」，启动按键精灵脚本。"""
+class ExecutorFlowController:
+    """Controller：OCR + AI 主脑 + adb tap，驱动游戏登录直至进程启动。"""
 
     def __init__(self, config_path: Path) -> None:
         self._config_path = config_path
@@ -80,7 +81,7 @@ class KeyWizardFlowController:
         artifact_root.mkdir(parents=True, exist_ok=True)
         view.banner(f"artifacts -> {artifact_root}")
         if audit is not None:
-            audit.log_phase("keywizard", f"开始执行者阶段 artifact={artifact_root.name}")
+            audit.log_phase("executor", f"开始执行者阶段 artifact={artifact_root.name}")
 
         adb = AdbService(cfg.adb.serial)
         w, h = adb.wm_size()
@@ -94,13 +95,13 @@ class KeyWizardFlowController:
             view.banner("正在预热 PaddleOCR 模型…")
             warmup_ocr()
 
-        target_pkg = cfg.keywizard.package_name
+        target_pkg = cfg.game.package_name
         game_pkg = cfg.game.package_name
         fg_pkg, fg_act = adb.current_foreground_app()
         if fg_pkg != target_pkg:
-            view.banner("开局不在按键精灵，am start 启动（无需桌面 OCR 找图标）")
-            adb.launch_game(target_pkg, cfg.keywizard.activity)
-            adb.wait_seconds(cfg.keywizard.post_launch_wait_s)
+            view.banner("开局不在游戏前台，am start 启动游戏")
+            adb.launch_game(target_pkg, cfg.game.launch_activity)
+            adb.wait_seconds(cfg.executor.post_launch_wait_s)
             fg_pkg, fg_act = adb.current_foreground_app()
             view.banner(f"启动后前台={fg_pkg or 'unknown'}/{fg_act or 'unknown'}")
 
@@ -114,7 +115,7 @@ class KeyWizardFlowController:
             logger.info("已恢复对话历史 messages=%d", len(history))
         logger.info("session_id=%s action_rounds=%d", session_id, len(session_memory.rounds))
 
-        deps = KeyWizardAgentDeps(
+        deps = ExecutorAgentDeps(
             app_config=cfg,
             adb=adb,
             run_state=run_state,
@@ -126,7 +127,7 @@ class KeyWizardFlowController:
             round_id=0,
         )
 
-        agent = build_keywizard_agent(cfg)
+        agent = build_executor_agent(cfg)
         not_foreground_rounds = 0
         last_completed_round: int | None = None
 
@@ -136,10 +137,10 @@ class KeyWizardFlowController:
                 break
             if run_state.finished:
                 break
-            view.round(r, "执行者: observe -> think -> act（仅按键精灵/启动游戏前）")
+            view.round(r, "执行者: OCR -> think -> tap（游戏进程启动前）")
             deps.round_id = r
             if audit is not None:
-                audit.log_round_start("keywizard", r, note=f"foreground 目标={target_pkg}")
+                audit.log_round_start("executor", r, note=f"foreground 目标={target_pkg}")
 
             shot_path = artifact_root / f"round_{r:03d}.png"
             try:
@@ -162,11 +163,11 @@ class KeyWizardFlowController:
                     ocr_summary = f"[OCR 识别失败或未安装 PaddleOCR] {e}"
                     logger.warning("OCR 失败: %s", e)
             else:
-                view.banner("非按键精灵前台，跳过本轮开局 OCR")
+                view.banner("非游戏前台，跳过本轮开局 OCR")
                 ocr_summary = (
-                    "[跳过 OCR] 当前不在按键精灵内，无需在桌面/启动器上做 OCR。"
+                    "[跳过 OCR] 当前不在游戏内。"
                     f"foreground={fg_line}。"
-                    "请调用 open_keywizard_app（或等待控制器已执行的 am start）后再 get_ocr_summary。"
+                    "请调用 open_game_app 后再 get_ocr_summary。"
                 )
 
             if fg_pkg != target_pkg:
@@ -177,23 +178,22 @@ class KeyWizardFlowController:
             preamble = (
                 f"第 {r + 1}/{cfg.agent.max_rounds} 轮。"
                 f"屏幕尺寸={w}x{h}。"
-                f"按键精灵包={target_pkg}。"
-                f"目标脚本显示名={cfg.keywizard.script_display_name}。"
-                f"广告初次观察建议等待={cfg.keywizard.ad_initial_wait_s:.1f}s。"
+                f"游戏包={target_pkg}。"
+                f"广告/加载初次等待建议={cfg.executor.ad_initial_wait_s:.1f}s。"
                 f"当前前台应用={fg_line}。"
-                f"连续非目标前台轮数={not_foreground_rounds}。"
-                "本阶段仅使用 OCR + 主脑工具（多模态画面分析由 modules.screen_monitor 负责）。"
+                f"连续非游戏前台轮数={not_foreground_rounds}。"
+                "本阶段：纯 AI 按通用登录阶段模型操作（无 per-game 脚本）。"
                 f"测试游戏包名={game_pkg}。"
-                f"等待游戏超时={cfg.game.launch_detect_timeout_s:.0f}s（轮询间隔 {cfg.game.launch_detect_poll_interval_s:.1f}s）。"
-                "在按键精灵里点击脚本「启动/运行」后必须调用 wait_for_game_after_script_launch；"
-                "该工具会阻塞计时并在限时内自动检测进程，成功或失败一次返回，勿用多次 wait_seconds 代替。"
-                "请自主判断当前页面阶段、风险和下一步工具调用。"
+                f"等待游戏超时={cfg.game.launch_detect_timeout_s:.0f}s（轮询 {cfg.game.launch_detect_poll_interval_s:.1f}s）。"
+                "登录链尾声必须 wait_for_game_running(summary 含阶段与最后操作)。"
+                "首轮或阶段不明时调用 read_login_flow_guide。"
+                "每轮回复须含：当前阶段 ID（splash/privacy/announcement/login/server_select/…）+ 下一步工具。"
             )
             fg_block = (
                 "=== 前台应用检测(dumpsys) ===\n"
                 f"foreground={fg_line}\n"
                 f"target_package={target_pkg}\n"
-                f"target_activity={cfg.keywizard.activity}\n"
+                f"target_activity={cfg.game.launch_activity}\n"
             )
             memory_block = (
                 "=== 已执行操作记录（系统自动）===\n"
@@ -201,11 +201,17 @@ class KeyWizardFlowController:
             )
             ocr_block = (
                 f"=== 屏幕 OCR（第 {r + 1} 轮开局快照，非实时）===\n"
-                "说明：此块在调用主脑之前已生成。同轮内若已 tap/open_app/返回等，"
-                "不得以本块为准，须用 get_ocr_summary 或 tap_and_observe 返回中的 OCR。\n"
+                "说明：此块在调用主脑之前已生成。同轮内若已 tap，"
+                "须用 get_ocr_summary 或 tap_and_observe 返回中的 OCR。\n"
                 + ocr_summary[:8000]
             )
-            user_parts: list[str] = [preamble, memory_block, fg_block, ocr_block]
+            user_parts: list[str] = [
+                preamble,
+                COMPACT_STAGE_HINT,
+                memory_block,
+                fg_block,
+                ocr_block,
+            ]
 
             view.llm_user_bundle(r, format_user_parts_for_console(user_parts))
 
@@ -219,26 +225,7 @@ class KeyWizardFlowController:
                 if "status_code: 401" in err_text or "AuthenticationError" in err_text:
                     err_text = (
                         "主脑 LLM 请求认证失败（401）。请检查 config/settings.yaml 中 "
-                        "llm.base_url、llm.api_key、llm.model_name 是否匹配且有效；"
-                        f"原始错误: {err_text}"
-                    )
-                elif "status_code: 400" in err_text and "model names are" in err_text:
-                    err_text = (
-                        "主脑 LLM 返回 400：model_name 不被 API 接受。"
-                        "请将 config/settings.yaml 中 llm.model_name 改为 "
-                        "deepseek-v4-pro 或 deepseek-v4-flash（勿带 [1m] 等后缀）；"
-                        f"原始错误: {err_text}"
-                    )
-                elif (
-                    "status_code: 400" in err_text
-                    and "UnsupportedParamsError" in err_text
-                    and ("reasoning_effort" in err_text or "thinking" in err_text)
-                ):
-                    err_text = (
-                        "主脑 LLM 返回 400：网关不支持 DeepSeek 思考模式参数"
-                        "（reasoning_effort / thinking）。"
-                        "请在 config/settings.yaml 的 llm 段设置 "
-                        "deepseek_litellm_compat: true 后重试；"
+                        "llm.base_url、llm.api_key、llm.model_name；"
                         f"原始错误: {err_text}"
                     )
                 run_state.note = err_text[:4000]
@@ -248,7 +235,7 @@ class KeyWizardFlowController:
             history.extend(new_msgs)
             out = result.output or ""
             if audit is not None:
-                audit.log_transcript_bundle("keywizard", r, user_parts, new_msgs)
+                audit.log_transcript_bundle("executor", r, user_parts, new_msgs)
             session_memory.append_round(round_id=r, new_messages=new_msgs)
             save_session_memory(mem_path, session_memory)
             save_conversation_history(hist_path, history)
@@ -260,8 +247,6 @@ class KeyWizardFlowController:
                 else str(raw_json)
             )
             view.llm_raw_messages_json(r, raw_json_text)
-            has_reasoning = '"reasoning_content"' in raw_json_text
-            view.banner(f"round={r} has_reasoning_content={has_reasoning}")
             raw_path = artifact_root / f"round_{r:03d}_new_messages.json"
             raw_path.write_text(raw_json_text, encoding="utf-8")
             view.model_output(out)
@@ -269,7 +254,7 @@ class KeyWizardFlowController:
 
             if run_state.game_started:
                 if audit is not None:
-                    audit.log_phase("keywizard", f"游戏进程已启动，结束执行者 round={r}")
+                    audit.log_phase("executor", f"游戏进程已启动，结束执行者 round={r}")
                 break
             if run_state.finished:
                 break
@@ -279,12 +264,12 @@ class KeyWizardFlowController:
             run_state.success = False
             if not run_state.launch_wait_invoked:
                 run_state.note = (
-                    "执行者阶段结束：未调用 wait_for_game_after_script_launch，"
+                    "执行者阶段结束：未调用 wait_for_game_running，"
                     "尚未启动「等待游戏进程」定时检测"
                 )
             elif not run_state.note:
                 run_state.note = (
-                    f"执行者阶段结束：{cfg.agent.max_rounds} 轮内未完成游戏启动流程 ({game_pkg})"
+                    f"执行者阶段结束：{cfg.agent.max_rounds} 轮内未完成游戏启动 ({game_pkg})"
                 )
 
         view.banner(
@@ -292,15 +277,19 @@ class KeyWizardFlowController:
         )
         if audit is not None:
             audit.log_phase(
-                "keywizard",
+                "executor",
                 f"执行者结束 success={run_state.success} game_started={run_state.game_started}",
                 note=run_state.note[:500],
             )
-        if run_state.success and last_completed_round is not None and cfg.agent.persist_learned_skill_on_success:
+        if (
+            run_state.success
+            and last_completed_round is not None
+            and cfg.agent.persist_learned_skill_on_success
+        ):
             skill_path = await write_skill_from_success_run(
                 cfg,
                 history,
-                script_display_name=cfg.keywizard.script_display_name,
+                task_label=game_pkg,
                 final_summary=run_state.note or "",
                 rounds_used=last_completed_round + 1,
                 artifact_run_dir=artifact_root.name,
@@ -311,18 +300,16 @@ class KeyWizardFlowController:
                 except ValueError:
                     rel = skill_path
                 view.banner(f"已生成已学技能: {rel}")
-            else:
-                view.banner("已学技能生成跳过（LLM 失败或过短）")
 
         return run_state
 
 
-def run_keywizard_flow_sync(
+def run_executor_flow_sync(
     config_path: Path,
     *,
     artifact_root: Path | None = None,
     audit: RunAuditLogger | None = None,
 ) -> RunState:
-    ctrl = KeyWizardFlowController(config_path)
+    ctrl = ExecutorFlowController(config_path)
     ctrl.load_settings()
     return asyncio.run(ctrl.run_async(artifact_root=artifact_root, audit=audit))
