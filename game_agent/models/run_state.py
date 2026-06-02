@@ -14,3 +14,6 @@ class RunState:
     round_hint: str = field(default="", repr=False)
     game_started: bool = False
     launch_wait_invoked: bool = False
+    in_game_confirmed: bool = False
+    in_game_confirm_streak: int = 0
+    package_install_confirmed: bool = False

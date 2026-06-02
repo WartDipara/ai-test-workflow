@@ -9,6 +9,7 @@ from pathlib import Path
 
 from game_agent.models.settings import AppConfig
 from game_agent.modules.observer_session.state import ObserverSessionState
+from game_agent.modules.run_context import AttemptContext
 from game_agent.services.adb_service import AdbService
 from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.utils.ocr_util import extract_text_with_bounds
@@ -44,6 +45,7 @@ class ScreenMonitor:
     artifact_root: Path
     session_state: ObserverSessionState | None = None
     audit: RunAuditLogger | None = None
+    attempt_context: AttemptContext | None = None
     shot_interval_s: float = 10.0
     download_stuck_rounds: int = 10
 
@@ -146,6 +148,11 @@ class ScreenMonitor:
                         },
                     )
 
+                stage = state.get("stage", "unknown")
+                progress = state.get("progress", "")
+                if self.attempt_context is not None:
+                    self.attempt_context.set_ui_observation(str(stage), str(progress))
+
                 if state.get("has_anomaly"):
                     reason = state.get("anomaly_reason", "未知画面异常")
                     if _is_network_anomaly(reason):
@@ -174,24 +181,17 @@ class ScreenMonitor:
                                 round_id=total_rounds,
                             )
 
-                stage = state.get("stage", "unknown")
-                progress = state.get("progress", "")
                 if stage == "resource_download" and progress:
                     if progress == last_progress:
                         stuck_count += 1
                         if session is not None:
                             session.screen_stuck_count = stuck_count
                         logger.info(
-                            "[ScreenMonitor] 下载进度未变 (%s) | %d/%d",
+                            "[ScreenMonitor] download progress unchanged (%s) %d/%d (audit only)",
                             progress,
                             stuck_count,
                             self.download_stuck_rounds,
                         )
-                        if stuck_count >= self.download_stuck_rounds:
-                            return (
-                                "Screen anomaly detected: "
-                                f"Resource download stuck at {progress}"
-                            )
                     else:
                         last_progress = progress
                         stuck_count = 0

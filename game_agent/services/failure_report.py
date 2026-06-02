@@ -103,9 +103,13 @@ def _guess_failure_stage(reason: str) -> str:
     lower = reason.lower()
     if "前置处理" in reason or "deploy" in lower or "bootstrap" in lower:
         return "init"
-    if "执行者" in reason or "executor" in lower or "游戏进程" in reason:
+    if "log anomaly" in lower or "tunnel closed" in lower or "channel closed" in lower:
+        return "observer"
+    if "screen anomaly" in lower or "network" in lower and "popup" in lower:
+        return "observer"
+    if "执行者" in reason or "executor" in lower or "in-game" in lower or "check_in_game" in lower:
         return "executor"
-    if "screen" in lower or "画面" in reason or "observer" in lower or "log anomaly" in lower:
+    if "screen" in lower or "画面" in reason or "observer" in lower or "parallel game" in lower:
         return "observer"
     if "retry" in lower or "配置" in reason:
         return "modify"

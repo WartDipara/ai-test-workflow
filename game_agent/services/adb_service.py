@@ -278,6 +278,17 @@ class AdbService:
         logger.info("foreground 解析失败：所有 dumpsys 方案均未提取到组件")
         return None, None
 
+    def is_package_installed(self, package: str) -> bool:
+        """设备上是否已安装指定包（pm path）。"""
+        pkg = (package or "").strip()
+        if not pkg or not _PACKAGE_RE.match(pkg):
+            return False
+        r = self._run(["shell", "pm", "path", pkg], timeout=20.0)
+        if r.returncode != 0:
+            return False
+        out = (r.stdout or "").strip()
+        return out.startswith("package:") or "package:" in out
+
     def is_package_running(self, package: str) -> bool:
         """设备上是否存在指定包名的运行中进程（用于判定游戏是否已启动）。"""
         pkg = (package or "").strip()

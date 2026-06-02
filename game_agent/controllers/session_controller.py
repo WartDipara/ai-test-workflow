@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from game_agent.models.settings import AppConfig
 from game_agent.modules.observer_session.state import ObserverSessionState
+from game_agent.modules.run_context import AttemptContext
 from game_agent.services.adb_service import AdbService
 from game_agent.services.game_launch import get_package_pids
 from game_agent.services.gameturbo_log import (
@@ -34,6 +35,7 @@ class SessionCoordinator:
     session_state: ObserverSessionState
     audit: RunAuditLogger | None = None
     log_monitor: LogMonitor | None = None
+    attempt_context: AttemptContext | None = None
 
     async def watch(self, stop_event: asyncio.Event) -> str | None:
         """
@@ -112,6 +114,8 @@ class SessionCoordinator:
         cfg = self.app_config
         idx_before = self.session_state.session_index
         self.session_state.reset_for_new_session(reason=reason)
+        if self.attempt_context is not None:
+            self.attempt_context.request_reset_in_game_streak()
 
         logger.warning(
             "[SessionCoordinator] 会话重启 #%d | %s",

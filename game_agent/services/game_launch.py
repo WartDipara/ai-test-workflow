@@ -32,14 +32,18 @@ def get_package_pids(adb: AdbService, game_package: str) -> list[str]:
     return []
 
 
-def mark_game_started(
+def mark_game_process_detected(
     run_state: RunState,
     *,
     game_package: str,
     reason: str,
 ) -> None:
+    """Milestone only: process is up; executor continues until check_in_game confirms."""
     run_state.game_started = True
-    run_state.finished = True
-    run_state.success = True
-    run_state.note = reason[:2000]
-    logger.info("游戏进程已启动 (%s): %s", game_package, reason)
+    if not run_state.note:
+        run_state.note = reason[:2000]
+    logger.info("Game process detected (%s): %s", game_package, reason)
+
+
+# Backward-compatible alias
+mark_game_started = mark_game_process_detected

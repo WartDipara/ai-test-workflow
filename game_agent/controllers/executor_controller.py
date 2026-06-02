@@ -11,6 +11,7 @@ from game_agent.config.loader import load_app_config
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
 from game_agent.modules.executor.agent import ExecutorAgentDeps, build_executor_agent
+from game_agent.modules.run_context import AttemptContext
 from game_agent.paths import REPO_ROOT
 from game_agent.services.adb_service import AdbService
 from game_agent.services.llm_transcript import (
@@ -69,6 +70,7 @@ class ExecutorFlowController:
         *,
         artifact_root: Path | None = None,
         audit: RunAuditLogger | None = None,
+        attempt_context: AttemptContext | None = None,
     ) -> RunState:
         if self._app_config is None:
             raise RuntimeError("请先调用 load_settings()")
@@ -80,6 +82,8 @@ class ExecutorFlowController:
             artifact_root = (cfg.agent.artifacts_dir / f"run_{stamp}").resolve()
         artifact_root = artifact_root.resolve()
         artifact_root.mkdir(parents=True, exist_ok=True)
+        executor_art = artifact_root / "executor"
+        executor_art.mkdir(parents=True, exist_ok=True)
         view.banner(f"artifacts -> {artifact_root}")
         if audit is not None:
             audit.log_phase("executor", f"开始执行者阶段 artifact={artifact_root.name}")
@@ -98,18 +102,11 @@ class ExecutorFlowController:
 
         target_pkg = cfg.game.package_name
         game_pkg = cfg.game.package_name
-        fg_pkg, fg_act = adb.current_foreground_app()
-        if fg_pkg != target_pkg:
-            view.banner("开局不在游戏前台，am start 启动游戏")
-            adb.launch_game(target_pkg, cfg.game.launch_activity)
-            adb.wait_seconds(cfg.executor.post_launch_wait_s)
-            fg_pkg, fg_act = adb.current_foreground_app()
-            view.banner(f"启动后前台={fg_pkg or 'unknown'}/{fg_act or 'unknown'}")
 
         run_state = RunState()
         session_id = artifact_root.name
-        mem_path = artifact_root / MEMORY_FILE
-        hist_path = artifact_root / HISTORY_FILE
+        mem_path = executor_art / MEMORY_FILE
+        hist_path = executor_art / HISTORY_FILE
         session_memory = load_session_memory(mem_path) or new_session_memory(session_id)
         history: list[ModelMessage] = load_conversation_history(hist_path) or []
         if history:
@@ -120,13 +117,14 @@ class ExecutorFlowController:
             app_config=cfg,
             adb=adb,
             run_state=run_state,
-            artifact_root=artifact_root,
+            artifact_root=executor_art,
             view=view,
             screen_width=w,
             screen_height=h,
             audit=audit,
             round_id=0,
             settings_path=self._config_path.resolve(),
+            attempt_context=attempt_context,
         )
 
         agent = build_executor_agent(cfg)
@@ -134,17 +132,27 @@ class ExecutorFlowController:
         last_completed_round: int | None = None
 
         for r in range(cfg.agent.max_rounds):
-            if run_state.game_started:
-                view.banner(f"游戏进程 {game_pkg} 已启动，结束执行者轮次")
+            if attempt_context is not None:
+                if attempt_context.consume_reset_in_game_streak():
+                    run_state.in_game_confirm_streak = 0
+                if attempt_context.should_stop_executor():
+                    reason = attempt_context.get_fatal_reason() or "monitor stop"
+                    run_state.finished = True
+                    run_state.success = False
+                    run_state.note = reason[:2000]
+                    view.banner(f"执行者因并行监控中止: {reason[:120]}")
+                    break
+            if run_state.in_game_confirmed:
+                view.banner("已进入游戏（check_in_game 确认），结束执行者")
                 break
             if run_state.finished:
                 break
-            view.round(r, "执行者: OCR -> think -> tap（游戏进程启动前）")
+            view.round(r, "执行者: OCR -> think -> tap / check_in_game")
             deps.round_id = r
             if audit is not None:
                 audit.log_round_start("executor", r, note=f"foreground 目标={target_pkg}")
 
-            shot_path = artifact_root / f"round_{r:03d}.png"
+            shot_path = executor_art / f"round_{r:03d}.png"
             try:
                 adb.screencap_png(shot_path)
             except Exception as e:
@@ -192,11 +200,31 @@ class ExecutorFlowController:
                 f"Target package={game_pkg}. "
                 f"Launch detect timeout={cfg.game.launch_detect_timeout_s:.0f}s "
                 f"(poll {cfg.game.launch_detect_poll_interval_s:.1f}s). "
-                "End login chain with wait_for_game_running(summary: stage + last action). "
+                "Use wait_for_game_running when process may be absent; "
+                "finish with check_in_game after login/server/download. "
                 "Call read_login_flow_guide on round 1 or unclear stage. "
                 "Each reply: current stage ID + next tools. "
                 f"Credentials: {cred_hint}"
             )
+            if r == 0 and not run_state.package_install_confirmed:
+                preamble += (
+                    " Post-deploy: call wait_for_package_installed ONCE first "
+                    "(internal poll until pm path OK; tool return continues you — "
+                    "do not recheck install). Then open_game_app."
+                )
+            if attempt_context is not None:
+                observer_hint = attempt_context.format_observer_hint()
+                fatal = attempt_context.get_fatal_reason()
+                if fatal:
+                    preamble += f" FATAL from monitor: {fatal[:200]}."
+                else:
+                    preamble += f" {observer_hint}."
+            if run_state.game_started:
+                preamble += (
+                    f" Process up (milestone). in_game streak="
+                    f"{run_state.in_game_confirm_streak}/"
+                    f"{cfg.game.main_screen_confirm_rounds}."
+                )
             fg_block = (
                 "=== Foreground (dumpsys) ===\n"
                 f"foreground={fg_line}\n"
@@ -255,29 +283,25 @@ class ExecutorFlowController:
                 else str(raw_json)
             )
             view.llm_raw_messages_json(r, raw_json_text)
-            raw_path = artifact_root / f"round_{r:03d}_new_messages.json"
+            raw_path = executor_art / f"round_{r:03d}_new_messages.json"
             raw_path.write_text(raw_json_text, encoding="utf-8")
             view.model_output(out)
             last_completed_round = r
 
-            if run_state.game_started:
+            if run_state.in_game_confirmed:
                 if audit is not None:
-                    audit.log_phase("executor", f"游戏进程已启动，结束执行者 round={r}")
+                    audit.log_phase("executor", f"in_game confirmed round={r}")
                 break
             if run_state.finished:
                 break
 
-        if not run_state.game_started and not run_state.finished:
+        if not run_state.in_game_confirmed and not run_state.finished:
             run_state.finished = True
             run_state.success = False
-            if not run_state.launch_wait_invoked:
+            if not run_state.note:
                 run_state.note = (
-                    "执行者阶段结束：未调用 wait_for_game_running，"
-                    "尚未启动「等待游戏进程」定时检测"
-                )
-            elif not run_state.note:
-                run_state.note = (
-                    f"执行者阶段结束：{cfg.agent.max_rounds} 轮内未完成游戏启动 ({game_pkg})"
+                    f"Executor ended: {cfg.agent.max_rounds} rounds without "
+                    f"check_in_game confirmation ({game_pkg})"
                 )
 
         view.banner(
@@ -286,11 +310,12 @@ class ExecutorFlowController:
         if audit is not None:
             audit.log_phase(
                 "executor",
-                f"执行者结束 success={run_state.success} game_started={run_state.game_started}",
+                f"执行者结束 success={run_state.success} "
+                f"in_game={run_state.in_game_confirmed}",
                 note=run_state.note[:500],
             )
         if (
-            run_state.success
+            run_state.in_game_confirmed
             and last_completed_round is not None
             and cfg.agent.persist_learned_skill_on_success
         ):
@@ -317,7 +342,14 @@ def run_executor_flow_sync(
     *,
     artifact_root: Path | None = None,
     audit: RunAuditLogger | None = None,
+    attempt_context: AttemptContext | None = None,
 ) -> RunState:
     ctrl = ExecutorFlowController(config_path)
     ctrl.load_settings()
-    return asyncio.run(ctrl.run_async(artifact_root=artifact_root, audit=audit))
+    return asyncio.run(
+        ctrl.run_async(
+            artifact_root=artifact_root,
+            audit=audit,
+            attempt_context=attempt_context,
+        ),
+    )

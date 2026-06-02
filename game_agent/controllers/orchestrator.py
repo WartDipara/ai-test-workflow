@@ -7,7 +7,6 @@ from datetime import datetime
 from pathlib import Path
 
 from game_agent.config.loader import load_app_config
-from game_agent.controllers.game_entry_controller import GameEntryDetector
 from game_agent.controllers.executor_controller import run_executor_flow_sync
 from game_agent.exceptions import DeployPhaseError
 from game_agent.controllers.log_monitor_controller import LogMonitor
@@ -18,6 +17,9 @@ from game_agent.controllers.session_controller import SessionCoordinator
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.settings import AppConfig, ModulesSection
 from game_agent.modules.observer_session import ObserverSessionState
+from game_agent.modules.run_context import AttemptContext
+from game_agent.services.gameturbo_log import bootstrap_gameturbo_log
+from game_agent.services.normal_exit import NormalExitState, confirm_in_game_normal_exit
 from game_agent.paths import GAMETURBO_MERGED_CONFIG_PATH
 from game_agent.services.adb_service import AdbService
 from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
@@ -27,7 +29,6 @@ from game_agent.services.failure_report import (
 )
 from game_agent.services.game_launch import is_game_running
 from game_agent.services.gameturbo_log import finalize_gameturbo_log
-from game_agent.services.normal_exit import NormalExitState
 from game_agent.services.pipeline_trace import (
     activate_pipeline_trace,
     deactivate_pipeline_trace,
@@ -108,10 +109,9 @@ class GameTestOrchestrator:
     def _log_module_flags(self, cfg: AppConfig) -> None:
         m = cfg.modules
         logger.info(
-            "模块开关: executor=%s game_entry_detect=%s log_monitor=%s "
-            "screen_monitor=%s retry=%s max_retries=%s",
+            "模块开关: executor=%s log_monitor=%s screen_monitor=%s "
+            "retry=%s max_retries=%s",
             m.executor,
-            m.game_entry_detect,
             m.log_monitor,
             m.screen_monitor,
             m.retry_on_failure,
@@ -291,10 +291,13 @@ class GameTestOrchestrator:
         assert self._adb is not None
         self._sync_task_gid_from_config(cfg)
 
-        if not self._run_executor_phase(cfg):
+        parallel_err = asyncio.run(self._run_parallel_game_phase(cfg))
+        if parallel_err:
+            logger.warning("并行游戏阶段失败: %s", parallel_err)
+            self._last_executor_failure_reason = parallel_err
             self._handle_failure_sync(
                 retry,
-                self._last_executor_failure_reason,
+                parallel_err,
                 run_retry_config=mods.retry_on_failure,
                 max_retries=max_retries,
             )
@@ -302,42 +305,16 @@ class GameTestOrchestrator:
                 self._cleanup_packages_after_attempt()
                 return
             if self._audit is not None:
-                self._audit.finalize(
-                    success=False,
-                    note=self._last_executor_failure_reason[:500],
-                )
+                self._audit.finalize(success=False, note=parallel_err[:500])
             raise _FinishRun(
                 success=False,
-                last_reason=self._last_executor_failure_reason,
+                last_reason=parallel_err,
                 max_retries=max_retries,
             )
 
-        if mods.log_monitor or mods.screen_monitor or mods.game_entry_detect:
-            anomaly = asyncio.run(self._run_observer_phase(cfg))
-            if anomaly:
-                logger.warning("观察者检测到异常: %s", anomaly)
-                self._handle_failure_sync(
-                    retry,
-                    anomaly,
-                    run_retry_config=mods.retry_on_failure,
-                    max_retries=max_retries,
-                )
-                if mods.retry_on_failure:
-                    self._cleanup_packages_after_attempt()
-                    return
-                if self._audit is not None:
-                    self._audit.finalize(success=False, note=anomaly[:500])
-                raise _FinishRun(
-                    success=False,
-                    last_reason=anomaly,
-                    max_retries=max_retries,
-                )
-        else:
-            logger.info("观察者模块均已关闭，跳过阶段2")
-
         self._archive_gameturbo_log()
         if self._audit is not None:
-            self._audit.finalize(success=True, note="观察者阶段通过")
+            self._audit.finalize(success=True, note="parallel game phase passed")
         logger.info("=== 测试全部通过 ===")
         raise _FinishRun(
             success=True,
@@ -365,80 +342,46 @@ class GameTestOrchestrator:
             logger.error("预处理失败: %s", result.message)
         return result
 
-    def _run_executor_phase(self, cfg: AppConfig) -> bool:
-        assert self._adb is not None
-        if not cfg.modules.executor:
-            logger.info("[模块 executor=false] 跳过阶段1")
-            if cfg.modules.log_monitor or cfg.modules.screen_monitor:
-                if not is_game_running(self._adb, cfg.game.package_name):
-                    logger.warning(
-                        "游戏进程未运行 (%s)，观察者模块可能无法正常工作",
-                        cfg.game.package_name,
-                    )
-            return True
-
-        logger.info("阶段 1 [执行者 / 模块 executor]")
-        if self._audit is not None:
-            self._audit.log_phase(
-                PipelinePhase.EXECUTOR.value,
-                "进入 OCR+AI 执行者阶段",
-                gid=cfg.gameturbo.gid,
-                game_config_path=str(cfg.gameturbo.game_config_path or ""),
-            )
-        ex_root = self._artifact_root / "executor" if self._artifact_root else None
-        state = run_executor_flow_sync(
-            self._config_path,
-            artifact_root=ex_root,
-            audit=self._audit,
-        )
-        if state.game_started:
-            return True
-
-        note = (state.note or "未知").strip()
-        if state.launch_wait_invoked and not state.game_started:
-            self._last_executor_failure_reason = (
-                f"等待游戏进程失败 ({cfg.game.package_name}): {note}"
-            )
-        elif not state.launch_wait_invoked:
-            self._last_executor_failure_reason = f"执行者阶段失败: {note}"
-        else:
-            self._last_executor_failure_reason = f"执行者阶段失败: {note}"
-        logger.warning("%s", self._last_executor_failure_reason)
-        return False
-
-    async def _run_observer_phase(self, cfg: AppConfig) -> str | None:
+    async def _run_parallel_game_phase(self, cfg: AppConfig) -> str | None:
+        """
+        Executor (login → in-game) runs in parallel with Log/Screen monitors from game launch.
+        Returns None on success, else failure reason.
+        """
         assert self._adb is not None
         assert self._artifact_root is not None
 
-        needs_vision = (
-            cfg.modules.screen_monitor or cfg.modules.game_entry_detect
-        ) and not cfg.observer.skip_vision_probe
-        if needs_vision:
+        mods = cfg.modules
+        monitors_on = mods.log_monitor or mods.screen_monitor
+        if not mods.executor and not monitors_on:
+            logger.info("[modules] executor and monitors off, skip game phase")
+            return None
+
+        if mods.screen_monitor and not cfg.observer.skip_vision_probe:
             vision_err = await probe_startup_for_llm(cfg.llm, cfg.llm_multimodal)
             if vision_err:
                 return f"Multimodal probe failed: {vision_err}"
 
-        logger.info(
-            "阶段 2 [观察者]: game_entry_detect=%s log_monitor=%s screen_monitor=%s",
-            cfg.modules.game_entry_detect,
-            cfg.modules.log_monitor,
-            cfg.modules.screen_monitor,
-        )
+        attempt_ctx = AttemptContext()
+        session_state = ObserverSessionState()
+        exit_state = NormalExitState()
+        stop_event = attempt_ctx.stop_all
+
         if self._audit is not None:
             self._audit.log_phase(
                 PipelinePhase.OBSERVER.value,
-                "进入观察者阶段",
-                gid=cfg.gameturbo.gid,
-                game_config_path=str(cfg.gameturbo.game_config_path or ""),
+                "parallel game phase start",
+                executor=mods.executor,
+                log_monitor=mods.log_monitor,
+                screen_monitor=mods.screen_monitor,
             )
 
-        stop_event = asyncio.Event()
-        exit_state = NormalExitState()
-        session_state = ObserverSessionState()
+        if mods.log_monitor:
+            bootstrap_gameturbo_log(self._adb, self._artifact_root)
+
         monitor_tasks: list[asyncio.Task[str | None]] = []
         log_mon: LogMonitor | None = None
 
-        if cfg.modules.log_monitor:
+        if mods.log_monitor:
             log_mon = LogMonitor(
                 self._adb,
                 cfg,
@@ -446,21 +389,32 @@ class GameTestOrchestrator:
                 session_state=session_state,
                 audit=self._audit,
             )
-            monitor_tasks.append(
-                asyncio.create_task(log_mon.run_until_anomaly(stop_event)),
-            )
 
-        if cfg.modules.screen_monitor:
+            async def _log_task() -> str | None:
+                result = await log_mon.run_until_anomaly(stop_event)
+                if result:
+                    attempt_ctx.signal_fatal(result)
+                return result
+
+            monitor_tasks.append(asyncio.create_task(_log_task(), name="log_monitor"))
+
+        if mods.screen_monitor:
             screen_mon = ScreenMonitor(
                 self._adb,
                 cfg,
                 self._artifact_root,
                 session_state=session_state,
                 audit=self._audit,
+                attempt_context=attempt_ctx,
             )
-            monitor_tasks.append(
-                asyncio.create_task(screen_mon.run_until_anomaly(stop_event)),
-            )
+
+            async def _screen_task() -> str | None:
+                result = await screen_mon.run_until_anomaly(stop_event)
+                if result:
+                    attempt_ctx.signal_fatal(result)
+                return result
+
+            monitor_tasks.append(asyncio.create_task(_screen_task(), name="screen_monitor"))
 
         session_coordinator = SessionCoordinator(
             adb=self._adb,
@@ -469,139 +423,166 @@ class GameTestOrchestrator:
             session_state=session_state,
             audit=self._audit,
             log_monitor=log_mon,
+            attempt_context=attempt_ctx,
         )
-        session_task = asyncio.create_task(session_coordinator.watch(stop_event))
+        session_task = asyncio.create_task(
+            session_coordinator.watch(stop_event),
+            name="session_coordinator",
+        )
 
-        async def _cancel_all_pending(extra: asyncio.Task | None = None) -> None:
+        executor_task: asyncio.Task | None = None
+        if mods.executor:
+            if self._audit is not None:
+                self._audit.log_phase(
+                    PipelinePhase.EXECUTOR.value,
+                    "executor thread start (parallel with monitors)",
+                )
+            executor_task = asyncio.create_task(
+                asyncio.to_thread(
+                    run_executor_flow_sync,
+                    self._config_path,
+                    artifact_root=self._artifact_root,
+                    audit=self._audit,
+                    attempt_context=attempt_ctx,
+                ),
+                name="executor",
+            )
+        elif monitors_on:
+            if not is_game_running(self._adb, cfg.game.package_name):
+                logger.warning(
+                    "executor=false but monitors on; game process not running (%s)",
+                    cfg.game.package_name,
+                )
+
+        async def _cancel_pending(extra: asyncio.Task | None = None) -> None:
             stop_event.set()
             session_task.cancel()
             for t in monitor_tasks:
                 t.cancel()
+            if executor_task is not None:
+                executor_task.cancel()
             if extra is not None:
                 extra.cancel()
             await asyncio.gather(
                 session_task,
                 *monitor_tasks,
+                *( [executor_task] if executor_task is not None else [] ),
                 return_exceptions=True,
             )
 
-        if cfg.modules.game_entry_detect:
-            if self._audit is not None:
-                self._audit.log_phase(
-                    PipelinePhase.GAME_ENTRY.value,
-                    "开始 AI 进入游戏判定与正常退出",
-                )
-            detector = GameEntryDetector(
-                adb=self._adb,
-                app_config=cfg,
-                artifact_root=self._artifact_root,
-                exit_state=exit_state,
-                session_state=session_state,
-                audit=self._audit,
-            )
-            entry_task = asyncio.create_task(
-                detector.run_until_normal_exit(stop_event),
-            )
-            pending_set: set[asyncio.Task] = {
-                *monitor_tasks,
-                entry_task,
-                session_task,
-            }
-            entry_result = None
-            while pending_set:
-                done, _ = await asyncio.wait(
-                    pending_set,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for task in done:
-                    pending_set.discard(task)
-                    if task is session_task:
-                        session_err = task.result()
-                        if session_err:
-                            await _cancel_all_pending(entry_task)
-                            return f"Session restart limit: {session_err}"
-                        continue
-                    if task is entry_task:
-                        entry_result = task.result()
-                        continue
-                    try:
-                        anomaly = task.result()
-                    except Exception as e:
-                        await _cancel_all_pending(entry_task)
-                        return f"Monitor task crashed during game entry: {e}"
-                    if anomaly:
-                        await _cancel_all_pending(entry_task)
-                        return anomaly
+        pending: set[asyncio.Task] = {session_task, *monitor_tasks}
+        if executor_task is not None:
+            pending.add(executor_task)
 
-            await _cancel_all_pending()
-
-            assert entry_result is not None
-            if not entry_result.ok:
-                return f"Game entry detect failed: {entry_result.message}"
-
-            if not exit_state.normal_exit_committed:
-                return "Game entry detect succeeded but normal exit was not committed"
-
-            logger.info(
-                "进入游戏判定通过且已正常退出: %s | 会话重启=%d",
-                entry_result.message[:300],
-                session_state.restarts_count,
-            )
-            self._observer_session_restarts = session_state.restarts_count
-            return None
-
-        if not monitor_tasks:
-            session_task.cancel()
-            await asyncio.gather(session_task, return_exceptions=True)
-            return None
-
-        pending_set = {*monitor_tasks, session_task}
-        timeout_s = cfg.game.timeout_s
-        deadline = time.monotonic() + timeout_s
+        executor_state = None
         timed_out = False
-        while pending_set and time.monotonic() < deadline:
+        phase_ok = False
+        deadline = time.monotonic() + cfg.game.timeout_s
+
+        while pending and time.monotonic() < deadline and not phase_ok:
             remaining = deadline - time.monotonic()
-            done, _ = await asyncio.wait(
-                pending_set,
+            done, pending = await asyncio.wait(
+                pending,
                 timeout=max(0.1, remaining),
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
                 timed_out = True
                 break
+
             for task in done:
-                pending_set.discard(task)
                 if task is session_task:
-                    session_err = task.result()
+                    try:
+                        session_err = task.result()
+                    except asyncio.CancelledError:
+                        continue
                     if session_err:
-                        stop_event.set()
-                        for t in pending_set:
-                            t.cancel()
-                        return f"Session restart limit: {session_err}"
+                        attempt_ctx.signal_fatal(f"Session restart limit: {session_err}")
+                        await _cancel_pending()
+                        return attempt_ctx.get_fatal_reason()
                     continue
-                try:
-                    result = task.result()
-                    if result:
+
+                if task in monitor_tasks:
+                    try:
+                        mon_err = task.result()
+                    except asyncio.CancelledError:
+                        continue
+                    if mon_err:
+                        await _cancel_pending()
+                        return attempt_ctx.get_fatal_reason() or mon_err
+                    continue
+
+                if executor_task is not None and task is executor_task:
+                    try:
+                        executor_state = task.result()
+                    except asyncio.CancelledError:
+                        continue
+                    if executor_state.in_game_confirmed:
+                        phase_ok = True
                         stop_event.set()
-                        session_task.cancel()
-                        for t in pending_set:
-                            t.cancel()
-                        return result
-                except Exception as e:
+                        await _cancel_pending()
+                        pending.clear()
+                        break
+                    if executor_state.finished and not executor_state.success:
+                        stop_event.set()
+                        await _cancel_pending()
+                        note = (executor_state.note or "executor failed").strip()
+                        return note
                     stop_event.set()
-                    session_task.cancel()
-                    for t in pending_set:
-                        t.cancel()
-                    return f"Monitor task crashed: {e}"
+                    await _cancel_pending()
+                    return (
+                        executor_state.note
+                        or "Executor stopped without in-game confirmation"
+                    )
 
-        stop_event.set()
-        session_task.cancel()
-        for task in pending_set:
-            task.cancel()
-        await asyncio.gather(*pending_set, return_exceptions=True)
+        if pending:
+            timed_out = True
+            stop_event.set()
+            await _cancel_pending()
 
-        if timed_out:
-            logger.info("观察者监控 %s 秒无异常，视为通过", timeout_s)
+        fatal = attempt_ctx.get_fatal_reason()
+        if fatal:
+            return fatal
+
+        if (
+            timed_out
+            and not phase_ok
+            and mods.executor
+            and (executor_state is None or not executor_state.in_game_confirmed)
+        ):
+            return (
+                f"Parallel game phase timeout ({cfg.game.timeout_s:.0f}s) "
+                "without in-game confirmation"
+            )
+
+        if not mods.executor:
+            if timed_out:
+                logger.info("Monitors-only phase timed out after %.0fs (ok)", cfg.game.timeout_s)
+            self._observer_session_restarts = session_state.restarts_count
+            return None
+
+        if executor_state is None:
+            return "Executor module was enabled but did not complete"
+
+        if not executor_state.in_game_confirmed:
+            return (executor_state.note or "In-game not confirmed").strip()
+
+        exit_result = await confirm_in_game_normal_exit(
+            adb=self._adb,
+            cfg=cfg,
+            state=exit_state,
+            session_state=session_state,
+            audit=self._audit,
+            summary=(executor_state.note or "In-game confirmed")[:2000],
+        )
+        if not exit_state.normal_exit_committed:
+            return "In-game confirmed but normal exit was not committed"
+
+        logger.info(
+            "Parallel phase OK: %s | session_restarts=%d",
+            exit_result.message[:300],
+            session_state.restarts_count,
+        )
         self._observer_session_restarts = session_state.restarts_count
         return None
 

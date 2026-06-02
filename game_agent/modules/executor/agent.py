@@ -1,148 +1,34 @@
 from __future__ import annotations
 
-import asyncio
-import logging
-import time
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic_ai import Agent, RunContext
 
-from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
-from game_agent.services.adb_service import AdbService
-from game_agent.services.game_launch import is_game_running, mark_game_started
-from game_agent.services.learned_skill_store import format_skill_list_for_tool, read_skill_file
+from game_agent.modules.executor.deps import ExecutorAgentDeps
+from game_agent.modules.executor.tooling import RunRequirement, ToolKind, make_tool_registrar
+from game_agent.modules.executor.tooling.waits import (
+    execute_check_in_game,
+    execute_wait_for_game_running,
+    execute_wait_for_package,
+)
 from game_agent.services.credentials import (
     credentials_status_message,
     load_game_credentials,
 )
+from game_agent.services.learned_skill_store import format_skill_list_for_tool, read_skill_file
 from game_agent.services.login_flow_skill import read_login_flow_guide
 from game_agent.services.llm_service import build_llm_model
-from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.utils.ocr_util import extract_text_with_bounds
-from game_agent.views.console_view import ConsoleView
 
-logger = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class ExecutorAgentDeps:
-    """注入 Agent 工具的运行期依赖（Controller 组装）。"""
-
-    app_config: AppConfig
-    adb: AdbService
-    run_state: RunState
-    artifact_root: Path
-    view: ConsoleView
-    screen_width: int
-    screen_height: int
-    audit: RunAuditLogger | None = None
-    round_id: int = 0
-    settings_path: Path | None = None
-
-
-def _log_tool(ctx: RunContext[ExecutorAgentDeps], name: str, args: Any, result: str) -> None:
-    if ctx.deps.audit is not None:
-        ctx.deps.audit.log_tool("executor", ctx.deps.round_id, name, args, result)
+# Re-export for controllers / agents package
+__all__ = ["ExecutorAgentDeps", "build_executor_agent"]
 
 
 def _prompt_path() -> Path:
     return Path(__file__).resolve().parent / "prompts" / "executor_system.en.txt"
-
-
-def _block_executor_if_game_running(ctx: RunContext[ExecutorAgentDeps]) -> str | None:
-    if ctx.deps.run_state.game_started:
-        return (
-            "Game process already running; executor phase ended. "
-            "Do not tap/swipe/back; stop calling tools — observer phase will take over."
-        )
-    return None
-
-
-async def _wait_for_game_process(
-    ctx: RunContext[ExecutorAgentDeps],
-    *,
-    summary: str,
-    timeout_s: float | None,
-) -> str:
-    cfg = ctx.deps.app_config
-    game_pkg = cfg.game.package_name
-    run = ctx.deps.run_state
-    run.launch_wait_invoked = True
-
-    timeout = (
-        float(timeout_s)
-        if timeout_s is not None
-        else cfg.game.launch_detect_timeout_s
-    )
-    timeout = max(15.0, min(timeout, 600.0))
-    interval = cfg.game.launch_detect_poll_interval_s
-    note = (summary or "Completed login/launch actions").strip()[:2000]
-    run.note = note
-
-    logger.info(
-        "[Executor] 开始等待游戏进程 %s | 超时 %.0fs | 间隔 %.1fs | %s",
-        game_pkg,
-        timeout,
-        interval,
-        note[:120],
-    )
-    if ctx.deps.audit is not None:
-        ctx.deps.audit.log_phase(
-            "executor",
-            "开始等待游戏进程",
-            package=game_pkg,
-            timeout_s=timeout,
-            summary=note[:500],
-        )
-
-    deadline = time.monotonic() + timeout
-    attempt = 0
-    while time.monotonic() < deadline:
-        attempt += 1
-        if is_game_running(ctx.deps.adb, game_pkg):
-            mark_game_started(
-                run,
-                game_package=game_pkg,
-                reason=note or f"Game process detected after {attempt} poll(s)",
-            )
-            msg = (
-                f"Success: game process {game_pkg} detected (poll #{attempt}). "
-                "Executor phase ended — stop tap/swipe; switching to observer."
-            )
-            logger.info("[Executor] %s", msg)
-            if ctx.deps.audit is not None:
-                ctx.deps.audit.log_phase(
-                    "executor", "游戏进程已启动", package=game_pkg, attempts=attempt
-                )
-            return msg
-
-        remaining = deadline - time.monotonic()
-        logger.info(
-            "[Executor] 等待游戏进程 %s | 第 %d 次未检测到 | 剩余约 %.0fs",
-            game_pkg,
-            attempt,
-            max(0.0, remaining),
-        )
-        await asyncio.sleep(min(interval, max(0.1, remaining)))
-
-    run.finished = True
-    run.success = False
-    fail_msg = (
-        f"Failed: game process {game_pkg} not detected within {timeout:.0f}s. "
-        f"Context: {note}. "
-        "Call report_flow_done(success=false) with blocker, or check package/login steps."
-    )
-    run.note = fail_msg[:2000]
-    logger.warning("[Executor] %s", fail_msg)
-    if ctx.deps.audit is not None:
-        ctx.deps.audit.log_phase(
-            "executor", "等待游戏进程超时", package=game_pkg, timeout_s=timeout
-        )
-    return fail_msg
 
 
 def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]:
@@ -155,59 +41,39 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         system_prompt=system_prompt,
         output_type=str,
     )
+    t = make_tool_registrar(agent)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def list_learned_skills(ctx: RunContext[ExecutorAgentDeps], limit: int = 15) -> str:
         limit = max(1, min(int(limit), 30))
-        s = format_skill_list_for_tool(limit=limit)
-        ctx.deps.view.tool("list_learned_skills", s[:2000])
-        _log_tool(ctx, "list_learned_skills", {"limit": limit}, s[:2000])
-        return s
+        return format_skill_list_for_tool(limit=limit)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def read_learned_skill(ctx: RunContext[ExecutorAgentDeps], filename: str) -> str:
-        s = read_skill_file(filename)
-        ctx.deps.view.tool("read_learned_skill", f"{filename!r} {s[:1200]!r}")
-        _log_tool(ctx, "read_learned_skill", {"filename": filename}, s[:2000])
-        return s
+        return read_skill_file(filename)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def read_login_flow_guide(ctx: RunContext[ExecutorAgentDeps]) -> str:
-        """读取仓库内通用游戏登录流程技能（隐私/公告/登录/选服等阶段模型，适用于各游戏）。"""
-        s = read_login_flow_guide()
-        ctx.deps.view.tool("read_login_flow_guide", s[:1200])
-        _log_tool(ctx, "read_login_flow_guide", {}, s[:4000])
-        return s
+        """Generic mobile game login flow (skills/game-launch-ocr/SKILL.md)."""
+        return read_login_flow_guide()
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def credentials_status(ctx: RunContext[ExecutorAgentDeps]) -> str:
-        """检查 credentials.yaml 是否可用（不返回密码明文）。"""
+        """Whether credentials.yaml is usable (no password plaintext)."""
         cfg = ctx.deps.app_config
-        s = credentials_status_message(
+        return credentials_status_message(
             cfg.credentials.file_path,
             settings_path=ctx.deps.settings_path,
         )
-        ctx.deps.view.tool("credentials_status", s[:800])
-        _log_tool(ctx, "credentials_status", {}, s[:2000])
-        return s
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT)
     async def fill_credential_field(
         ctx: RunContext[ExecutorAgentDeps],
         x: int,
         y: int,
         field: Literal["username", "password"],
     ) -> str:
-        """
-        在 OCR 给出的输入框中心坐标处：点击 → 清空已有文字 → 填入 credentials.yaml 中的账号或密码。
-        field 为 username 时填账号，password 时填密码。
-        """
-        blocked = _block_executor_if_game_running(ctx)
-        if blocked:
-            ctx.deps.view.tool("fill_credential_field", blocked)
-            _log_tool(ctx, "fill_credential_field", {"x": x, "y": y, "field": field}, blocked)
-            return blocked
-
+        """Tap field center, clear, fill username or password from credentials.yaml."""
         cfg = ctx.deps.app_config
         try:
             cred = load_game_credentials(
@@ -215,10 +81,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
                 settings_path=ctx.deps.settings_path,
             )
         except (FileNotFoundError, ValueError) as e:
-            err = f"Cannot load credentials: {e}"
-            ctx.deps.view.tool("fill_credential_field", err)
-            _log_tool(ctx, "fill_credential_field", {"x": x, "y": y, "field": field}, err)
-            return err
+            return f"Cannot load credentials: {e}"
 
         value = cred.username if field == "username" else cred.password
         msg = ctx.deps.adb.fill_text_at(
@@ -228,77 +91,67 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             width=ctx.deps.screen_width,
             height=ctx.deps.screen_height,
         )
-        safe_msg = msg
         if field == "password":
-            safe_msg = msg.replace(cred.password, "***")
-        ctx.deps.view.tool(
-            "fill_credential_field",
-            f"field={field} ({x},{y}) {safe_msg[:1000]}",
-        )
-        out = (
+            msg = msg.replace(cred.password, "***")
+        return (
             f"{msg}\n"
             f"Filled field {field}. "
             "Use get_ocr_summary or tap_and_observe before next step (e.g. tap Login)."
         )
-        _log_tool(
-            ctx,
-            "fill_credential_field",
-            {"x": x, "y": y, "field": field},
-            safe_msg[:2000],
+
+    def _package_already_message(ctx: RunContext[ExecutorAgentDeps]) -> str:
+        pkg = ctx.deps.app_config.game.package_name
+        return (
+            f"Package {pkg} already confirmed installed this run. "
+            "Proceed with open_game_app — do not call wait_for_package_installed again."
         )
-        return out
 
-    @agent.tool
+    @t(
+        kind=ToolKind.WAIT,
+        idempotent_attr="package_install_confirmed",
+        idempotent_message=_package_already_message,
+    )
+    async def wait_for_package_installed(
+        ctx: RunContext[ExecutorAgentDeps],
+        timeout_s: float | None = None,
+    ) -> str:
+        """
+        Call **once** after deploy. Polls ``pm path`` until the APK appears, then returns.
+        Do not recheck install yourself.
+        """
+        return await execute_wait_for_package(ctx, timeout_s)
+
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def verify_adb_connection(ctx: RunContext[ExecutorAgentDeps]) -> str:
-        msg = ctx.deps.adb.verify_connection()
-        ctx.deps.view.tool("verify_adb_connection", msg)
-        _log_tool(ctx, "verify_adb_connection", {}, msg)
-        return msg
+        return ctx.deps.adb.verify_connection()
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, requirements=(RunRequirement.PACKAGE_INSTALLED,))
     async def open_game_app(ctx: RunContext[ExecutorAgentDeps]) -> str:
-        """打开测试游戏：使用配置 game.launch_activity 执行 am start -n。"""
-        blocked = _block_executor_if_game_running(ctx)
-        if blocked:
-            ctx.deps.view.tool("open_game_app", blocked)
-            _log_tool(ctx, "open_game_app", {}, blocked)
-            return blocked
+        """Launch game via am start -n. Call after wait_for_package_installed succeeds."""
         game = ctx.deps.app_config.game
         if not game.launch_activity.strip():
             return "Config error: game.launch_activity is empty"
-        msg = ctx.deps.adb.launch_game(game.package_name, game.launch_activity)
-        ctx.deps.view.tool("open_game_app", msg[:800])
-        _log_tool(ctx, "open_game_app", {}, msg[:2000])
-        return msg
+        return ctx.deps.adb.launch_game(game.package_name, game.launch_activity)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def force_stop_app(ctx: RunContext[ExecutorAgentDeps], package_name: str) -> str:
-        msg = ctx.deps.adb.force_stop_package(package_name)
-        ctx.deps.view.tool("force_stop_app", msg)
-        _log_tool(ctx, "force_stop_app", {"package_name": package_name}, msg)
-        return msg
+        return ctx.deps.adb.force_stop_package(package_name)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def force_stop_apps(
         ctx: RunContext[ExecutorAgentDeps],
         package_names: list[str],
     ) -> str:
-        msg = ctx.deps.adb.force_stop_packages(package_names)
-        ctx.deps.view.tool("force_stop_apps", msg[:1200])
-        _log_tool(ctx, "force_stop_apps", {"package_names": package_names}, msg[:2000])
-        return msg
+        return ctx.deps.adb.force_stop_packages(package_names)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def capture_screenshot(ctx: RunContext[ExecutorAgentDeps], name: str) -> str:
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:64]
         path = ctx.deps.artifact_root / f"{safe}.png"
         out = ctx.deps.adb.screencap_png(path)
-        ctx.deps.view.tool("capture_screenshot", str(out))
-        out_s = str(out.resolve())
-        _log_tool(ctx, "capture_screenshot", {"name": name}, out_s)
-        return out_s
+        return str(out.resolve())
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def get_ocr_summary(
         ctx: RunContext[ExecutorAgentDeps],
         settle_seconds: float = 0.5,
@@ -310,26 +163,14 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         path = ctx.deps.artifact_root / f"ocr_{ts}.png"
         ctx.deps.adb.screencap_png(path)
         s = extract_text_with_bounds(path)
-        header = f"[Live OCR] screenshot={path.resolve()}\n"
-        ctx.deps.view.tool("get_ocr_summary", (header + s)[:1200])
-        full = header + s
-        _log_tool(ctx, "get_ocr_summary", {"settle_seconds": settle_seconds}, full[:4000])
-        return full
+        return f"[Live OCR] screenshot={path.resolve()}\n{s}"
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT)
     async def tap_coordinate(ctx: RunContext[ExecutorAgentDeps], x: int, y: int) -> str:
-        blocked = _block_executor_if_game_running(ctx)
-        if blocked:
-            ctx.deps.view.tool("tap_coordinate", blocked)
-            _log_tool(ctx, "tap_coordinate", {"x": x, "y": y}, blocked)
-            return blocked
         msg = ctx.deps.adb.tap(x, y, width=ctx.deps.screen_width, height=ctx.deps.screen_height)
-        ctx.deps.view.tool("tap_coordinate", msg)
-        out = f"{msg}\nHint: UI may have changed — call get_ocr_summary for fresh OCR."
-        _log_tool(ctx, "tap_coordinate", {"x": x, "y": y}, out[:2000])
-        return out
+        return f"{msg}\nHint: UI may have changed — call get_ocr_summary for fresh OCR."
 
-    @agent.tool
+    @t(kind=ToolKind.COMPOUND)
     async def tap_and_observe(
         ctx: RunContext[ExecutorAgentDeps],
         x: int,
@@ -338,11 +179,6 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         interval_s: float = 0.25,
         observations: int = default_tap_observe,
     ) -> str:
-        blocked = _block_executor_if_game_running(ctx)
-        if blocked:
-            ctx.deps.view.tool("tap_and_observe", blocked)
-            _log_tool(ctx, "tap_and_observe", {"x": x, "y": y}, blocked)
-            return blocked
         first_wait_s = max(0.05, min(float(first_wait_s), 1.0))
         interval_s = max(0.05, min(float(interval_s), 1.5))
         observations = max(2, min(int(observations), 6))
@@ -355,8 +191,6 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             height=ctx.deps.screen_height,
         )
         if "Refused tap" in tap_msg or "rejected" in tap_msg.lower():
-            ctx.deps.view.tool("tap_and_observe", tap_msg)
-            _log_tool(ctx, "tap_and_observe", {"x": x, "y": y}, tap_msg)
             return tap_msg
 
         msg_lines: list[str] = [tap_msg]
@@ -369,22 +203,14 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             if i < observations - 1:
                 ctx.deps.adb.wait_seconds(interval_s)
 
-        msg = "\n".join(msg_lines)
-        ctx.deps.view.tool("tap_and_observe", msg[:1600])
-        _log_tool(ctx, "tap_and_observe", {"x": x, "y": y, "observations": observations}, msg[:4000])
-        return msg
+        return "\n".join(msg_lines)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT)
     async def swipe_screen(
         ctx: RunContext[ExecutorAgentDeps],
         direction: str,
         duration_ms: int = 450,
     ) -> str:
-        blocked = _block_executor_if_game_running(ctx)
-        if blocked:
-            ctx.deps.view.tool("swipe_screen", blocked)
-            _log_tool(ctx, "swipe_screen", {"direction": direction}, blocked)
-            return blocked
         w, h = ctx.deps.screen_width, ctx.deps.screen_height
         cx, cy = w // 2, h // 2
         dist = int(min(w, h) * 0.25)
@@ -399,57 +225,36 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         elif d == "right":
             dx, dy = dist, 0
         else:
-            err = f"Unknown direction: {direction!r}; use up/down/left/right"
-            _log_tool(ctx, "swipe_screen", {"direction": direction}, err)
-            return err
-        msg = ctx.deps.adb.swipe(cx, cy, cx + dx, cy + dy, duration_ms=duration_ms)
-        ctx.deps.view.tool("swipe_screen", msg)
-        _log_tool(ctx, "swipe_screen", {"direction": direction, "duration_ms": duration_ms}, msg)
-        return msg
+            return f"Unknown direction: {direction!r}; use up/down/left/right"
+        return ctx.deps.adb.swipe(cx, cy, cx + dx, cy + dy, duration_ms=duration_ms)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT)
     async def press_back(ctx: RunContext[ExecutorAgentDeps]) -> str:
-        blocked = _block_executor_if_game_running(ctx)
-        if blocked:
-            ctx.deps.view.tool("press_back", blocked)
-            _log_tool(ctx, "press_back", {}, blocked)
-            return blocked
-        msg = ctx.deps.adb.press_back()
-        ctx.deps.view.tool("press_back", msg)
-        _log_tool(ctx, "press_back", {}, msg)
-        return msg
+        return ctx.deps.adb.press_back()
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def wait_seconds(ctx: RunContext[ExecutorAgentDeps], seconds: float) -> str:
         seconds = max(0.5, min(float(seconds), 45.0))
-        msg = ctx.deps.adb.wait_seconds(seconds)
-        ctx.deps.view.tool("wait_seconds", msg)
-        _log_tool(ctx, "wait_seconds", {"seconds": seconds}, msg)
-        return msg
+        return ctx.deps.adb.wait_seconds(seconds)
 
-    @agent.tool
+    @t(kind=ToolKind.WAIT)
     async def wait_for_game_running(
         ctx: RunContext[ExecutorAgentDeps],
         summary: str,
         timeout_s: float | None = None,
     ) -> str:
-        """完成关键登录/启动操作后调用：轮询 game.package_name 直至进程出现或超时。"""
-        blocked = _block_executor_if_game_running(ctx)
-        if blocked:
-            ctx.deps.view.tool("wait_for_game_running", blocked)
-            _log_tool(ctx, "wait_for_game_running", {"summary": summary[:200]}, blocked)
-            return blocked
-        out = await _wait_for_game_process(ctx, summary=summary, timeout_s=timeout_s)
-        ctx.deps.view.tool("wait_for_game_running", out[:1200])
-        _log_tool(
-            ctx,
-            "wait_for_game_running",
-            {"summary": summary[:500], "timeout_s": timeout_s},
-            out[:4000],
-        )
-        return out
+        """Poll game.package_name process until present or timeout (milestone, not final success)."""
+        return await execute_wait_for_game_running(ctx, summary, timeout_s)
 
-    @agent.tool
+    @t(kind=ToolKind.INSTANT)
+    async def check_in_game(ctx: RunContext[ExecutorAgentDeps]) -> str:
+        """
+        Multimodal in-game check. Call after server_select, download, or likely HUD.
+        Requires main_screen_confirm_rounds consecutive positives across calls.
+        """
+        return await execute_check_in_game(ctx)
+
+    @t(kind=ToolKind.TERMINAL, check_stopped=False)
     async def report_flow_done(
         ctx: RunContext[ExecutorAgentDeps],
         success: bool,
@@ -459,17 +264,10 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             ctx.deps.run_state.finished = True
             ctx.deps.run_state.success = False
             ctx.deps.run_state.note = summary[:2000]
-            out = "Recorded failure; stop calling tools."
-        else:
-            out = (
-                "Do not call this tool with success=true. "
-                "Use wait_for_game_running for game launch completion."
-            )
-        ctx.deps.view.tool(
-            "report_flow_done",
-            f"success={success} summary={summary[:500]!r}",
+            return "Recorded failure; stop calling tools."
+        return (
+            "Do not call this tool with success=true. "
+            "Use check_in_game to confirm in-game completion."
         )
-        _log_tool(ctx, "report_flow_done", {"success": success, "summary": summary[:500]}, out)
-        return out
 
     return agent

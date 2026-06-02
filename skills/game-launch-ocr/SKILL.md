@@ -7,7 +7,7 @@ description: >-
 
 # Generic game login flow (OCR + adb tap)
 
-**Goal:** start process `game.package_name`. **Not** judging in-game main scene (observer phase).
+**Goal:** full chain launch → login → **in-game** via OCR + tap; confirm with `check_in_game` (multimodal). GameTurbo logs run in parallel from launch.
 
 Classify **current stage** from OCR, then act. Prefer **live OCR** over old learned skills.
 
@@ -32,11 +32,13 @@ Order varies (announcement before privacy, etc.); follow OCR, not the table top-
 
 ## Standard loop
 
-1. Controller already `open_game_app` / `am start`; `wait_seconds` ~2s.
-2. `get_ocr_summary` → **stage ID** → `tap_and_observe` safest control.
-3. Repeat until load/login triggered.
-4. **`wait_for_game_running(summary)`** (state last stage, e.g. "tapped Enter after announcement").
-5. On success stop tapping; on failure `report_flow_done(success=false, summary=stage+OCR).
+1. After deploy: **`wait_for_package_installed` once** (runtime polls `pm path` until install appears; when the tool returns, continue — do not recheck install).
+2. **`open_game_app`**, then `wait_seconds` ~2s if needed.
+3. `get_ocr_summary` → **stage ID** → `tap_and_observe` safest control.
+4. Repeat through login/server/download.
+5. **`wait_for_game_running`** once when APK process may still be down (internal poll; milestone only).
+6. After server select / long download / likely HUD: **`check_in_game`** until consecutive confirmations (single call polls until streak or timeout).
+7. On `check_in_game` confirmed, stop tapping; on blocker `report_flow_done(success=false, ...)`.
 
 ## Stage notes
 
@@ -67,12 +69,14 @@ Order varies (announcement before privacy, etc.); follow OCR, not the table top-
 
 | Tool | Use |
 |------|-----|
-| `open_game_app` | not game foreground; no monkey |
+| `wait_for_package_installed` | once after deploy; internal poll until APK on device |
+| `open_game_app` | after package wait succeeds; not game foreground |
 | `tap_coordinate` / `tap_and_observe` | OCR coords |
 | `swipe_screen` | server list, long terms |
 | `press_back` | wrong sub-page; may exit game |
 | `wait_seconds` | animation; **not** a substitute for `wait_for_game_running` |
-| `wait_for_game_running` | end of login chain |
+| `wait_for_game_running` | process milestone (not final success) |
+| `check_in_game` | multimodal in-game confirmation (required to finish) |
 | `read_login_flow_guide` | re-read this file |
 | `credentials_status` | credentials file OK? |
 | `fill_credential_field` | clear + fill username/password |

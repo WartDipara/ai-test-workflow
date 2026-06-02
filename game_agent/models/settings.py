@@ -123,6 +123,18 @@ class GameSection(BaseModel):
         le=15.0,
         description="等待游戏进程时的 pidof 轮询间隔（秒）。",
     )
+    package_install_wait_timeout_s: float = Field(
+        120.0,
+        ge=10.0,
+        le=600.0,
+        description="deploy 后等待设备上出现 game.package_name 的最长时间（秒）。",
+    )
+    package_install_poll_interval_s: float = Field(
+        2.0,
+        ge=0.5,
+        le=15.0,
+        description="检测包是否已安装的轮询间隔（秒）。",
+    )
     main_screen_detect_timeout_s: float = Field(
         240.0,
         ge=30.0,
@@ -268,22 +280,15 @@ class ModulesSection(BaseModel):
 
     executor: bool = Field(
         True,
-        description="阶段1 执行者：AI + OCR + adb tap 直至游戏进程启动。",
+        description="Driver：AI + OCR + adb tap 直至 check_in_game 确认进游戏（与 monitors 并行）。",
     )
     log_monitor: bool = Field(
         True,
-        description="阶段2 观察者：实时监听 GameTurbo logcat。",
+        description="Monitor：从游戏启动并行监听 GameTurbo logcat；高置信异常 fail-fast。",
     )
     screen_monitor: bool = Field(
         True,
-        description="阶段2 观察者：定时截图 + 多模态画面异常检测（与进入游戏判定并行）。",
-    )
-    game_entry_detect: bool = Field(
-        True,
-        description=(
-            "阶段2：AI 截图判定是否已进入游戏内；确认后调用正常退出工具并结束进程。"
-            "关闭后回退为仅 log/screen 监控至 timeout。"
-        ),
+        description="Monitor：并行截图；网络类弹窗 fail-fast（不替代执行者点 UI）。",
     )
     retry_on_failure: bool = Field(
         True,

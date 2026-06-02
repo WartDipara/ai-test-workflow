@@ -1,4 +1,3 @@
-from game_agent.controllers.game_entry_controller import GameEntryDetector
 from game_agent.controllers.executor_controller import (
     ExecutorFlowController,
     run_executor_flow_sync,
@@ -12,7 +11,6 @@ from game_agent.controllers.session_controller import SessionCoordinator
 
 __all__ = [
     "AnomalyHandler",
-    "GameEntryDetector",
     "GameTestOrchestrator",
     "ExecutorFlowController",
     "LogMonitor",

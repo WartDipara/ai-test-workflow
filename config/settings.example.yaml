@@ -41,6 +41,8 @@ game:
   timeout_s: 300.0
   launch_detect_timeout_s: 90.0
   launch_detect_poll_interval_s: 2.0
+  package_install_wait_timeout_s: 120.0
+  package_install_poll_interval_s: 2.0
   # AI 判定「已进入游戏内」（进程已起之后）
   main_screen_detect_timeout_s: 240.0
   main_screen_detect_poll_interval_s: 5.0
@@ -69,12 +71,11 @@ gameturbo:
 credentials:
   file_path: "./credentials.yaml"   # 亦可 ./config/credentials.yaml
 
-# 流水线模块开关（便于单独测试）；默认均为 true
+# 流水线模块开关（便于单独测试）
 modules:
-  executor: true           # 阶段1：AI + OCR + adb tap 直至游戏进程启动
-  game_entry_detect: true  # 阶段2：AI 截图判定进入游戏 + 正常退出工具
-  log_monitor: true        # 阶段2：GameTurbo 日志监控（与进入游戏判定并行）
-  screen_monitor: true     # 阶段2：画面异常检测（与进入游戏判定并行）
+  executor: true           # Driver：登录链 + check_in_game（与 monitors 并行）
+  log_monitor: true        # GameTurbo logcat，异常 fail-fast
+  screen_monitor: true     # 网络类画面弹窗 fail-fast
   retry_on_failure: true   # true：失败收尾后再做 AI 分析/deploy 并多轮重试；false：仅失败收尾
   max_retries: 3           # retry_on_failure 为 true 时生效
 
