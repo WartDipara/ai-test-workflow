@@ -1,3 +1,4 @@
-from game_agent.agents.login_agent import LoginAgentDeps, build_login_agent
+from game_agent.modules.keywizard.agent import KeyWizardAgentDeps, build_keywizard_agent
+from game_agent.modules.retry.analysis import AnalysisAgent
 
-__all__ = ["LoginAgentDeps", "build_login_agent"]
+__all__ = ["AnalysisAgent", "KeyWizardAgentDeps", "build_keywizard_agent"]

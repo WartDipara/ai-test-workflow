@@ -1,0 +1,108 @@
+from __future__ import annotations
+
+import logging
+import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+from game_agent.paths import REPO_ROOT
+from game_agent.services.pipeline_trace import trace_operation
+
+logger = logging.getLogger(__name__)
+
+ANDROID_DIR = REPO_ROOT / "GameTurbo-Native" / "client" / "android"
+DEPLOY_SCRIPT = ANDROID_DIR / "deploy.sh"
+
+
+@dataclass(frozen=True, slots=True)
+class DeployResult:
+    command: list[str]
+    cwd: Path
+    log_path: Path | None
+    returncode: int
+
+
+def _find_bash() -> str:
+    found = shutil.which("bash")
+    if found:
+        return found
+    candidates = [
+        Path("C:/Program Files/Git/bin/bash.exe"),
+        Path("C:/Program Files/Git/usr/bin/bash.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return "bash"
+
+
+def run_deploy(
+    gid: str,
+    *,
+    serial: str | None = None,
+    artifact_root: Path | None = None,
+    timeout_s: float = 900.0,
+) -> DeployResult:
+    """Run GameTurbo android deploy in Git Bash and wait for it to finish."""
+    if not DEPLOY_SCRIPT.is_file():
+        raise RuntimeError(f"找不到 deploy.sh: {DEPLOY_SCRIPT}")
+
+    cmd = [_find_bash(), "./deploy.sh", "-g", gid, "-n"]
+    if serial:
+        cmd.extend(["-d", serial])
+
+    log_path = artifact_root / "deploy.log" if artifact_root else None
+    logger.info("执行 GameTurbo deploy: %s", " ".join(cmd))
+    with trace_operation(
+        "deploy",
+        "run_deploy.sh",
+        gid=gid,
+        command=cmd,
+        cwd=str(ANDROID_DIR),
+    ) as rec:
+        result = subprocess.run(
+            cmd,
+            cwd=ANDROID_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s,
+            check=False,
+        )
+
+        if log_path is not None:
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "$ " + " ".join(cmd),
+                        "",
+                        "=== stdout ===",
+                        result.stdout or "",
+                        "=== stderr ===",
+                        result.stderr or "",
+                    ],
+                ),
+                encoding="utf-8",
+            )
+
+        if result.returncode != 0:
+            rec.fail(
+                f"exit={result.returncode}",
+                returncode=result.returncode,
+                log_path=str(log_path) if log_path else None,
+            )
+            raise RuntimeError(
+                f"deploy.sh 失败 (exit={result.returncode})，日志: {log_path or '未落盘'}",
+            )
+
+        rec.ok(returncode=0, log_path=str(log_path) if log_path else None)
+    logger.info("GameTurbo deploy 完成 (gid=%s)", gid)
+    return DeployResult(
+        command=cmd,
+        cwd=ANDROID_DIR,
+        log_path=log_path,
+        returncode=result.returncode,
+    )
+

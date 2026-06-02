@@ -34,6 +34,12 @@ def expand_env_strings(obj: Any) -> Any:
 def load_app_config(path: Path) -> AppConfig:
     if not path.is_file():
         raise FileNotFoundError(f"配置文件不存在: {path}")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(
+            f"配置文件 YAML 解析失败: {path}。"
+            "请检查是否使用了未转义的反斜杠路径（例如 Windows 路径应使用 \\\\ 或 /）。"
+        ) from e
     expanded = expand_env_strings(raw)
     return AppConfig.model_validate(expanded)

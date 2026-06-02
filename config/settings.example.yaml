@@ -3,29 +3,92 @@ llm:
   base_url: "https://api.openai.com/v1"
   api_key: "${OPENAI_API_KEY}"
   model_name: "gpt-4o"
-  # openai_multimodal：OpenAI 风格多模态（image_url）。text_base64：截图以 Base64 放进纯文本（适配拒绝 image_url 的网关）。
-  image_transport: "openai_multimodal"
+  # 401 通常表示 base_url / api_key / model_name 不匹配，主脑模型必须使用同一网关下有效凭据。
   skip_vision_probe: false
+  # 扩展：经 LiteLLM 等代理且报 UnsupportedParamsError（reasoning_effort/thinking）时改为 true；默认 false 保留官方 DeepSeek 思考模式。
+  deepseek_litellm_compat: false
+
+llm_multimodal:
+  base_url: "https://ai.14x.cn/coding/v1"
+  api_key: "${QWEN_API_KEY}"
+  model_name: "model/qwen3.6-plus"
 
 adb:
   # 留空或 null 表示使用默认设备（adb 未指定 -s 时）
   serial: null
 
-game:
-  package_name: "com.example.game"
-  # 可选；为空时用 monkey 冷启动包
-  activity: null
+ocr:
+  # mobile 显著快于 server；识别前会将截图缩到 max_image_width
+  model_profile: mobile
+  max_image_width: 720
+  warmup_on_start: false
 
-credentials:
-  # 相对路径以「本 YAML 所在目录」为基准（此处即 config/）
-  # 推荐与 settings 同目录：复制 credentials.example.yaml 为 credentials.yaml 后填写
-  file_path: "./credentials.yaml"
+keywizard:
+  # 按键精灵包名基本固定，用于前台校验。
+  package_name: "com.cyjh.mobileanjian"
+  # 必须填写启动 Activity；可写完整组件名 pkg/.Main，也可只写 Activity 类名。
+  # 程序会规范化为 `adb shell am start -n <package>/<activity>`，禁止使用 monkey 兜底。
+  # 流水线应随按键精灵版本维护该值。
+  activity: "com.cyjh.mobileanjian.vip.activity.GuiActivity"
+  # 流水线写入当前需要加载并启动的脚本显示名。TODO 后续要自动识别脚本名，不需要人工维护
+  script_display_name: "示例脚本名"
+  ad_initial_wait_s: 3.0
+  # 开局/启动后等待界面稳定（控制器在非按键精灵前台时会自动 am start）
+  post_launch_wait_s: 2.0
+  # 连续非按键精灵前台轮数的提示阈值，主脑可据此决定调用 open_keywizard_app。
+  max_foreground_retries: 4
+
+game:
+  # 以下两项由启动时从 game_gameturbo.apk 自动覆写，无需手填
+  package_name: "com.example.testgame"
+  launch_activity: "com.example.testgame/.MainActivity"
+  timeout_s: 300.0
+  launch_detect_timeout_s: 90.0
+  launch_detect_poll_interval_s: 2.0
+  # AI 判定「已进入游戏内」（进程已起之后；与按键精灵无关）
+  main_screen_detect_timeout_s: 240.0
+  main_screen_detect_poll_interval_s: 5.0
+  main_screen_confirm_rounds: 2
+  main_screen_min_confidence: 0.75
+  # 确认进入游戏后观察加速的秒数，随后 force-stop 游戏与按键精灵
+  normal_exit_observe_s: 10.0
+  session_poll_interval_s: 1.5
+  session_absent_threshold_s: 2.0
+  clear_logcat_on_session_restart: true
+  max_session_restarts: 0
+
+gameturbo:
+  # 前置处理会从 client/android/packages 里的唯一原包 APK 文件名前缀写入 gid。
+  gid: ""
+  # 前置处理会沿用或新建 GameTurbo-Native/games/gameturbo_<gid>_*.json 后写入。
+  game_config_path: ""
+  # 审计用：前置处理发现的原始 APK。
+  source_apk: ""
+  deploy_timeout_s: 900.0
+  # 单次任务最终产出：run_outputs/{gid}_{task_id}/（成功为配置文件，失败为日志包）
+  run_outputs_dir: "./run_outputs"
+
+# 流水线模块开关（便于单独测试）；默认均为 true
+modules:
+  keywizard: true          # 阶段1：AI 操作按键精灵直至游戏进程启动（pidof）
+  game_entry_detect: true  # 阶段2：AI 截图判定进入游戏 + 正常退出工具
+  log_monitor: true        # 阶段2：GameTurbo 日志监控（与进入游戏判定并行）
+  screen_monitor: true     # 阶段2：画面异常检测（与进入游戏判定并行）
+  retry_on_failure: true   # true：失败收尾后再做 AI 分析/deploy 并多轮重试；false：仅失败收尾
+  max_retries: 3           # retry_on_failure 为 true 时生效
 
 agent:
   max_rounds: 35
   artifacts_dir: "./artifacts"
-  # image_transport=text_base64 时，截图最长边缩小到该值以内再编码，控制 token
-  screenshot_max_edge: 768
+  # 按键精灵阶段固定 OCR+主脑；多模态仅由 modules.screen_monitor 使用 llm_multimodal
+  persist_learned_skill_on_success: true
+  tap_observe_count: 2
 
 logging:
   level: "INFO"
+  # 写入 artifacts/retry_*/audit/（思考、工具、阶段）与 process.log
+  enable_run_audit: true
+  enable_process_log_file: true
+  # 流水线调用追踪：记录了什么、结果、成功/失败（process.log + pipeline_trace.jsonl）
+  enable_pipeline_trace: true
+  pipeline_trace_verbose: true   # 成熟后可改为 false 减少 detail 体积

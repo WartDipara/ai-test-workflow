@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import logging
+
 import openai.types.chat as chat
-from pydantic_ai.messages import ModelRequestParameters, ModelResponse, ThinkingPart
-from pydantic_ai.models import Model
+from pydantic_ai.messages import ModelResponse, ThinkingPart
+from pydantic_ai.models import Model, ModelRequestParameters
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 
 from game_agent.services.llm_adapters.base import BaseModelAdapter
+
+logger = logging.getLogger(__name__)
 
 
 class DeepSeekThinkingModel(OpenAIChatModel):
@@ -37,6 +41,31 @@ class DeepSeekThinkingModel(OpenAIChatModel):
             settings["extra_body"] = extra_body
 
         return super().prepare_request(settings, model_request_parameters)
+
+    def _process_thinking(self, message: chat.ChatCompletionMessage) -> list[ThinkingPart] | None:
+        """
+        DeepSeek 兜底提取 reasoning_content。
+        某些 SDK / 网关兼容层下，reasoning_content 可能只出现在 model_extra，
+        这里显式兜底抓取，确保上层能看到思考内容。
+        """
+        items = super()._process_thinking(message) or []
+        if items:
+            # 打印完整思考内容（不截断）
+            full = "\n\n".join((p.content or "") for p in items).strip()
+            logger.info("DeepSeek thinking 已解析: parts=%d\n%s", len(items), full)
+            return items
+
+        extra = getattr(message, "model_extra", None) or {}
+        if not isinstance(extra, dict):
+            logger.info("DeepSeek thinking 缺失: message.model_extra 不是 dict")
+            return None
+
+        reasoning = extra.get("reasoning_content") or extra.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            logger.info("DeepSeek thinking 通过 model_extra 兜底提取成功:\n%s", reasoning)
+            return [ThinkingPart(id="reasoning_content", content=reasoning, provider_name=self.system)]
+        logger.info("DeepSeek thinking 缺失: 响应未含 reasoning_content/reasoning")
+        return None
 
     def _map_model_response(self, message: ModelResponse) -> chat.ChatCompletionMessageParam | None:
         """

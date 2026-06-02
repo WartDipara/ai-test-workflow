@@ -59,6 +59,8 @@ desktop.ini
 
 # --- Project-specific ---
 res/
+apk_cache/
+.vscode/
 
 # --- GameTurbo-Native Not Tracked ---
 GameTurbo-Native/
