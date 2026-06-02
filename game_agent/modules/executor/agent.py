@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic_ai import Agent, RunContext
 
@@ -15,6 +15,10 @@ from game_agent.models.settings import AppConfig
 from game_agent.services.adb_service import AdbService
 from game_agent.services.game_launch import is_game_running, mark_game_started
 from game_agent.services.learned_skill_store import format_skill_list_for_tool, read_skill_file
+from game_agent.services.credentials import (
+    credentials_status_message,
+    load_game_credentials,
+)
 from game_agent.services.login_flow_skill import read_login_flow_guide
 from game_agent.services.llm_service import build_llm_model
 from game_agent.services.run_audit_log import RunAuditLogger
@@ -37,6 +41,7 @@ class ExecutorAgentDeps:
     screen_height: int
     audit: RunAuditLogger | None = None
     round_id: int = 0
+    settings_path: Path | None = None
 
 
 def _log_tool(ctx: RunContext[ExecutorAgentDeps], name: str, args: Any, result: str) -> None:
@@ -45,14 +50,14 @@ def _log_tool(ctx: RunContext[ExecutorAgentDeps], name: str, args: Any, result: 
 
 
 def _prompt_path() -> Path:
-    return Path(__file__).resolve().parent / "prompts" / "executor_system.zh.txt"
+    return Path(__file__).resolve().parent / "prompts" / "executor_system.en.txt"
 
 
 def _block_executor_if_game_running(ctx: RunContext[ExecutorAgentDeps]) -> str | None:
     if ctx.deps.run_state.game_started:
         return (
-            "游戏进程已在运行，执行者阶段已结束。"
-            "禁止 tap/swipe/back 等操作；请停止调用工具，由控制器进入观察者监控。"
+            "Game process already running; executor phase ended. "
+            "Do not tap/swipe/back; stop calling tools — observer phase will take over."
         )
     return None
 
@@ -75,7 +80,7 @@ async def _wait_for_game_process(
     )
     timeout = max(15.0, min(timeout, 600.0))
     interval = cfg.game.launch_detect_poll_interval_s
-    note = (summary or "已执行登录/启动相关操作").strip()[:2000]
+    note = (summary or "Completed login/launch actions").strip()[:2000]
     run.note = note
 
     logger.info(
@@ -102,11 +107,11 @@ async def _wait_for_game_process(
             mark_game_started(
                 run,
                 game_package=game_pkg,
-                reason=note or f"等待 {attempt} 次轮询后检测到游戏进程",
+                reason=note or f"Game process detected after {attempt} poll(s)",
             )
             msg = (
-                f"成功：已检测到游戏进程 {game_pkg} 启动（第 {attempt} 次轮询）。"
-                "执行者阶段结束，请停止一切 tap/swipe 等操作，系统将切换为观察者监控。"
+                f"Success: game process {game_pkg} detected (poll #{attempt}). "
+                "Executor phase ended — stop tap/swipe; switching to observer."
             )
             logger.info("[Executor] %s", msg)
             if ctx.deps.audit is not None:
@@ -127,9 +132,9 @@ async def _wait_for_game_process(
     run.finished = True
     run.success = False
     fail_msg = (
-        f"失败：在 {timeout:.0f}s 内未检测到游戏进程 {game_pkg}。"
-        f"说明：{note}。"
-        "请调用 report_flow_done(success=false) 说明阻塞原因，或检查包名/登录步骤。"
+        f"Failed: game process {game_pkg} not detected within {timeout:.0f}s. "
+        f"Context: {note}. "
+        "Call report_flow_done(success=false) with blocker, or check package/login steps."
     )
     run.note = fail_msg[:2000]
     logger.warning("[Executor] %s", fail_msg)
@@ -141,7 +146,7 @@ async def _wait_for_game_process(
 
 
 def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]:
-    model = build_llm_model(app_config.llm)
+    model = build_llm_model(app_config.llm, deepseek=app_config.deepseek)
     system_prompt = _prompt_path().read_text(encoding="utf-8")
     default_tap_observe = app_config.agent.tap_observe_count
     agent: Agent[ExecutorAgentDeps, str] = Agent(
@@ -175,6 +180,75 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         return s
 
     @agent.tool
+    async def credentials_status(ctx: RunContext[ExecutorAgentDeps]) -> str:
+        """检查 credentials.yaml 是否可用（不返回密码明文）。"""
+        cfg = ctx.deps.app_config
+        s = credentials_status_message(
+            cfg.credentials.file_path,
+            settings_path=ctx.deps.settings_path,
+        )
+        ctx.deps.view.tool("credentials_status", s[:800])
+        _log_tool(ctx, "credentials_status", {}, s[:2000])
+        return s
+
+    @agent.tool
+    async def fill_credential_field(
+        ctx: RunContext[ExecutorAgentDeps],
+        x: int,
+        y: int,
+        field: Literal["username", "password"],
+    ) -> str:
+        """
+        在 OCR 给出的输入框中心坐标处：点击 → 清空已有文字 → 填入 credentials.yaml 中的账号或密码。
+        field 为 username 时填账号，password 时填密码。
+        """
+        blocked = _block_executor_if_game_running(ctx)
+        if blocked:
+            ctx.deps.view.tool("fill_credential_field", blocked)
+            _log_tool(ctx, "fill_credential_field", {"x": x, "y": y, "field": field}, blocked)
+            return blocked
+
+        cfg = ctx.deps.app_config
+        try:
+            cred = load_game_credentials(
+                cfg.credentials.file_path,
+                settings_path=ctx.deps.settings_path,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            err = f"Cannot load credentials: {e}"
+            ctx.deps.view.tool("fill_credential_field", err)
+            _log_tool(ctx, "fill_credential_field", {"x": x, "y": y, "field": field}, err)
+            return err
+
+        value = cred.username if field == "username" else cred.password
+        msg = ctx.deps.adb.fill_text_at(
+            x,
+            y,
+            value,
+            width=ctx.deps.screen_width,
+            height=ctx.deps.screen_height,
+        )
+        safe_msg = msg
+        if field == "password":
+            safe_msg = msg.replace(cred.password, "***")
+        ctx.deps.view.tool(
+            "fill_credential_field",
+            f"field={field} ({x},{y}) {safe_msg[:1000]}",
+        )
+        out = (
+            f"{msg}\n"
+            f"Filled field {field}. "
+            "Use get_ocr_summary or tap_and_observe before next step (e.g. tap Login)."
+        )
+        _log_tool(
+            ctx,
+            "fill_credential_field",
+            {"x": x, "y": y, "field": field},
+            safe_msg[:2000],
+        )
+        return out
+
+    @agent.tool
     async def verify_adb_connection(ctx: RunContext[ExecutorAgentDeps]) -> str:
         msg = ctx.deps.adb.verify_connection()
         ctx.deps.view.tool("verify_adb_connection", msg)
@@ -191,7 +265,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             return blocked
         game = ctx.deps.app_config.game
         if not game.launch_activity.strip():
-            return "配置错误：game.launch_activity 为空"
+            return "Config error: game.launch_activity is empty"
         msg = ctx.deps.adb.launch_game(game.package_name, game.launch_activity)
         ctx.deps.view.tool("open_game_app", msg[:800])
         _log_tool(ctx, "open_game_app", {}, msg[:2000])
@@ -236,7 +310,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         path = ctx.deps.artifact_root / f"ocr_{ts}.png"
         ctx.deps.adb.screencap_png(path)
         s = extract_text_with_bounds(path)
-        header = f"[实时 OCR] screenshot={path.resolve()}\n"
+        header = f"[Live OCR] screenshot={path.resolve()}\n"
         ctx.deps.view.tool("get_ocr_summary", (header + s)[:1200])
         full = header + s
         _log_tool(ctx, "get_ocr_summary", {"settle_seconds": settle_seconds}, full[:4000])
@@ -251,7 +325,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             return blocked
         msg = ctx.deps.adb.tap(x, y, width=ctx.deps.screen_width, height=ctx.deps.screen_height)
         ctx.deps.view.tool("tap_coordinate", msg)
-        out = f"{msg}\n提示：界面可能已变化，请调用 get_ocr_summary 获取最新 OCR。"
+        out = f"{msg}\nHint: UI may have changed — call get_ocr_summary for fresh OCR."
         _log_tool(ctx, "tap_coordinate", {"x": x, "y": y}, out[:2000])
         return out
 
@@ -280,7 +354,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             width=ctx.deps.screen_width,
             height=ctx.deps.screen_height,
         )
-        if "拒绝点击" in tap_msg:
+        if "Refused tap" in tap_msg or "rejected" in tap_msg.lower():
             ctx.deps.view.tool("tap_and_observe", tap_msg)
             _log_tool(ctx, "tap_and_observe", {"x": x, "y": y}, tap_msg)
             return tap_msg
@@ -325,7 +399,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         elif d == "right":
             dx, dy = dist, 0
         else:
-            err = f"未知方向: {direction!r}，请使用 up/down/left/right"
+            err = f"Unknown direction: {direction!r}; use up/down/left/right"
             _log_tool(ctx, "swipe_screen", {"direction": direction}, err)
             return err
         msg = ctx.deps.adb.swipe(cx, cy, cx + dx, cy + dy, duration_ms=duration_ms)
@@ -385,11 +459,11 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             ctx.deps.run_state.finished = True
             ctx.deps.run_state.success = False
             ctx.deps.run_state.note = summary[:2000]
-            out = "已记录失败结束状态，请停止继续调用工具。"
+            out = "Recorded failure; stop calling tools."
         else:
             out = (
-                "请勿对 success=true 调用本工具。"
-                "游戏启动流程请调用 wait_for_game_running。"
+                "Do not call this tool with success=true. "
+                "Use wait_for_game_running for game launch completion."
             )
         ctx.deps.view.tool(
             "report_flow_done",

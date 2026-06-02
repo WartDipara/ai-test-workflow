@@ -7,34 +7,52 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class LLMSection(BaseModel):
-    """LLM API 配置：全部来自配置文件，禁止在业务代码中写死。"""
+    """任意 OpenAI 兼容 LLM 端点（主脑 / 多模态均可复用此结构）。"""
 
     base_url: str = Field(..., description="OpenAI 兼容 API base URL")
     api_key: str = Field(..., description="API Key，可配合 YAML 中的 ${ENV} 由加载器展开")
-    model_name: str = Field(..., description="模型名称，如 gpt-4o、deepseek-chat")
-    skip_vision_probe: bool = Field(
-        False,
-        description="为 true 时跳过启动时的多模态探针（仅调试用；正式跑登录需 vision）",
+    model_name: str = Field(..., description="厂商 model 字段，如 deepseek-v4-flash、gpt-4o 等")
+
+
+class DeepSeekSection(BaseModel):
+    """
+    仅当 llm 或 llm_multimodal 的 model_name 为 DeepSeek 官方模型时生效。
+    与 llm 段解耦，避免主脑配置与单一厂商绑定。
+    """
+
+    thinking: bool = Field(
+        True,
+        description="官方思考模式；false 时不注入 thinking / reasoning_effort。",
     )
-    deepseek_litellm_compat: bool = Field(
+    reasoning_effort: Literal["high", "max"] = Field(
+        "high",
+        description=(
+            "思考强度（仅 thinking=true）：官方支持 high、max。"
+            "见 https://api-docs.deepseek.com/zh-cn/guides/thinking_mode"
+        ),
+    )
+    tool_calls_strict: bool = Field(
         False,
         description=(
-            "扩展项，默认关闭：保持官方 DeepSeek v4 思考模式适配器（注入 reasoning_effort / thinking）。"
-            "若经 LiteLLM 等代理调用且网关报不支持上述参数，改为 true，"
-            "则对 deepseek v4-flash/v4-pro 走通用 OpenAI 兼容请求、不注入思考参数。"
+            "Beta strict Tool Calls：为 true 时使用 https://api.deepseek.com/beta，"
+            "且工具定义须符合官方 strict JSON Schema。"
+            "见 https://api-docs.deepseek.com/zh-cn/guides/tool_calls"
         ),
     )
 
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_legacy_deepseek_thinking_flag(cls, data: Any) -> Any:
-        """兼容已弃用字段 deepseek_thinking_mode：false 表示代理兼容，映射为 deepseek_litellm_compat=true。"""
-        if not isinstance(data, dict):
-            return data
-        if "deepseek_thinking_mode" in data and "deepseek_litellm_compat" not in data:
-            old = data.pop("deepseek_thinking_mode")
-            data["deepseek_litellm_compat"] = not bool(old)
-        return data
+
+class ObserverSection(BaseModel):
+    """观察者阶段（多模态截图判定 / 画面监控），与主脑 llm 无关。"""
+
+    skip_vision_probe: bool = Field(
+        False,
+        description="为 true 时跳过启动前对 llm_multimodal 的多模态探针（调试用）。",
+    )
+
+
+def is_deepseek_model(model_name: str) -> bool:
+    name = (model_name or "").lower().strip()
+    return name.startswith("deepseek-") or name in ("deepseek-chat", "deepseek-reasoner")
 
 
 class AdbSection(BaseModel):
@@ -216,6 +234,15 @@ class GameTurboSection(BaseModel):
         return self
 
 
+class CredentialsSection(BaseModel):
+    """游戏登录账号密码（独立 YAML，勿提交 git）。"""
+
+    file_path: Path = Field(
+        Path("./credentials.yaml"),
+        description="凭据文件路径，含 username 与 password 字段。",
+    )
+
+
 class PreprocessingSection(BaseModel):
     """预处理阶段配置：APK 下载/ABI 剥离。在 retry 循环前执行一次。"""
 
@@ -311,6 +338,39 @@ class LoggingSection(BaseModel):
 class AppConfig(BaseModel):
     """根配置，对应一份 YAML。"""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_nested_fields(cls, data: Any) -> Any:
+        """将误写在 llm 下的厂商/观察者字段迁到独立段。"""
+        if not isinstance(data, dict):
+            return data
+        llm = data.get("llm")
+        if isinstance(llm, dict):
+            for key in ("deepseek_litellm_compat", "deepseek_thinking_mode"):
+                llm.pop(key, None)
+            if "deepseek_thinking" in llm:
+                deepseek = data.setdefault("deepseek", {})
+                if isinstance(deepseek, dict):
+                    deepseek.setdefault("thinking", llm.pop("deepseek_thinking"))
+            if "skip_vision_probe" in llm:
+                observer = data.setdefault("observer", {})
+                if isinstance(observer, dict):
+                    observer.setdefault("skip_vision_probe", llm.pop("skip_vision_probe"))
+        return data
+
+    @model_validator(mode="after")
+    def _deepseek_llm_requires_official_base_url(self) -> AppConfig:
+        for label, section in (("llm", self.llm), ("llm_multimodal", self.llm_multimodal)):
+            if section is None or not is_deepseek_model(section.model_name):
+                continue
+            base = section.base_url.rstrip("/").lower()
+            if not base.startswith("https://api.deepseek.com"):
+                raise ValueError(
+                    f"{label} 使用 DeepSeek 模型时须为官方端点 base_url=https://api.deepseek.com "
+                    f"（当前为 {section.base_url!r}）。文档: https://api-docs.deepseek.com/zh-cn/"
+                )
+        return self
+
     @model_validator(mode="after")
     def _require_game_when_executor(self) -> AppConfig:
         if self.modules.executor:
@@ -328,11 +388,17 @@ class AppConfig(BaseModel):
             "如果为空，则默认使用主 LLM（如果主 LLM 支持）。"
         ),
     )
+    deepseek: DeepSeekSection = Field(
+        default_factory=DeepSeekSection,
+        description="仅当某 LLM 段的 model 为 DeepSeek 官方模型时使用。",
+    )
+    observer: ObserverSection = Field(default_factory=ObserverSection)
     adb: AdbSection = Field(default_factory=AdbSection)
     ocr: OcrSection = Field(default_factory=OcrSection)
     executor: ExecutorSection = Field(default_factory=ExecutorSection)
     game: GameSection
     gameturbo: GameTurboSection = Field(default_factory=GameTurboSection)
+    credentials: CredentialsSection = Field(default_factory=CredentialsSection)
     preprocessing: PreprocessingSection = Field(default_factory=PreprocessingSection)
     modules: ModulesSection = Field(default_factory=ModulesSection)
     agent: AgentSection = Field(default_factory=AgentSection)

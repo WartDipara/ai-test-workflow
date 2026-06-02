@@ -27,6 +27,7 @@ from game_agent.services.session_memory import (
     save_conversation_history,
     save_session_memory,
 )
+from game_agent.services.credentials import credentials_status_message
 from game_agent.services.login_flow_skill import COMPACT_STAGE_HINT
 from game_agent.services.success_skill_summarizer import write_skill_from_success_run
 from game_agent.utils.ocr_util import configure_ocr, extract_text_with_bounds, warmup_ocr
@@ -125,6 +126,7 @@ class ExecutorFlowController:
             screen_height=h,
             audit=audit,
             round_id=0,
+            settings_path=self._config_path.resolve(),
         )
 
         agent = build_executor_agent(cfg)
@@ -160,14 +162,14 @@ class ExecutorFlowController:
                 try:
                     ocr_summary = extract_text_with_bounds(shot_path)
                 except Exception as e:
-                    ocr_summary = f"[OCR 识别失败或未安装 PaddleOCR] {e}"
+                    ocr_summary = f"[OCR failed or PaddleOCR not installed] {e}"
                     logger.warning("OCR 失败: %s", e)
             else:
                 view.banner("非游戏前台，跳过本轮开局 OCR")
                 ocr_summary = (
-                    "[跳过 OCR] 当前不在游戏内。"
-                    f"foreground={fg_line}。"
-                    "请调用 open_game_app 后再 get_ocr_summary。"
+                    "[OCR skipped] Not in game foreground. "
+                    f"foreground={fg_line}. "
+                    "Call open_game_app then get_ocr_summary."
                 )
 
             if fg_pkg != target_pkg:
@@ -175,34 +177,40 @@ class ExecutorFlowController:
             else:
                 not_foreground_rounds = 0
 
+            cred_hint = credentials_status_message(
+                cfg.credentials.file_path,
+                settings_path=self._config_path.resolve(),
+            )
             preamble = (
-                f"第 {r + 1}/{cfg.agent.max_rounds} 轮。"
-                f"屏幕尺寸={w}x{h}。"
-                f"游戏包={target_pkg}。"
-                f"广告/加载初次等待建议={cfg.executor.ad_initial_wait_s:.1f}s。"
-                f"当前前台应用={fg_line}。"
-                f"连续非游戏前台轮数={not_foreground_rounds}。"
-                "本阶段：纯 AI 按通用登录阶段模型操作（无 per-game 脚本）。"
-                f"测试游戏包名={game_pkg}。"
-                f"等待游戏超时={cfg.game.launch_detect_timeout_s:.0f}s（轮询 {cfg.game.launch_detect_poll_interval_s:.1f}s）。"
-                "登录链尾声必须 wait_for_game_running(summary 含阶段与最后操作)。"
-                "首轮或阶段不明时调用 read_login_flow_guide。"
-                "每轮回复须含：当前阶段 ID（splash/privacy/announcement/login/server_select/…）+ 下一步工具。"
+                f"Round {r + 1}/{cfg.agent.max_rounds}. "
+                f"Screen={w}x{h}. "
+                f"Game package={target_pkg}. "
+                f"Suggested initial ad/load wait={cfg.executor.ad_initial_wait_s:.1f}s. "
+                f"Foreground={fg_line}. "
+                f"Consecutive non-game foreground rounds={not_foreground_rounds}. "
+                "Phase: generic login stage model (no per-game scripts). "
+                f"Target package={game_pkg}. "
+                f"Launch detect timeout={cfg.game.launch_detect_timeout_s:.0f}s "
+                f"(poll {cfg.game.launch_detect_poll_interval_s:.1f}s). "
+                "End login chain with wait_for_game_running(summary: stage + last action). "
+                "Call read_login_flow_guide on round 1 or unclear stage. "
+                "Each reply: current stage ID + next tools. "
+                f"Credentials: {cred_hint}"
             )
             fg_block = (
-                "=== 前台应用检测(dumpsys) ===\n"
+                "=== Foreground (dumpsys) ===\n"
                 f"foreground={fg_line}\n"
                 f"target_package={target_pkg}\n"
                 f"target_activity={cfg.game.launch_activity}\n"
             )
             memory_block = (
-                "=== 已执行操作记录（系统自动）===\n"
+                "=== Action log (system) ===\n"
                 + session_memory.format_action_log()
             )
             ocr_block = (
-                f"=== 屏幕 OCR（第 {r + 1} 轮开局快照，非实时）===\n"
-                "说明：此块在调用主脑之前已生成。同轮内若已 tap，"
-                "须用 get_ocr_summary 或 tap_and_observe 返回中的 OCR。\n"
+                f"=== Screen OCR (round {r + 1} opening snapshot, not live) ===\n"
+                "Generated before the model runs. After tap in this round, "
+                "use get_ocr_summary or tap_and_observe OCR.\n"
                 + ocr_summary[:8000]
             )
             user_parts: list[str] = [

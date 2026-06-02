@@ -41,6 +41,7 @@ htmlcov/
 secrets/
 config/settings.yaml
 config/credentials.yaml
+credentials.yaml
 *.local.yaml
 
 # --- Runtime (game_agent) ---
@@ -61,6 +62,8 @@ desktop.ini
 res/
 apk_cache/
 .vscode/
+test.py
+check_balance.py
 
 # --- GameTurbo-Native Not Tracked ---
 GameTurbo-Native/

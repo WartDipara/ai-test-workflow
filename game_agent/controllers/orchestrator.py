@@ -412,7 +412,7 @@ class GameTestOrchestrator:
 
         needs_vision = (
             cfg.modules.screen_monitor or cfg.modules.game_entry_detect
-        ) and not cfg.llm.skip_vision_probe
+        ) and not cfg.observer.skip_vision_probe
         if needs_vision:
             vision_err = await probe_startup_for_llm(cfg.llm, cfg.llm_multimodal)
             if vision_err:

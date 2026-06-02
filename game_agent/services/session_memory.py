@@ -38,7 +38,7 @@ class SessionMemory:
     def format_action_log(self) -> str:
         """仅事实性工具链列表，不含任何给模型的指令性话术。"""
         if not self.rounds:
-            return "无"
+            return "(none)"
         return "\n".join(
             f"R{rec.round_id + 1}: "
             + (" → ".join(rec.tools) if rec.tools else "-")

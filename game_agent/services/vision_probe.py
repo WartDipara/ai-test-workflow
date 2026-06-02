@@ -35,7 +35,7 @@ async def probe_multimodal_support(llm: LLMSection) -> str | None:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "只回复数字 1。"},
+                        {"type": "text", "text": "Reply with digit 1 only."},
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{_MIN_PNG_B64}"},
@@ -58,7 +58,7 @@ async def probe_multimodal_support(llm: LLMSection) -> str | None:
         return _format_vision_failure(snippet)
     except Exception as e:
         logger.exception("多模态探针发生非预期异常")
-        return f"多模态探针异常（非 400 类）: {e!s}"
+        return f"Multimodal probe unexpected error: {e!s}"
 
 
 async def probe_startup_for_llm(llm: LLMSection, llm_multimodal: LLMSection | None = None) -> str | None:
@@ -69,8 +69,8 @@ async def probe_startup_for_llm(llm: LLMSection, llm_multimodal: LLMSection | No
 
 def _format_vision_failure(api_detail: str) -> str:
     return (
-        "【启动检查】当前多模态 LLM 配置不支持本 Agent 所需的多模态输入（消息中含 image_url / 截图）。\n"
-        "登录流程每轮都会附带截屏，请更换为支持视觉的 OpenAI 兼容模型与端点，"
-        "或查阅厂商文档确认该 model 是否支持图片。\n"
-        f"API 返回摘要: {api_detail}"
+        "[Startup check] Multimodal LLM config does not accept image_url / screenshots required by this agent.\n"
+        "Executor rounds attach screenshots — use a vision-capable OpenAI-compatible model/endpoint, "
+        "or confirm image support in vendor docs.\n"
+        f"API detail: {api_detail}"
     )

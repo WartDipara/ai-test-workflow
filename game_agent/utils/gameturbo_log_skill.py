@@ -26,13 +26,13 @@ def gameturbo_log_baseline_prompt_block() -> str:
     skill = load_gameturbo_log_baseline_skill().strip()
     found = [str(p) for p in _BASELINE_SAMPLE_LOGS if p.is_file()]
     sample = (
-        "基准样本: " + ", ".join(found)
+        "Baseline sample logs: " + ", ".join(found)
         if found
-        else "（仓库内健康样本 .log 未找到，仅使用 SKILL 条文）"
+        else "(no healthy .log samples in repo; SKILL text only)"
     )
     if not skill:
         return (
-            "【GameTurbo 日志基线】技能文件缺失，请谨慎区分 tunnel 重连与真实故障。\n"
+            "[GameTurbo log baseline] SKILL file missing; distinguish tunnel reconnect vs real faults.\n"
             + sample
         )
-    return f"【GameTurbo 日志正常基线 — 须遵守】\n{sample}\n\n{skill}\n"
+    return f"[GameTurbo healthy log baseline — mandatory]\n{sample}\n\n{skill}\n"

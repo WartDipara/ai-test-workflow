@@ -34,36 +34,31 @@ class VisionWorker:
         返回一段 JSON 格式的字符串，包含 status、stage、message 等字段。
         """
         prompt = f"""
-请分析当前游戏画面的状态和是否有异常。
-画面 OCR 结果：
+Analyze the current game screen state and whether a **network-related** anomaly is shown.
+OCR:
 {ocr_summary}
 
-任务：
-1. 识别当前所处阶段：
-   - resource_download: 正在下载资源（进度条）
-   - login: 登录界面（服务器列表等）
-   - enter_game: 已进入游戏或正在连接游戏服
-   - unknown: 未知状态
-2. 识别是否有【网络相关】异常情况发生：
-   - 仅当画面出现以下网络类错误弹窗/提示时，才判定 has_anomaly=true：
-     * “网络连接失败”、“网络异常”、“网络无连接”、“没有网络”、“请检查网络”
-     * “连接超时”、“连接失败”、“服务器连接失败”、“与服务器断开连接”
-     * “服务器加载失败”、“服务器获取失败”、“服务器繁忙”、“服务器维护中”
-     * “资源下载失败”、“资源加载失败”、“更新失败”、“下载失败”
-     * “当前地区不支持”、“当前区域暂未开放”
-   - 【重要】以下情况 NOT 视为异常，必须 has_anomaly=false：
-     * “账号或密码错误”、“登录失败”、“验证码错误”、“账号异常”、“账号被冻结”
-     * 任何与账号、密码、验证、实名认证相关的错误提示
-     * 服务器选择界面、排队等待、加载中（正常流程）
-     * “同意协议”、“公告”、“活动弹窗”等正常运营内容
-3. 如果是在下载阶段，尝试提取当前进度百分比。
+Tasks:
+1. Stage:
+   - resource_download: asset download (progress bar)
+   - login: login / server list UI
+   - enter_game: in game or connecting to game server
+   - unknown
+2. has_anomaly=true **only** for network error dialogs/copy, e.g. (including Chinese UI if present):
+   network failed, no network, check network, connection timeout/failed, server connection failed/disconnected,
+   server load/fetch failed, server busy/maintenance, resource download/load failed, update/download failed,
+   region not supported / not open in this area.
+   **Important** has_anomaly=false for:
+   wrong account/password, login failed, captcha, account frozen; any account/verification/real-name errors;
+   server picker, queue, normal loading; privacy/terms/announcement/event popups.
+3. If resource_download, extract progress percent if visible.
 
-请严格返回合法的 JSON 对象，不要输出 markdown code block，直接输出 JSON 文本：
+Return valid JSON only (no markdown fence):
 {{
     "has_anomaly": bool,
-    "anomaly_reason": "如果有异常，写明原因；如果没有，为空",
+    "anomaly_reason": "reason if anomaly else empty",
     "stage": "resource_download | login | enter_game | unknown",
-    "progress": "如果在下载阶段，提取到的进度（如 '45%'），否则为空"
+    "progress": "e.g. 45% if downloading else empty"
 }}
 """
         prefix = f"[VisionWorker] 第 {round_id} 轮" if round_id is not None else "[VisionWorker]"
@@ -110,51 +105,48 @@ class VisionWorker:
         creation_block = ""
         if ocr_creation_hits:
             creation_block = (
-                "\n【硬性提示】OCR 已命中创角/局外关键词: "
+                "\n[Hard rule] OCR hit character-creation keywords: "
                 + ", ".join(ocr_creation_hits)
-                + "。除非画面明确证明已离开创角流程，否则 in_game_main 必须为 false，"
-                "blockers 须包含 character_creation。\n"
+                + ". Unless the screen clearly left creation flow, in_game_main must be false "
+                "and blockers must include character_creation.\n"
             )
 
         session_block = ""
         if sessions_restarted > 0:
             session_block = (
-                f"\n【会话上下文】当前为第 {session_index} 次游戏会话，"
-                f"此前已发生 {sessions_restarted} 次游戏 crash/重启。"
-                "请仅根据本张截图判断阶段，勿沿用任何历史截图结论；"
-                "重启后常见为 resource_download 或 login。\n"
+                f"\n[Session] Game session #{session_index}; {sessions_restarted} prior crash/restart(s). "
+                "Judge only this screenshot; after restart stage is often resource_download or login.\n"
             )
 
         prompt = f"""
-你是游戏自动化测试中的「进入游戏」判定器。只根据截图与 OCR 判断：玩家是否已经进入游戏内可玩场景。
-不要参考任何外部自动化脚本或找色配置。
+You judge whether the player reached an in-game playable scene (game automation observer). Use screenshot + OCR only.
 
-画面 OCR（坐标+文字+置信度）：
+OCR (x,y text confidence):
 {ocr_summary}
 {creation_block}{session_block}
 
-## 判为 in_game_main=true（已进入游戏内）的条件
-- 已离开登录/注册/选服/协议等局外界面；
-- 已离开资源下载进度条为主的界面；
-- 已离开「连接中/加载中」等纯过渡画面；
-- 已离开创建角色流程（选职业、取名、捏脸等）；
-- 当前为游戏内 3D/2D 场景或游戏 HUD；**即使存在强制新手引导、全屏蒙层、手指指引、剧情对话框，仍算已进入游戏**（stage 可为 tutorial_overlay，但 in_game_main 仍为 true）。
+## in_game_main=true when
+- Past login/register/server/terms out-of-game UI;
+- Past download progress screen;
+- Past pure loading/connecting transitions;
+- Past character creation (class/name/avatar);
+- In-game 3D/2D or HUD; **forced tutorial overlay, mask, finger hint, dialog still count as in-game** (stage may be tutorial_overlay, in_game_main true).
 
-## 判为 in_game_main=false 的情况
-- 仍在登录、选服、下载资源、创角、仅显示桌面/启动器；
-- OCR 含创角相关词且画面仍是创角界面。
+## in_game_main=false when
+- Still on login/server pick/download/creation/launcher/desktop;
+- Creation OCR hits and UI still looks like creation.
 
-## stage 枚举
+## stage
 login | server_select | resource_download | loading | character_creation | tutorial_overlay | in_game_main | unknown
 
-请严格输出合法 JSON（不要 markdown 代码块）：
+JSON only (no markdown fence):
 {{
     "in_game_main": bool,
-    "confidence": 0.0到1.0,
-    "stage": "上述枚举之一",
-    "ocr_signals": ["你依据的关键 OCR 片段"],
-    "reason": "一句话理由",
-    "blockers": ["如 character_creation、login_screen，无则 []"]
+    "confidence": 0.0-1.0,
+    "stage": "enum above",
+    "ocr_signals": ["key OCR snippets you used"],
+    "reason": "one sentence",
+    "blockers": ["e.g. character_creation, login_screen, or []"]
 }}
 """
         prefix = (
@@ -194,7 +186,7 @@ login | server_select | resource_download | loading | character_creation | tutor
                             ),
                         ),
                         "reason": (
-                            f"OCR 创角词覆盖: {ocr_creation_hits}; "
+                            f"OCR creation override: {ocr_creation_hits}; "
                             + judgment.reason
                         )[:500],
                     },
@@ -207,7 +199,7 @@ login | server_select | resource_download | loading | character_creation | tutor
                 in_game_main=False,
                 confidence=0.0,
                 stage="unknown",
-                reason="多模态 API 调用失败",
+                reason="Multimodal API call failed",
             )
 
 
@@ -227,5 +219,5 @@ def _parse_game_entry_judgment(raw: str) -> GameEntryJudgment:
             in_game_main=False,
             confidence=0.0,
             stage="unknown",
-            reason=f"无法解析模型 JSON: {text[:300]}",
+            reason=f"Failed to parse model JSON: {text[:300]}",
         )

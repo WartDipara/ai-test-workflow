@@ -88,7 +88,7 @@ async def run_deploy_with_ai_retry(
     """
     max_attempts = app_config.gameturbo.deploy_max_ai_retries
     llm = app_config.llm_multimodal or app_config.llm
-    analysis = AnalysisAgent(llm)
+    analysis = AnalysisAgent(llm, deepseek=app_config.deepseek)
 
     last_error = ""
     last_log_path: Path | None = None

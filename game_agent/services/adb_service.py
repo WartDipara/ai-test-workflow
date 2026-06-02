@@ -38,11 +38,11 @@ class AdbService:
     def uninstall(self, package: str, *, timeout: float = 60.0) -> str:
         pkg = (package or "").strip()
         if not pkg:
-            return "拒绝：包名为空"
+            return "Refused: empty package name"
         r = self._run(["uninstall", pkg], timeout=timeout)
         if r.returncode == 0:
-            return f"已卸载: {pkg}"
-        return f"卸载返回码 {r.returncode}: {(r.stderr or r.stdout or '').strip()}"
+            return f"Uninstalled: {pkg}"
+        return f"Uninstall exit {r.returncode}: {(r.stderr or r.stdout or '').strip()}"
 
     def _run(
         self,
@@ -66,11 +66,11 @@ class AdbService:
     def verify_connection(self) -> str:
         r = self._run(["get-state"], timeout=15.0)
         if r.returncode != 0:
-            return f"adb get-state 失败: {r.stderr.strip() or r.stdout.strip()}"
+            return f"adb get-state failed: {r.stderr.strip() or r.stdout.strip()}"
         state = (r.stdout or "").strip()
         if state != "device":
-            return f"设备状态异常: {state!r}（期望 device）"
-        return f"adb 已连接: state={state}"
+            return f"Bad device state: {state!r} (expected device)"
+        return f"adb connected: state={state}"
 
     def shell(self, command: str, *, timeout: float = 60.0) -> str:
         r = self._run(["shell", command], timeout=timeout)
@@ -85,22 +85,22 @@ class AdbService:
         else:
             cmd = f"monkey -p {package} -c android.intent.category.LAUNCHER 1"
         out = self.shell(cmd, timeout=60.0)
-        return f"已执行启动: {cmd}\n输出摘要: {out[:500]}"
+        return f"Launched: {cmd}\nOutput: {out[:500]}"
 
     def force_stop_package(self, package: str) -> str:
         """结束指定包名应用进程（am force-stop，等同从最近任务划掉）。"""
         pkg = (package or "").strip()
         if not pkg:
-            return "拒绝：包名为空"
+            return "Refused: empty package name"
         if not _PACKAGE_RE.match(pkg):
-            return f"拒绝：非法包名 {package!r}"
+            return f"Refused: invalid package {package!r}"
         try:
             self.shell(f"am force-stop {pkg}", timeout=15.0)
-            return f"已 force-stop: {pkg}"
+            return f"force-stop OK: {pkg}"
         except subprocess.TimeoutExpired as e:
-            return f"force-stop 超时: {pkg} timeout={e.timeout}s"
+            return f"force-stop timeout: {pkg} timeout={e.timeout}s"
         except Exception as e:
-            return f"force-stop 失败: {pkg} err={e!s}"
+            return f"force-stop failed: {pkg} err={e!s}"
 
     def force_stop_packages(self, packages: list[str]) -> str:
         """批量 force-stop；去重并保持顺序。"""
@@ -113,7 +113,7 @@ class AdbService:
             seen.add(pkg)
             ordered.append(pkg)
         if not ordered:
-            return "未提供有效包名"
+            return "No valid package names provided"
         return "\n".join(self.force_stop_package(p) for p in ordered)
 
     def screencap_png(self, dest: Path) -> Path:
@@ -127,14 +127,14 @@ class AdbService:
 
     def tap(self, x: int, y: int, *, width: int, height: int) -> str:
         if not (0 <= x < width and 0 <= y < height):
-            return f"拒绝点击: ({x},{y}) 超出分辨率 {width}x{height}"
+            return f"Refused tap: ({x},{y}) outside {width}x{height}"
         try:
             self.shell(f"input tap {x} {y}", timeout=15.0)
-            return f"已点击 ({x},{y})"
+            return f"Tapped ({x},{y})"
         except subprocess.TimeoutExpired as e:
-            return f"点击超时: ({x},{y}) timeout={e.timeout}s"
+            return f"Tap timeout: ({x},{y}) timeout={e.timeout}s"
         except Exception as e:
-            return f"点击失败: ({x},{y}) err={e!s}"
+            return f"Tap failed: ({x},{y}) err={e!s}"
 
     def swipe(
         self,
@@ -146,31 +146,78 @@ class AdbService:
     ) -> str:
         try:
             self.shell(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}", timeout=20.0)
-            return f"已滑动 ({x1},{y1})->({x2},{y2})"
+            return f"Swiped ({x1},{y1})->({x2},{y2})"
         except subprocess.TimeoutExpired as e:
-            return f"滑动超时: ({x1},{y1})->({x2},{y2}) timeout={e.timeout}s"
+            return f"Swipe timeout: ({x1},{y1})->({x2},{y2}) timeout={e.timeout}s"
         except Exception as e:
-            return f"滑动失败: ({x1},{y1})->({x2},{y2}) err={e!s}"
+            return f"Swipe failed: ({x1},{y1})->({x2},{y2}) err={e!s}"
 
     def press_back(self) -> str:
         try:
             self.shell("input keyevent KEYCODE_BACK", timeout=10.0)
-            return "已按返回键"
+            return "Pressed BACK"
         except subprocess.TimeoutExpired as e:
-            return f"返回键超时: timeout={e.timeout}s"
+            return f"BACK timeout: timeout={e.timeout}s"
         except Exception as e:
-            return f"返回键失败: {e!s}"
+            return f"BACK failed: {e!s}"
 
     def input_text_adb(self, text: str) -> str:
-        """与 AppAgent 类似：空格替换为 %s，并去掉单引号。"""
+        """与 AppAgent 类似：空格替换为 %s，并去掉单引号（仅适合 ASCII）。"""
         t = text.replace(" ", "%s").replace("'", "")
         try:
             self.shell(f"input text {t}", timeout=20.0)
-            return "已通过 adb input text 输入（请确认焦点在正确输入框）"
+            return "Typed via adb input text (ensure correct field focused)"
         except subprocess.TimeoutExpired as e:
-            return f"输入超时: timeout={e.timeout}s（请检查设备是否卡死）"
+            return f"Input timeout: timeout={e.timeout}s (device stuck?)"
         except Exception as e:
-            return f"输入失败: {e!s}"
+            return f"Input failed: {e!s}"
+
+    def clear_focused_text(self, *, delete_rounds: int = 40) -> str:
+        """假定输入框已获焦点：先移到文首/文尾再批量删除，尽量清空已有内容。"""
+        delete_rounds = max(8, min(int(delete_rounds), 80))
+        fwd = "; ".join(["input keyevent 112"] * delete_rounds)
+        bwd = "; ".join(["input keyevent 67"] * delete_rounds)
+        script = f"input keyevent 122; {fwd}; input keyevent 123; {bwd}"
+        try:
+            self.shell(script, timeout=45.0)
+            return f"Cleared focused field (~{delete_rounds * 2} delete keyevents)"
+        except subprocess.TimeoutExpired as e:
+            return f"Clear field timeout: timeout={e.timeout}s"
+        except Exception as e:
+            return f"Clear field may be incomplete: {e!s}"
+
+    def paste_text(self, text: str) -> str:
+        """经系统剪贴板粘贴（支持中文与特殊字符）；失败时回退 input text。"""
+        r = self._run(["shell", "cmd", "clipboard", "set-text", text], timeout=15.0)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            logger.warning("clipboard set-text 失败，回退 input text: %s", err[:200])
+            return self.input_text_adb(text)
+        try:
+            self.shell("input keyevent 279", timeout=10.0)
+            return "Pasted via clipboard"
+        except Exception as e:
+            logger.warning("粘贴键失败，回退 input text: %s", e)
+            return self.input_text_adb(text)
+
+    def fill_text_at(
+        self,
+        x: int,
+        y: int,
+        text: str,
+        *,
+        width: int,
+        height: int,
+        settle_s: float = 0.35,
+    ) -> str:
+        """点击坐标 → 短暂等待 → 清空 → 填入文本。"""
+        tap_msg = self.tap(x, y, width=width, height=height)
+        if "Refused tap" in tap_msg:
+            return tap_msg
+        time.sleep(max(0.1, min(float(settle_s), 2.0)))
+        clear_msg = self.clear_focused_text()
+        type_msg = self.paste_text(text)
+        return f"{tap_msg}\n{clear_msg}\n{type_msg}"
 
     def wm_size(self) -> tuple[int, int]:
         out = self.shell("wm size", timeout=10.0)
@@ -244,4 +291,4 @@ class AdbService:
 
     def wait_seconds(self, seconds: float) -> str:
         time.sleep(max(0.0, min(seconds, 60.0)))
-        return f"已等待 {seconds:.1f}s"
+        return f"Waited {seconds:.1f}s"

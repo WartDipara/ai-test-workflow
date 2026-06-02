@@ -174,7 +174,7 @@ class RetryConfigHandler:
     ) -> GameTurboConfigPatch:
         cfg = self.app_config
         logger.info("AI 二次日志分析并生成配置补丁...")
-        agent = AnalysisAgent(cfg.llm_multimodal or cfg.llm)
+        agent = AnalysisAgent(cfg.llm_multimodal or cfg.llm, deepseek=cfg.deepseek)
         log_content = ""
         if local_log_path.is_file():
             try:

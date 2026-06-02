@@ -127,7 +127,7 @@ class GameEntryDetector:
             try:
                 ocr_summary = extract_text_with_bounds(shot_path)
             except Exception as e:
-                ocr_summary = f"[OCR 失败] {e}"
+                ocr_summary = f"[OCR failed] {e}"
 
             ocr_creation_hits = match_character_creation_ocr(ocr_summary)
             restarts = session.restarts_count if session is not None else 0

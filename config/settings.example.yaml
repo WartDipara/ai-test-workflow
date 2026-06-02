@@ -2,11 +2,17 @@
 llm:
   base_url: "https://api.openai.com/v1"
   api_key: "${OPENAI_API_KEY}"
-  model_name: "gpt-4o"
-  # 401 通常表示 base_url / api_key / model_name 不匹配，主脑模型必须使用同一网关下有效凭据。
+  model_name: "deepseek-v4-flash"
+
+# 仅当 llm / llm_multimodal 的 model 为 DeepSeek 官方模型时使用（主脑也可换成 gpt-4o 等，此时可忽略本段）
+deepseek:
+  thinking: true
+  reasoning_effort: high    # high | max
+  tool_calls_strict: false  # https://api-docs.deepseek.com/zh-cn/guides/tool_calls
+
+# 观察者启动前多模态探针（测的是 llm_multimodal，与主脑 llm 无关）
+observer:
   skip_vision_probe: false
-  # 扩展：经 LiteLLM 等代理且报 UnsupportedParamsError（reasoning_effort/thinking）时改为 true；默认 false 保留官方 DeepSeek 思考模式。
-  deepseek_litellm_compat: false
 
 llm_multimodal:
   base_url: "https://ai.14x.cn/coding/v1"
@@ -58,6 +64,10 @@ gameturbo:
   deploy_max_ai_retries: 3   # deploy 失败后 AI 读 deploy.log 并重试（含首次）的次数
   # 单次任务最终产出：run_outputs/{gid}_{task_id}/（成功为配置文件，失败为日志包）
   run_outputs_dir: "./run_outputs"
+
+# 登录填表（复制 config/credentials.example.yaml 为 credentials.yaml，勿提交 git）
+credentials:
+  file_path: "./credentials.yaml"   # 亦可 ./config/credentials.yaml
 
 # 流水线模块开关（便于单独测试）；默认均为 true
 modules:

@@ -116,7 +116,7 @@ class ScreenMonitor:
             try:
                 ocr_summary = extract_text_with_bounds(shot_path)
             except Exception as e:
-                ocr_summary = f"[OCR 识别失败] {e}"
+                ocr_summary = f"[OCR failed] {e}"
 
             try:
                 state_json_str = await vision_worker.analyze_game_state(

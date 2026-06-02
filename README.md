@@ -261,7 +261,15 @@ cp config/settings.example.yaml config/settings.yaml
 llm:
   base_url: "https://api.deepseek.com"
   api_key: "sk-你的key"           # ← 填写 DeepSeek API Key
-  model_name: "deepseek-v4-flash"
+  model_name: "deepseek-v4-flash"   # 主脑可换任意 OpenAI 兼容模型
+
+deepseek:                          # 仅当 model 为 DeepSeek 官方模型时生效
+  thinking: true
+  reasoning_effort: high             # high | max（思考强度）
+  tool_calls_strict: false         # Beta strict 工具调用
+
+observer:                          # 观察者多模态探针（非主脑）
+  skip_vision_probe: false
 
 llm_multimodal:
   base_url: "https://your-gateway/v1"
@@ -584,7 +592,7 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 | [services/llm_service.py](game_agent/services/llm_service.py) | `build_llm_model` |
 | [services/llm_adapters/](game_agent/services/llm_adapters/) | openai / deepseek / qwen |
 
-`deepseek_litellm_compat: true` 用于不支持思考参数的网关。正式跑进入游戏判定需配置 `llm_multimodal`；`skip_vision_probe: true` 仅跳过启动探针，不关闭判定本身。
+**`llm`** 为通用 OpenAI 兼容主脑；**`deepseek`** 段仅在 model 为 DeepSeek 时由 `DeepSeekAdapter` 读取（[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)）。**`observer.skip_vision_probe`** 控制 `llm_multimodal` 启动探针，与主脑无关。
 
 ---
 

@@ -340,42 +340,43 @@ def format_domain_analysis_for_ai(domain_analysis: dict[str, Any] | None) -> str
     """
     if not domain_analysis:
         return (
-            "【域名/区域分析 JSON】缺失。\n"
-            "Modify 阶段禁止提出 direct_patterns/port_rules 补丁。\n"
-            "须先由 game_agent.utils.gameturbo_log_domain_extract 从 gameturbo.log 生成 "
-            f"{DEFAULT_OUTPUT_NAME}（逻辑对齐 extract_domain_region_from_log.sh）。"
+            "[Domain/region JSON] missing.\n"
+            "Modify stage: do not propose direct_patterns/port_rules patches.\n"
+            "Generate "
+            f"{DEFAULT_OUTPUT_NAME} from gameturbo.log via game_agent.utils.gameturbo_log_domain_extract "
+            "(aligned with extract_domain_region_from_log.sh)."
         )
 
     lines = [
-        "【域名/区域分析 JSON — Modify 首要依据】",
+        "[Domain/region JSON — primary for Modify]",
         f"schema_version: {domain_analysis.get('schema_version', '?')}",
         f"domain_count: {domain_analysis.get('domain_count', 0)}",
         f"checker_script: {domain_analysis.get('checker_script', '')}",
         "",
-        "## tunnel_domains（日志 [SNI-TUNNEL]，已用 check_target_stability 查归属地）",
+        "## tunnel_domains ([SNI-TUNNEL] in log; geo via check_target_stability)",
     ]
     for row in domain_analysis.get("tunnel_domains") or []:
         if not isinstance(row, dict):
             continue
-        pending = ", ".join(row.get("matched_pending_ips") or []) or "无"
+        pending = ", ".join(row.get("matched_pending_ips") or []) or "none"
         lines.append(
             f"- {row.get('domain')}: geo={row.get('geo_summary')}, "
             f"is_china={row.get('is_china')}, pending_ip={pending}",
         )
 
-    lines.extend(["", "## direct_domains（日志 [SNI-DIRECT]，仅资源/渠道类适合写入 direct_patterns）"])
+    lines.extend(["", "## direct_domains ([SNI-DIRECT]; resource/channel only for direct_patterns)"])
     for row in domain_analysis.get("direct_domains") or []:
         if isinstance(row, dict):
             lines.append(f"- {row.get('domain')}")
 
-    lines.extend(["", "## unknown_domains（未在日志出现 SNI 行，勿批量 direct）"])
+    lines.extend(["", "## unknown_domains (no SNI line in log; do not bulk direct)"])
     for row in domain_analysis.get("unknown_domains") or []:
         if isinstance(row, dict):
             lines.append(f"- {row.get('domain')}")
 
     unmatched = domain_analysis.get("unmatched_pending_ips") or []
     if unmatched:
-        lines.extend(["", "## unmatched_pending_ips（日志有 PENDING 但未与 tunnel 解析 IP 对齐）"])
+        lines.extend(["", "## unmatched_pending_ips (PENDING in log, IP not aligned to tunnel resolve)"])
         lines.extend(f"- {ip}" for ip in unmatched)
 
     non_china = domain_analysis.get("non_china_domains") or []
@@ -390,15 +391,15 @@ def format_domain_analysis_for_ai(domain_analysis: dict[str, Any] | None) -> str
 
     console_eq = domain_analysis.get("console_equivalent") or []
     if console_eq:
-        lines.extend(["", "## console_equivalent（等同 shell 脚本 stdout 摘要）"])
+        lines.extend(["", "## console_equivalent (shell script stdout summary)"])
         lines.extend(console_eq[:80])
         if len(console_eq) > 80:
-            lines.append(f"... 共 {len(console_eq)} 行，完整见 JSON 文件")
+            lines.append(f"... {len(console_eq)} lines total; see JSON file")
 
     lines.extend(
         [
             "",
-            "## 完整 JSON（结构化字段）",
+            "## Full JSON",
             json.dumps(domain_analysis, ensure_ascii=False, indent=2),
         ],
     )

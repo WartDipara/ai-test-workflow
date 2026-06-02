@@ -166,46 +166,46 @@ async def generate_attempt_failure_report(
     game_config_path: Path | None,
 ) -> AttemptRoundDiagnosis:
     bundle = _collect_attempt_bundle(retry_no, artifact_root, last_reason=reason)
-    config_block = "（无）"
+    config_block = "(none)"
     if game_config_path and game_config_path.is_file():
         config_block = _read_text(game_config_path, limit=12000)
 
     retry_note = (
-        "本轮结束后编排器将自动重试；请评估已应用的配置补丁是否可能解决根因，并在 suggested_actions 中说明。"
+        "Orchestrator will auto-retry after this round; assess whether applied config patch may fix root cause; state in suggested_actions."
         if will_retry
-        else "本轮为最后一次尝试或已关闭 retry_on_failure；建议侧重人工修复项。"
+        else "Last attempt or retry_on_failure disabled; focus on manual remediation."
     )
 
     prompt = f"""
 {gameturbo_log_baseline_prompt_block()}
 
-你是 GameTurbo 排障专家。自动化测试**第 {retry_no} 轮**失败，请输出单轮诊断 AttemptRoundDiagnosis。
+You are a GameTurbo triage expert. Automated test **attempt {retry_no}** failed — output AttemptRoundDiagnosis for this round only.
 {retry_note}
-判定日志时须对照基线，区分正常噪声与真实故障。
+Judge logs against the baseline; separate benign noise from real faults.
 
 gid: {gid}
-编排器记录原因: {reason}
-failure_stage 请从 init/executor/observer/modify/unknown 中选最贴切的一项。
+Orchestrator reason: {reason}
+Pick failure_stage: init | executor | observer | modify | unknown.
 
-当前游戏配置 JSON:
+Current game config JSON:
 {config_block}
 
-本轮证据包:
+Evidence bundle this round:
 {json.dumps(bundle, ensure_ascii=False, indent=2)}
 
-要求:
-1. round_summary / immediate_verdict 必须具体，禁止空话
-2. log_highlights: 3-8 条，尽量保留日志原文关键片段
-3. 结合 domain_analysis、截图路径、ai_patch_report（若有）分析
-4. modify_stage_notes: 若 ai_patch_report 非空，说明补丁做了什么、是否值得下一轮验证
-5. suggested_actions: 面向下一轮或人工的具体动作
-6. evidence_gaps: 本轮仍缺什么证据
+Requirements:
+1. round_summary / immediate_verdict must be specific — no filler
+2. log_highlights: 3–8 items with key log excerpts
+3. Use domain_analysis, screenshot paths, ai_patch_report if present
+4. modify_stage_notes: if ai_patch_report non-empty, what changed and worth verifying next round
+5. suggested_actions: concrete next steps for retry or humans
+6. evidence_gaps: what is still missing
 
-只分析**本轮**，不要写「所有轮次总结」。
+Analyze **this attempt only** — not a multi-attempt executive summary.
 """
 
     llm_cfg = cfg.llm_multimodal or cfg.llm
-    agent = AnalysisAgent(llm_cfg)
+    agent = AnalysisAgent(llm_cfg, deepseek=cfg.deepseek)
 
     screenshots = sorted(artifact_root.glob("monitor_screen_*.png"))[-_MAX_SCREENSHOTS_ATTEMPT:]
     messages: list = [prompt]
@@ -221,12 +221,12 @@ failure_stage 请从 init/executor/observer/modify/unknown 中选最贴切的一
     except Exception as e:
         logger.error("生成本轮 AI 失败报告异常: %s", e)
         return AttemptRoundDiagnosis(
-            round_summary=f"AI 本轮报告生成失败: {e}",
+            round_summary=f"AI attempt report failed: {e}",
             failure_stage=_guess_failure_stage(reason),
             immediate_verdict=reason[:500],
             confidence="low",
-            gameturbo_log_analysis="请查看本目录 gameturbo.log",
-            human_triage_steps=["查看 gameturbo.log 与 domain_region_analysis.json"],
+            gameturbo_log_analysis="See gameturbo.log in this artifact dir",
+            human_triage_steps=["Review gameturbo.log and domain_region_analysis.json"],
             evidence_gaps=[str(e)],
         )
 
@@ -250,47 +250,47 @@ async def generate_failure_diagnosis_report(
         for retry_no, artifact_root in attempt_records
     ]
 
-    config_block = "（无游戏配置路径）"
+    config_block = "(no game config path)"
     if game_config_path and game_config_path.is_file():
         config_block = _read_text(game_config_path, limit=12000)
 
     prompt = f"""
 {gameturbo_log_baseline_prompt_block()}
 
-你是资深 GameTurbo/Android 网络加速排障专家。自动化测试任务最终失败，需要输出**给人工作排查**的高质量诊断报告。
-禁止只复述「发生了异常」；必须基于日志、域名 JSON、截图、审计轨迹给出可执行结论。
-禁止将正常基线中的 heartbeat 重连、recv buffer full、FEC 等单独判为失败根因。
+You are a senior GameTurbo/Android network-acceleration triage expert. The automated task **failed finally** — produce a high-quality report for **human** investigation.
+Do not only restate "an exception occurred"; use logs, domain JSON, screenshots, audit trail for actionable conclusions.
+Do not treat baseline heartbeat reconnect, recv buffer full, FEC alone as root cause.
 
-任务信息:
+Task:
 - gid: {gid}
 - task_id: {task_id}
-- 编排器最后失败原因: {last_reason}
+- Orchestrator last failure: {last_reason}
 
-当前游戏配置 JSON（games/ 下，供评估，最终失败不会自动交付此文件）:
+Current game config JSON (under games/; not auto-delivered on final failure):
 {config_block}
 
-各轮证据包（JSON，含每轮 attempt_failure_report 摘要、日志尾部、域名分析、patch 报告、process/deploy、审计摘要）:
+Per-attempt evidence bundles (JSON):
 {json.dumps(bundles, ensure_ascii=False, indent=2)}
 
-请输出 FailureDiagnosisReport 结构：
-1. executive_summary：2-4 句，人工先读这个就能行动
-2. overall_verdict：一句话归类（配置/路由/游戏画面/执行者登录/部署设备等）
-3. confidence：high/medium/low
-4. attempts：每轮 failure_stage、immediate_trigger、log_highlights（3-8 条原文级关键行）、screen_summary、domain_summary
-5. gameturbo_log_analysis：综合所有轮次日志，指出 tunnel/direct/RTT/closed/rebuilt 等
-6. domain_and_routing_analysis：结合 domain_analysis JSON
-7. screen_and_game_flow_analysis：结合截图路径所描述的现象（黑屏、登录卡住、超时文案等）
-8. config_assessment：当前 JSON 哪些字段可能不对
-9. human_triage_steps：有序步骤，便于人工复现与验证
-10. suggested_config_changes：供人工改 direct_patterns 或 port_rules（勿建议改 default_action；慎增 direct）
-11. non_config_issues：若非配置问题，写清脚本/设备/游戏侧
-12. evidence_gaps：还缺什么日志/截图才能定论
+Output FailureDiagnosisReport:
+1. executive_summary: 2–4 sentences — enough to act
+2. overall_verdict: one line (config/routing/UI/executor login/deploy device/…)
+3. confidence: high | medium | low
+4. attempts: per round failure_stage, immediate_trigger, log_highlights (3–8 lines), screen_summary, domain_summary
+5. gameturbo_log_analysis: all rounds — tunnel/direct/RTT/closed/rebuilt
+6. domain_and_routing_analysis: from domain JSON
+7. screen_and_game_flow_analysis: from screenshot paths (black screen, login stuck, timeout copy, etc.)
+8. config_assessment: which JSON fields may be wrong
+9. human_triage_steps: ordered reproduction/verification steps
+10. suggested_config_changes: manual direct_patterns/port_rules only (not default_action; cautious on direct)
+11. non_config_issues: scripts/device/game if not config
+12. evidence_gaps: missing logs/screenshots to conclude
 
-注意：这是**最终失败报告**，侧重帮助人工修复；不要输出「下次自动重试会自动好」这类空话。
+Final failure report for humans — no empty "retry will fix it" claims.
 """
 
     llm_cfg = cfg.llm_multimodal or cfg.llm
-    agent = AnalysisAgent(llm_cfg)
+    agent = AnalysisAgent(llm_cfg, deepseek=cfg.deepseek)
 
     screenshots: list[Path] = []
     for _, artifact_root in attempt_records:
@@ -321,14 +321,14 @@ async def generate_failure_diagnosis_report(
     except Exception as e:
         logger.error("生成 AI 失败诊断报告异常: %s", e)
         return FailureDiagnosisReport(
-            executive_summary=f"AI 报告生成失败: {e}",
+            executive_summary=f"AI report generation failed: {e}",
             overall_verdict=last_reason[:500],
             confidence="low",
-            gameturbo_log_analysis="请直接查看 attempts/ 下各轮 gameturbo.log",
+            gameturbo_log_analysis="See gameturbo.log under each attempt in attempts/",
             human_triage_steps=[
-                "查看 run_outputs 下 attempts 各轮的 gameturbo.log 与 audit/ai_trace.md",
-                "对照 domain_region_analysis.json 检查 tunnel/direct 域名",
-                "查看 monitor_screen_*.png 确认画面阶段",
+                "Review gameturbo.log and audit/ai_trace.md per attempt under run_outputs",
+                "Compare domain_region_analysis.json for tunnel vs direct domains",
+                "Review monitor_screen_*.png for UI stage",
             ],
-            evidence_gaps=[f"AI 报告生成失败: {e}"],
+            evidence_gaps=[f"AI report generation failed: {e}"],
         )

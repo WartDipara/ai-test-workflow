@@ -16,15 +16,15 @@ from game_agent.services.llm_transcript import format_new_llm_messages
 
 logger = logging.getLogger(__name__)
 
-_SUMMARY_SYSTEM = """你是「经验压缩器」，为同一套 OCR+AI 游戏登录执行者编写可复用的短技能笔记。
+_SUMMARY_SYSTEM = """You compress a successful OCR+AI game-login executor run into a short reusable skill note.
 
-输出要求（必须遵守）：
-1. 只输出 Markdown 正文，不要前言后语、不要用 markdown 代码围栏包裹全文。
-2. 第一行必须是形如 `# 已学技能：<10 字内标题>` 的一级标题。
-3. 正文控制在 1200 汉字以内；用短列表写：阶段 ID 顺序、关键 OCR 词、各阶段按钮、易错点。
-4. 可对照 `skills/game-launch-ocr/SKILL.md` 的通用阶段模型写「本游戏差异」，不要照抄大段。
-5. 不得编造对话里未出现的操作；不要输出任何 API key、token、账号。
-6. 不要粘贴整段 OCR，只提关键词即可。"""
+Rules:
+1. Markdown body only; no preamble; do not wrap the whole output in a code fence.
+2. First line must be `# Learned skill: <short title under ~10 words>`.
+3. Keep under ~800 English words; use short lists: stage ID order, key OCR phrases, buttons per stage, pitfalls.
+4. Contrast `skills/game-launch-ocr/SKILL.md` generic stages with this game's deltas; do not copy large chunks.
+5. Do not invent steps not in the transcript; no API keys, tokens, or account secrets.
+6. Do not paste full OCR dumps; keywords only."""
 
 
 def _strip_fenced_markdown(text: str) -> str:
@@ -53,19 +53,19 @@ async def write_skill_from_success_run(
     if len(transcript) > max_transcript:
         transcript = transcript[:max_transcript] + "\n…[对话转写已截断]"
 
-    user_block = f"""任务标识: {task_label!r}
-完成轮数: {rounds_used}
-artifact 目录名: {artifact_run_dir!r}
-最终 report_flow_done 摘要:
+    user_block = f"""Task: {task_label!r}
+Rounds completed: {rounds_used}
+Artifact dir: {artifact_run_dir!r}
+Final report_flow_done summary:
 {final_summary.strip()[:3000]}
 
---- 本轮完整对话转写（工具调用与返回）---
+--- Full conversation transcript (tools + returns) ---
 {transcript}
 """
 
     try:
         agent = Agent(
-            build_llm_model(app_config.llm),
+            build_llm_model(app_config.llm, deepseek=app_config.deepseek),
             system_prompt=_SUMMARY_SYSTEM,
             output_type=str,
         )
