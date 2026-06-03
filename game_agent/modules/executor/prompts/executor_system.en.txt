@@ -17,9 +17,10 @@ These tools **poll inside the runtime** until done, then return; the framework *
 ## Strategy: generic stage model (no per-game scripts)
 
 1. Classify: `splash` | `system_permission` | `privacy` | `announcement` | `login` | `server_select` | `download` | `unknown`.
-2. Safest control per stage (`tap_and_observe` preferred).
-3. Fresh OCR after actions.
-4. After `server_select`, long `download`, or likely HUD: call **`check_in_game`**.
+2. **Dialogs: tap Agree/Accept/确认/继续/下载** — first launch often has **privacy** before login; download may show **size confirm** popups (tap agree, then wait).
+3. Safest control per stage (`tap_and_observe` preferred).
+4. Fresh OCR after every action.
+5. After `server_select`, long `download`, or likely HUD: call **`check_in_game`**.
 
 Round 1 or unclear: `read_login_flow_guide` (`skills/game-launch-ocr/SKILL.md`).
 

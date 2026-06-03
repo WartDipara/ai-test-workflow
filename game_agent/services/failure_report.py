@@ -5,8 +5,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic_ai.messages import BinaryImage
-
 from game_agent.models.failure_report import (
     AttemptFailureInsight,
     AttemptRoundDiagnosis,
@@ -208,17 +206,20 @@ Requirements:
 Analyze **this attempt only** — not a multi-attempt executive summary.
 """
 
-    llm_cfg = cfg.llm_multimodal or cfg.llm
-    agent = AnalysisAgent(llm_cfg, deepseek=cfg.deepseek)
+    agent = AnalysisAgent(cfg.llm, deepseek=cfg.deepseek)
 
     screenshots = sorted(artifact_root.glob("monitor_screen_*.png"))[-_MAX_SCREENSHOTS_ATTEMPT:]
-    messages: list = [prompt]
-    for shot in screenshots:
-        if shot.is_file():
-            messages.append(BinaryImage.from_path(shot))
+    if cfg.llm_multimodal is not None and screenshots:
+        from game_agent.services.vision_context import summarize_monitor_screenshots
+
+        prompt += "\n\n" + await summarize_monitor_screenshots(
+            cfg.llm_multimodal,
+            screenshots,
+            max_images=_MAX_SCREENSHOTS_ATTEMPT,
+        )
 
     try:
-        report = await agent.generate_attempt_round_diagnosis(messages)
+        report = await agent.generate_attempt_round_diagnosis([prompt])
         if not report.failure_stage:
             report.failure_stage = _guess_failure_stage(reason)
         return report
@@ -293,21 +294,24 @@ Output FailureDiagnosisReport:
 Final failure report for humans — no empty "retry will fix it" claims.
 """
 
-    llm_cfg = cfg.llm_multimodal or cfg.llm
-    agent = AnalysisAgent(llm_cfg, deepseek=cfg.deepseek)
+    agent = AnalysisAgent(cfg.llm, deepseek=cfg.deepseek)
 
     screenshots: list[Path] = []
     for _, artifact_root in attempt_records:
         screenshots.extend(sorted(artifact_root.glob("monitor_screen_*.png")))
     screenshots = screenshots[-_MAX_SCREENSHOTS_TOTAL:]
 
-    messages: list = [prompt]
-    for shot in screenshots:
-        if shot.is_file():
-            messages.append(BinaryImage.from_path(shot))
+    if cfg.llm_multimodal is not None and screenshots:
+        from game_agent.services.vision_context import summarize_monitor_screenshots
+
+        prompt += "\n\n" + await summarize_monitor_screenshots(
+            cfg.llm_multimodal,
+            screenshots,
+            max_images=_MAX_SCREENSHOTS_TOTAL,
+        )
 
     try:
-        report = await agent.generate_failure_diagnosis(messages)
+        report = await agent.generate_failure_diagnosis([prompt])
         if not report.attempts:
             report.attempts = [
                 AttemptFailureInsight(

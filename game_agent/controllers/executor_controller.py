@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic_ai.messages import ModelMessage
 
 from game_agent.config.loader import load_app_config
+from game_agent.models.run_failure import classify_exception
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
 from game_agent.modules.executor.agent import ExecutorAgentDeps, build_executor_agent
@@ -29,7 +30,10 @@ from game_agent.services.session_memory import (
     save_session_memory,
 )
 from game_agent.services.credentials import credentials_status_message
-from game_agent.services.login_flow_skill import COMPACT_STAGE_HINT
+from game_agent.services.executor_user_context import (
+    build_executor_user_parts,
+    extract_declared_stage,
+)
 from game_agent.services.success_skill_summarizer import write_skill_from_success_run
 from game_agent.utils.ocr_util import configure_ocr, extract_text_with_bounds, warmup_ocr
 from game_agent.views.console_view import ConsoleView
@@ -189,87 +193,42 @@ class ExecutorFlowController:
                 cfg.credentials.file_path,
                 settings_path=self._config_path.resolve(),
             )
-            preamble = (
-                f"Round {r + 1}/{cfg.agent.max_rounds}. "
-                f"Screen={w}x{h}. "
-                f"Game package={target_pkg}. "
-                f"Suggested initial ad/load wait={cfg.executor.ad_initial_wait_s:.1f}s. "
-                f"Foreground={fg_line}. "
-                f"Consecutive non-game foreground rounds={not_foreground_rounds}. "
-                "Phase: generic login stage model (no per-game scripts). "
-                f"Target package={game_pkg}. "
-                f"Launch detect timeout={cfg.game.launch_detect_timeout_s:.0f}s "
-                f"(poll {cfg.game.launch_detect_poll_interval_s:.1f}s). "
-                "Use wait_for_game_running when process may be absent; "
-                "finish with check_in_game after login/server/download. "
-                "Call read_login_flow_guide on round 1 or unclear stage. "
-                "Each reply: current stage ID + next tools. "
-                f"Credentials: {cred_hint}"
+            user_parts = build_executor_user_parts(
+                cfg=cfg,
+                round_id=r,
+                max_rounds=cfg.agent.max_rounds,
+                screen_w=w,
+                screen_h=h,
+                target_pkg=target_pkg,
+                fg_line=fg_line,
+                ocr_summary=ocr_summary,
+                run_state=run_state,
+                session_action_log=session_memory.format_action_log(),
+                attempt_context=attempt_context,
+                not_foreground_rounds=not_foreground_rounds,
+                cred_hint=cred_hint,
             )
-            if r == 0 and not run_state.package_install_confirmed:
-                preamble += (
-                    " Post-deploy: call wait_for_package_installed ONCE first "
-                    "(internal poll until pm path OK; tool return continues you — "
-                    "do not recheck install). Then open_game_app."
-                )
-            if attempt_context is not None:
-                observer_hint = attempt_context.format_observer_hint()
-                fatal = attempt_context.get_fatal_reason()
-                if fatal:
-                    preamble += f" FATAL from monitor: {fatal[:200]}."
-                else:
-                    preamble += f" {observer_hint}."
-            if run_state.game_started:
-                preamble += (
-                    f" Process up (milestone). in_game streak="
-                    f"{run_state.in_game_confirm_streak}/"
-                    f"{cfg.game.main_screen_confirm_rounds}."
-                )
-            fg_block = (
-                "=== Foreground (dumpsys) ===\n"
-                f"foreground={fg_line}\n"
-                f"target_package={target_pkg}\n"
-                f"target_activity={cfg.game.launch_activity}\n"
-            )
-            memory_block = (
-                "=== Action log (system) ===\n"
-                + session_memory.format_action_log()
-            )
-            ocr_block = (
-                f"=== Screen OCR (round {r + 1} opening snapshot, not live) ===\n"
-                "Generated before the model runs. After tap in this round, "
-                "use get_ocr_summary or tap_and_observe OCR.\n"
-                + ocr_summary[:8000]
-            )
-            user_parts: list[str] = [
-                preamble,
-                COMPACT_STAGE_HINT,
-                memory_block,
-                fg_block,
-                ocr_block,
-            ]
 
             view.llm_user_bundle(r, format_user_parts_for_console(user_parts))
 
+            # 完整 message_history 送入 API（不裁剪），保证思考链与工具往返可追溯。
             try:
                 result = await agent.run(user_parts, message_history=history, deps=deps)
             except Exception as e:
                 view.error("agent.run 失败", exc_info=True)
                 run_state.finished = True
                 run_state.success = False
-                err_text = str(e)
-                if "status_code: 401" in err_text or "AuthenticationError" in err_text:
-                    err_text = (
-                        "主脑 LLM 请求认证失败（401）。请检查 config/settings.yaml 中 "
-                        "llm.base_url、llm.api_key、llm.model_name；"
-                        f"原始错误: {err_text}"
-                    )
-                run_state.note = err_text[:4000]
+                failure = classify_exception(e, context="executor agent.run")
+                run_state.failure_code = failure.code.value
+                run_state.note = failure.to_note()
                 break
 
             new_msgs = result.new_messages()
             history.extend(new_msgs)
             out = result.output or ""
+            stage = extract_declared_stage(out)
+            if stage:
+                run_state.last_declared_stage = stage
             if audit is not None:
                 audit.log_transcript_bundle("executor", r, user_parts, new_msgs)
             session_memory.append_round(round_id=r, new_messages=new_msgs)

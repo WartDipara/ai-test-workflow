@@ -38,6 +38,7 @@ class RunAuditLogger:
     _jsonl_path: Path | None = field(default=None, init=False)
     _md_path: Path | None = field(default=None, init=False)
     _index: dict[str, Any] = field(default_factory=dict, init=False)
+    _process_log_handler: logging.Handler | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.enabled:
@@ -67,6 +68,7 @@ class RunAuditLogger:
         """将标准 logging 同时写入 artifact_root/process.log。"""
         if not self.enabled:
             return None
+        self.detach_process_log_handler()
         log_path = self.artifact_root / "process.log"
         handler = logging.FileHandler(log_path, encoding="utf-8")
         handler.setLevel(getattr(logging, level.upper(), logging.INFO))
@@ -74,7 +76,23 @@ class RunAuditLogger:
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"),
         )
         logging.getLogger().addHandler(handler)
+        self._process_log_handler = handler
         return handler
+
+    def detach_process_log_handler(self) -> None:
+        """关闭并移除 process.log FileHandler，便于任务结束后删除 artifacts。"""
+        handler = self._process_log_handler
+        if handler is None:
+            return
+        root = logging.getLogger()
+        try:
+            handler.flush()
+            handler.close()
+        except OSError as e:
+            logger.debug("关闭 process.log handler 时忽略: %s", e)
+        if handler in root.handlers:
+            root.removeHandler(handler)
+        self._process_log_handler = None
 
     def log_phase(self, phase: str, message: str, **extra: Any) -> None:
         self._emit("phase", phase, message=message, **extra)

@@ -64,6 +64,8 @@ apk_cache/
 .vscode/
 test.py
 check_balance.py
+run_outputs/
+artifacts/
 
 # --- GameTurbo-Native Not Tracked ---
 GameTurbo-Native/

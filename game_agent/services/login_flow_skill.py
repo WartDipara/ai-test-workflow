@@ -9,10 +9,11 @@ LOGIN_FLOW_SKILL_PATH = REPO_ROOT / "skills" / "game-launch-ocr" / "SKILL.md"
 # Short stage hint injected each round (does not replace full SKILL)
 COMPACT_STAGE_HINT = """
 === Login stage cheat sheet (UI varies; classify from OCR) ===
-Typical order: splash → permissions → privacy → announcement → login → server_select → download → in-game process.
-Pick stage each round; call read_login_flow_guide for full strategy.
+Popups: prefer Agree/Accept/确认/继续/下载 — avoid 拒绝/取消 unless no continue button.
+First launch: often privacy/terms before login — tap 同意/接受 (+ checkbox if shown).
+Download stage: MB-size confirm dialogs → tap 确认下载/继续, then wait_seconds + re-OCR.
 Stages: splash | system_permission | privacy | announcement | login | server_select | download | unknown
-Account/password at login: fill_credential_field(x,y, username|password) clears then fills credentials.yaml.
+Call read_login_flow_guide for full skill. Account/password: fill_credential_field then Login.
 """.strip()
 
 

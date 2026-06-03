@@ -21,6 +21,7 @@ _DELIVERABLE_FILES = (
     ATTEMPT_FAILURE_REPORT_JSON,
     "process.log",
     "deploy.log",
+    "pipeline_trace.jsonl",
 )
 
 
@@ -103,6 +104,7 @@ def publish_failure_deliverable(
     last_reason: str,
     max_retries: int,
     ai_report: FailureDiagnosisReport | None = None,
+    error_code: str = "",
 ) -> None:
     """失败：仅产出失败说明与各轮关联日志，不复制游戏配置 JSON。"""
     attempts_dir = deliverable.root / "attempts"
@@ -152,6 +154,8 @@ def publish_failure_deliverable(
             "success": False,
             "gid": deliverable.gid,
             "task_id": deliverable.task_id,
+            "error_code": error_code or None,
+            "retryable": error_code.startswith("E2") if error_code else None,
             "max_retries": max_retries,
             "total_attempts": len(attempt_artifact_roots),
             "last_reason": last_reason[:4000],

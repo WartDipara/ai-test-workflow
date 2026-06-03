@@ -1,6 +1,6 @@
 # android-ai-driven-test
 
-基于 **MVC 架构**的 Android 游戏 + GameTurbo 网络加速自动化测试框架。核心为 `**game_agent`**（Pydantic-AI + ADB + PaddleOCR + 多模态），在设备/模拟器上完成从 APK 预处理到网络加速验证的完整闭环。
+基于 **MVC 架构**的 Android 游戏 + GameTurbo 网络加速自动化测试框架。核心为 **game_agent**（Pydantic-AI + ADB + PaddleOCR + 多模态），在设备/模拟器上完成从 APK 预处理到网络加速验证的完整闭环。
 
 项目采用 **MVC（Model-View-Controller）架构**：
 
@@ -43,27 +43,27 @@ graph TD
       SC -->|重启| LM
     end
 
-    EX -->|check_in_game OK| NORMAL_EXIT[正常退出 observe_s<br/>force-stop]
-    PARALLEL -->|monitor/executor 失败| FAILURE[失败]
+    EX -->|check_in_game 连续确认| NORMAL_EXIT[正常退出 observe_s<br/>force-stop]
+    PARALLEL -->|未进游戏 / 监控 fail-fast| FAILURE[失败 E1/E2]
     INIT -->|失败| FAILURE
   end
 
   subgraph "异常处理 - AnomalyHandler"
     FAILURE --> CLEANUP[FailureCleanup<br/>导出日志/域名分析/杀进程/卸载]
-    CLEANUP --> RETRY{还有重试次数?}
-    RETRY -->|是| MODIFY[RetryConfigHandler<br/>AI 分析日志 → 修改配置 → deploy.sh]
+    CLEANUP --> RETRY{E2xxx 且还有重试?}
+    RETRY -->|是| MODIFY[RetryConfigHandler<br/>恢复上轮配置 → 最小补丁 → deploy]
     MODIFY --> RETRY_LOOP
     RETRY -->|否| FINAL_FAIL[最终失败<br/>failure_report.md]
   end
 
-  subgraph "任务结束"
-    NORMAL_EXIT --> SUCCESS[成功交付<br/>.gameturbo_merged.json]
-    SUCCESS --> END([结束])
-    FINAL_FAIL --> END
+  subgraph "任务结束（仅 parallel 无错误且 check_in_game 已确认）"
+    NORMAL_EXIT --> SUCCESS[成功交付<br/>.gameturbo_merged.json 副本]
+    SUCCESS --> END([结束 exit 0])
+    FINAL_FAIL --> END_FAIL([结束 exit 1])
   end
 ```
 
-
+> **重要：** `deploy.sh` 成功或仅做完 Modify **不等于**测试通过。编排器只有在并行阶段返回无错误且执行者 **`check_in_game`** 已确认时才会 `success: true` 并进入交付；E2 可重试失败后会 **进入下一轮 retry 游戏**，不会在未进游戏时误报成功。
 
 ### 阶段总览
 
@@ -73,26 +73,38 @@ graph TD
 | **0** — 预处理  | `PreprocessingController`                                                   | 从 `apks.txt` 下载 APK → ABI 剥离 → 移至 `packages/`，清理 `apk_cache/`           | **否**，仅执行一次              |
 | **1** — Init | `GameTestOrchestrator` 内部                                                   | GameTurbo 配置 → `deploy.sh` 打包安装                                         | 每轮                       |
 | **2** — 并行游戏阶段 | `ExecutorFlowController` + `LogMonitor` / `ScreenMonitor` / `SessionCoordinator` | 执行者：登录链 + `check_in_game`；监控：从启动并行采 log、网络画面异常 fail-fast | 每轮 |
-| **4** — 失败收尾 | `AnomalyHandler` → `FailureCleanup`                                         | 导出日志、域名分析、杀进程、卸载游戏                                                      | 每轮失败                     |
-| **5** — 修改重试 | `RetryConfigHandler`                                                        | AI 分析日志 → 修改配置 → `deploy.sh` → 下一轮                                      | `retry_on_failure: true` |
+| **3** — 失败收尾 | `AnomalyHandler` → `FailureCleanup`                                         | 导出日志、域名分析、杀进程、卸载游戏                                                      | 每轮失败                     |
+| **4** — 修改重试 | `RetryConfigHandler`                                                        | 配置备份/恢复 → AI 最小补丁 → `deploy.sh` → **下一轮 retry 再跑游戏** | `retry_on_failure` 且 **E2xxx** |
 
 
 ---
 
 ## 成功判定（并行阶段）
 
+**`result.json` 中 `success: true` 仅当：** 并行阶段无错误 + **`check_in_game`** 连续确认 + 正常退出观察完成。
+
+| 误区 | 说明 |
+|------|------|
+| 仅 `deploy` 完成 | 可能仍在登录/下载，未进游戏 |
+| `wait_for_game_running` | 仅进程里程碑，须继续隐私/登录/下载 |
+| 仅做完 Modify | 须 **下一轮 retry** 再跑游戏并 `check_in_game` |
 
 | 里程碑 | 含义 | 实现 |
 | ------ | ---- | ---- |
-| 进程已起 | APK 进程存在 | `wait_for_game_running` / `pidof`（**不**结束执行者） |
-| **进入游戏内** | 可玩场景（含新手引导蒙层） | 执行者工具 **`check_in_game`**，连续 N 次多模态确认 |
-| 加速观察 | 确认后进游戏后的观察窗 | `confirm_in_game_normal_exit` → `normal_exit_observe_s` → `force-stop` |
+| 包已安装 | APK 在设备上 | `wait_for_package_installed`（调一次，内部轮询） |
+| 进程已起 | 游戏进程存在 | `wait_for_game_running`（**不**结束执行者） |
+| **进入游戏内** | 主界面/可玩（含引导蒙层） | **`check_in_game`** × `main_screen_confirm_rounds` |
+| 加速观察 | 确认后观察窗 | `confirm_in_game_normal_exit` → `normal_exit_observe_s` |
 
-并行 **LogMonitor** / **ScreenMonitor** 从游戏启动即运行；日志隧道异常或**网络类**画面弹窗会 **fail-fast** 中止整轮（执行者协作式停止）。
+并行 **LogMonitor** / **ScreenMonitor** 从启动即运行；**E2xxx** 网络类异常 **fail-fast**（执行者经 `AttemptContext` 协作停止）。
 
 ### 执行者：通用登录链（无 per-game 脚本）
 
-主脑按阶段（`splash` / `privacy` / `login` / `server_select` / `download` 等）OCR+tap；在选服、长下载或疑似 HUD 后调用 **`check_in_game`**。细则见 [skills/game-launch-ocr/SKILL.md](skills/game-launch-ocr/SKILL.md)。
+主脑按阶段 OCR + tap；弹窗优先 **同意/确认/继续/下载**。细则见 [skills/game-launch-ocr/SKILL.md](skills/game-launch-ocr/SKILL.md)。
+
+**顺序：** `wait_for_package_installed` → `open_game_app` → 登录链 → **`check_in_game`**（回调等待工具，勿用 OCR 轮询安装/进程）。
+
+**记忆：** 完整 `message_history`；每轮 Mission 锚点 + `session_memory`；`repeat_compact_stage_hint_every_n_rounds`（默认 5）；retry≥2 注入上轮失败与配置补丁摘要。
 
 ---
 
@@ -161,35 +173,61 @@ flowchart LR
 | **初始化前**           | **仅 1 个**原包 APK（文件名前缀为 `gid`）    |
 | `**deploy.sh` 之后** | 原包 + `game_gameturbo.apk` + 签名文件 |
 | **每轮尝试结束（仍重试）**    | 删除 `game_gameturbo`*，**保留原包**    |
-| **任务最终结束**         | 再删除原包 APK                        |
+| **任务最终结束**         | 清空 `packages/`（原包 + `game_gameturbo*` + 签名等） |
 
 
 ---
 
 ## 任务产出（run_outputs）
 
-目录：`gameturbo.run_outputs_dir`（默认 `./run_outputs/{gid}_{task_id}/`）。
+目录：`gameturbo.run_outputs_dir`（默认 `./run_outputs/{gid}_{task_id}/`）。任务 ID 在预处理之后建立，避免 `unknown_*` 占位目录。
 
 **成功：**
 
-
-| 文件                          | 说明                                             |
-| --------------------------- | ---------------------------------------------- |
-| `gameturbo_{gid}_test.json` | 从 `GameTurbo-Native/.gameturbo_merged.json` 复制 |
-| `result.json`               | 含 `merged_config`、`session_restarts` 等         |
-
+| 文件 | 说明 |
+|------|------|
+| `.gameturbo_merged.json` | deploy 合并配置副本（**成功依据**，须已 `check_in_game`） |
+| `result.json` | `success`、`winning_retry`、`total_attempts`、`final_logs`、`artifacts_cleaned` 等 |
+| `final_logs.log` | 全流程审查日志（各轮 process / audit / pipeline 摘要） |
+| `task_journal.jsonl` | 编排里程碑（attempt start/fail、finalize） |
+| `pipeline_trace.jsonl` | 收尾阶段 trace（尝试阶段 trace 归档见下） |
 
 **失败：**
 
+| 文件 | 说明 |
+|------|------|
+| `failure_report.md` / `.json` | 跨轮 AI 诊断 |
+| `failure_summary.md` | 简要摘要 |
+| `result.json` | `error_code`（E1xxx/E2xxx）、`retryable` |
+| `final_logs.log` / `task_journal.jsonl` | 同上 |
 
-| 文件                                          | 说明      |
-| ------------------------------------------- | ------- |
-| `failure_report.md` / `failure_report.json` | AI 汇总诊断 |
-| `failure_summary.md`                        | 简要失败摘要  |
-| `result.json`                               | 元数据     |
+**重试与配置审计（E2 且 Modify 时）：**
 
+| 路径 | 说明 |
+|------|------|
+| `config_backups/gameturbo_baseline.json` | 首次 Modify 前的 `games/gameturbo_{gid}_*.json` 基线 |
+| `config_backups/before_attempt_N.json` | 第 N 次尝试打补丁前快照 |
+| `config_backups/after_patch_attempt_N.json` | 补丁应用后快照 |
+| `config_retry_journal.jsonl` | 每轮 Modify 一条：补丁内容、是否恢复上轮、卡点阶段 |
+| `attempts/retry_*_*/` | 每轮复制的日志、失败报告、`pipeline_trace.jsonl` 等 |
 
-过程数据：`agent.artifacts_dir/retry_{N}_{时间戳}/`。
+**Modify 配置策略（最小改动）：**
+
+1. 第 2+ 次 Modify 前：从 `before_attempt_{N}.json` **恢复**，撤销上轮无效补丁  
+2. AI 仅追加少量 `direct_patterns`（或极少 `port_rules`）  
+3. `deploy.sh` 后进入 **下一轮 retry 游戏**（非单独判成功）  
+4. 执行者须重点验证上轮卡点（如 **resource_download**）是否已通过  
+
+**过程数据：** `artifacts/retry_{N}_{时间戳}/`（含 `executor/`、`audit/`、`gameturbo.log`）。**任务结束后删除**；删除前会将 `pipeline_trace.jsonl` 等归档到 `run_outputs/attempts/`。
+
+任务结束时编排器会：
+
+1. 写入 `final_logs.log`、`task_journal.jsonl`  
+2. 归档各轮 `pipeline_trace` → `attempts/`  
+3. 清空 `artifacts/retry_*`（收尾 trace 写在 `run_outputs/pipeline_trace.jsonl`）  
+4. **任务最终成功或失败后** 清空 `packages/`（含原包与 `game_gameturbo*`）
+
+手动收尾：`python -m game_agent.tools.finalize_task --deliverable run_outputs/...`
 
 ---
 
@@ -349,10 +387,11 @@ modules:
 
 ```yaml
 agent:
-  max_rounds: 30                        # 执行者最大操作轮数
-  artifacts_dir: "./artifacts"          # 过程数据存储目录
-  persist_learned_skill_on_success: true  # 成功后自动总结技能到 experiences/
-  tap_observe_count: 2                  # tap_and_observe 默认连拍 OCR 次数
+  max_rounds: 100                       # 执行者最大操作轮数
+  artifacts_dir: "./artifacts"
+  persist_learned_skill_on_success: true  # 成功后压成 experiences/agent_skills/
+  tap_observe_count: 1                  # tap_and_observe 连拍次数（越小越快）
+  repeat_compact_stage_hint_every_n_rounds: 5  # 0=仅第1轮带阶段表；不裁剪 message_history
 ```
 
 **logging — 日志与审计：**
@@ -432,7 +471,7 @@ python test.py --vision   # 额外测试多模态看图
 
 | 退出码   | 含义            | 产出                                                      |
 | ----- | ------------- | ------------------------------------------------------- |
-| **0** | 全部通过          | `run_outputs/{gid}_{task_id}/gameturbo_{gid}_test.json` |
+| **0** | 全部通过（须 check_in_game） | `run_outputs/{gid}_{task_id}/.gameturbo_merged.json` |
 | **1** | 失败（耗尽重试或不可恢复） | `run_outputs/{gid}_{task_id}/failure_report.md`         |
 | **2** | 配置文件错误        | 控制台报错详情                                                 |
 
@@ -440,18 +479,27 @@ python test.py --vision   # 额外测试多模态看图
 #### 日志产出
 
 ```
-artifacts/retry_1_20260528_100000/
-├── process.log                  # Python 日志
-├── pipeline_trace.jsonl         # 流水线调用追踪
-├── audit/                       # AI 审计
-│   ├── events.jsonl
-│   └── ai_trace.md
-├── executor/                    # 执行者阶段截图
-├── entry_detect_s0_*.png        # 进入游戏判定截图
-├── gameturbo.log                # GameTurbo 日志
-├── gameturbo_session_*.log      # crash 归档日志
-├── domain_region_analysis.json  # 域名区域分析
-└── attempt_failure_report.md    # 本轮失败报告（失败时）
+run_outputs/{gid}_{task_id}/
+├── .gameturbo_merged.json       # 成功：合并配置副本
+├── result.json
+├── final_logs.log
+├── task_journal.jsonl
+├── pipeline_trace.jsonl         # 收尾阶段 trace
+├── config_backups/              # Modify 备份（重试时）
+├── config_retry_journal.jsonl
+├── attempts/retry_1_*/          # 每轮摘要（含 pipeline_trace.jsonl）
+└── failure_report.md            # 失败时
+
+artifacts/retry_1_*/             # 任务结束后删除
+├── executor/
+│   ├── conversation_history.json
+│   ├── session_memory.json
+│   ├── round_*.png
+│   └── check_in_game_*.png
+├── audit/
+├── gameturbo.log
+├── domain_region_analysis.json
+└── attempt_failure_report.md
 ```
 
 ---
@@ -481,6 +529,7 @@ game_agent/
 ├── models/                          # M: Pydantic 数据模型
 │   ├── settings.py                  # 全量配置（AppConfig + 各子段模型）
 │   ├── run_state.py                 # RunState — 跨轮次运行时状态
+│   ├── run_failure.py               # E1/E2 错误码、classify_failure
 │   ├── pipeline_phase.py            # PipelinePhase — 流水线阶段枚举
 │   ├── game_entry_judgment.py       # GameEntryJudgment — 进入游戏判定结果
 │   ├── gameturbo_config.py          # GameTurboConfigPatch — AI 配置修改补丁
@@ -489,7 +538,9 @@ game_agent/
 │
 ├── modules/                         # 纯业务逻辑（与 Controller 解耦）
 │   ├── executor/
-│   │   └── agent.py                 # Pydantic-AI Agent + OCR/tap 工具
+│   │   ├── agent.py                 # Pydantic-AI Agent + 工具注册
+│   │   ├── tooling/                 # wait / shell 包装、回调轮询
+│   │   └── prompts/executor_system.en.txt
 │   ├── preprocessing/
 │   │   ├── preprocessor.py          # ABI 剥离 + packages 移动
 │   │   └── assets_preparer.py       # APK 下载（apks.txt → httpx）
@@ -498,6 +549,7 @@ game_agent/
 │   │   ├── deploy_retry.py          # deploy 失败 AI 重试
 │   │   ├── cleanup.py               # FailureCleanup — 失败收尾（日志+卸载）
 │   │   └── retry_config.py          # RetryConfigHandler — 配置修改+重新 deploy
+│   ├── run_context.py               # AttemptContext — 并行阶段共享（stop、ui_stage、retry 摘要）
 │   └── observer_session/
 │       └── state.py                 # ObserverSessionState — 共享会话状态
 │
@@ -518,10 +570,16 @@ game_agent/
 │   ├── failure_report.py            # AI 失败报告生成
 │   ├── run_deliverable.py           # 成功/失败最终产出
 │   ├── run_audit_log.py             # 审计日志（events.jsonl + ai_trace.md）
-│   ├── pipeline_trace.py            # 流水线调用追踪
-│   ├── session_memory.py            # Pydantic-AI 对话记忆持久化
-│   ├── learned_skill_store.py       # AI 工具：读取已学技能
-│   └── success_skill_summarizer.py  # 成功时为 AI 总结生成技能文档
+│   ├── pipeline_trace.py            # 流水线调用追踪（收尾写入 run_outputs）
+│   ├── session_memory.py            # 工具链摘要（配合完整 message_history）
+│   ├── executor_user_context.py     # 每轮 user 块：Mission 锚点、retry 摘要
+│   ├── gameturbo_config_retry.py    # Modify 前备份/恢复、config_retry_journal
+│   ├── game_entry_check.py          # check_in_game 多模态判定
+│   ├── task_finalize.py             # final_logs、artifacts 清理、trace 归档
+│   ├── vision_context.py            # 监控截图 → 文字（供主脑）
+│   ├── package_install.py           # wait_for_package_installed
+│   ├── learned_skill_store.py
+│   └── success_skill_summarizer.py
 │
 ├── agents/                          # 对外 Agent 导出（__init__.py）
 │
@@ -563,7 +621,9 @@ experiences/                         # AI 自动总结的已学技能
 
 run_outputs/                         # 任务产出目录
 ├── {gid}_{task_id}/                 # 按 gid + 时间戳命名
-│   ├── gameturbo_{gid}_test.json   # 成功：合并配置副本
+│   ├── .gameturbo_merged.json      # 成功：合并配置副本
+│   ├── config_backups/             # 重试配置快照
+│   ├── config_retry_journal.jsonl
 │   ├── result.json                  # 运行元数据
 │   ├── failure_report.md/json       # 失败：AI 诊断报告
 │   └── failure_summary.md           # 失败：简要摘要
@@ -587,8 +647,8 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 ## 感知与决策
 
 - **OCR**：PaddleOCR（`ocr.model_profile`: mobile / server）。
-- **主脑 LLM**：执行者阶段（`llm`）。
-- **多模态 LLM**：`check_in_game` 工具、`screen_monitor`（`llm_multimodal`）。
+- **主脑 LLM（`llm`）**：执行者 ADB 工具、重试配置补丁、`AnalysisAgent` / 失败报告（结构化 `output_type`，走 tool_choice）。
+- **多模态 LLM（`llm_multimodal`）**：仅画面观察 — `screen_monitor`、`check_in_game`、重试前 `vision_context` 把截图摘要成文字再交给主脑（不在 Qwen 上做 tool_choice）。
 - **进入游戏判定**：独立 prompt；创角 OCR 硬规则见 `character_creation_ocr.py`。
 - **技能**：`skills/game-launch-ocr`、`skills/gameturbo-log-baseline`；`experiences/agent_skills/` 存放成功 run 自动生成的摘要（可为空）。
 
@@ -603,24 +663,49 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 | [services/llm_adapters/](game_agent/services/llm_adapters/)   | openai / deepseek / qwen |
 
 
-`**llm`** 为通用 OpenAI 兼容主脑；`**deepseek**` 段仅在 model 为 DeepSeek 时由 `DeepSeekAdapter` 读取（[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)）。`**observer.skip_vision_probe**` 控制 `llm_multimodal` 启动探针，与主脑无关。
+**llm** 为通用 OpenAI 兼容主脑；**deepseek** 段仅在 model 为 DeepSeek 时由 `DeepSeekAdapter` 读取（[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)）。**llm_multimodal** 仅用于画面（`check_in_game`、ScreenMonitor、重试截图摘要），**不要**用于 `AnalysisAgent`（避免与 `tool_choice=required` 冲突）。**observer.skip_vision_probe** 控制多模态启动探针。
 
 ---
 
 ## 失败、重试与 Modify
 
-**FailureCleanup：** finalize **gameturbo.log** → 域名分析 → force-stop → 卸载游戏。
+统一错误码见 `game_agent/models/run_failure.py`：
 
-**retry_on_failure: true：** AI 读日志/域名 JSON 补丁 `games/gameturbo_{gid}_*.json` → `deploy.sh`（更新 `.gameturbo_merged.json`）→ 下一轮从 executor 重跑。
+| 区间 | 含义 | 是否重试 |
+|------|------|----------|
+| **E1xxx** | 代码/配置/执行者崩溃/预处理/deploy 基础设施等 | **否**，立即 `finish_run` |
+| **E2xxx** | 日志/画面网络异常、加速路由、下载失败等 | **是**（`retry_on_failure` 且未用尽次数） |
 
-Modify 改的是 `games/*.json`；**成功交付**固定为 deploy 合并后的 `.gameturbo_merged.json`。
+失败原因字符串格式：`[E1001] 说明…`。`result.json` 含 `error_code`、`retryable`。
+
+**FailureCleanup：** finalize **gameturbo.log** → 域名分析 → force-stop → 卸载游戏（每轮失败都会做；**仅 E2xxx 会继续 Modify**）。
+
+**retry_on_failure: true 且 E2xxx：** FailureCleanup → **恢复/备份配置**（`gameturbo_config_retry`）→ AI 最小补丁 `games/gameturbo_{gid}_*.json` → `deploy.sh` → **`return` 进入下一轮 retry**（重新 Init + 并行游戏阶段）。
+
+| E2 码 | 典型场景 |
+|-------|----------|
+| E2001 | 日志异常（含误报的 shutdown 等，见基线 skill） |
+| E2002 | 画面网络弹窗 |
+| E2004 | 路由/加速 |
+| E2005 | 下载失败 |
+
+Modify 改 `games/*.json`；**成功交付**为 **且仅当** `check_in_game` 通过后 deploy 产出的 `.gameturbo_merged.json` 副本。
 
 ---
 
 ## 常见问题
 
 **Q：进程起来就算测试通过吗？**  
-A：否。执行者需 `check_in_game` 连续确认进游戏，再在 `normal_exit_observe_s` 内无 log/screen 异常，才产出成功配置。
+A：否。须 `check_in_game` 连续确认，且编排器 parallel 阶段无错误；`wait_for_game_running` 只是里程碑。
+
+**Q：为什么 result.json 写 success 但游戏没登录完？**  
+A：旧版曾在 E2 失败 + Modify 后误走成功分支（已修：失败处理后会 `return`，仅 `check_in_game` 确认才成功）。请用最新代码并查看 `final_logs` 中 `in_game=False` / `total_attempts`。
+
+**Q：重试时配置怎么改？**  
+A：见 `run_outputs/.../config_backups/` 与 `config_retry_journal.jsonl`；上轮补丁无效会先 **恢复** 再提 **最小** 新补丁，然后下一轮完整跑游戏。
+
+**Q：LogMonitor 报 shutdown 导致执行者全被拦截？**  
+A：属 E2001 可重试；对照 [gameturbo-log-baseline](skills/gameturbo-log-baseline/SKILL.md) 区分基线噪声与真异常；必要时清 logcat 或调基线规则。
 
 **Q：crash 后日志混在一起了怎么办？**  
 A：SessionCoordinator 会归档旧段为 `gameturbo_session_*.log`，清空 logcat 后只往 **gameturbo.log** 写新会话。
@@ -629,7 +714,7 @@ A：SessionCoordinator 会归档旧段为 `gameturbo_session_*.log`，清空 log
 A：调低 `session_absent_threshold_s`（如 0.8）与 `session_poll_interval_s`；执行者在关键阶段多调用 `check_in_game`。
 
 **Q：成功交付哪个 JSON？**  
-A：`GameTurbo-Native/.gameturbo_merged.json` 的副本，不是 `games/gameturbo_{gid}_test.json`。
+A：`run_outputs/{gid}_{task_id}/.gameturbo_merged.json`（来自 `GameTurbo-Native/.gameturbo_merged.json`），不是 `games/gameturbo_{gid}_*.json` 源文件。
 
 **Q：tunnel closed 算失败吗？**  
 A：不一定，见 [gameturbo-log-baseline](skills/gameturbo-log-baseline/SKILL.md)。

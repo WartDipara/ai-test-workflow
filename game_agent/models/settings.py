@@ -318,6 +318,15 @@ class AgentSection(BaseModel):
         le=6,
         description="tap_and_observe 默认连拍 OCR 次数（执行者阶段；越少越快）。",
     )
+    repeat_compact_stage_hint_every_n_rounds: int = Field(
+        5,
+        ge=0,
+        le=50,
+        description=(
+            "COMPACT_STAGE_HINT 插入 user 消息的间隔：0=仅第 1 轮；5=第 1 轮及每 5 轮。"
+            "不裁剪 message_history（优先级：分析正确 > 速度 > 上下文）。"
+        ),
+    )
 
 
 class LoggingSection(BaseModel):

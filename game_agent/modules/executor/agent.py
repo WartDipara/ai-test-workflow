@@ -19,7 +19,7 @@ from game_agent.services.credentials import (
     load_game_credentials,
 )
 from game_agent.services.learned_skill_store import format_skill_list_for_tool, read_skill_file
-from game_agent.services.login_flow_skill import read_login_flow_guide
+from game_agent.services.login_flow_skill import read_login_flow_guide as load_login_flow_guide_text
 from game_agent.services.llm_service import build_llm_model
 from game_agent.utils.ocr_util import extract_text_with_bounds
 
@@ -55,7 +55,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
     @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def read_login_flow_guide(ctx: RunContext[ExecutorAgentDeps]) -> str:
         """Generic mobile game login flow (skills/game-launch-ocr/SKILL.md)."""
-        return read_login_flow_guide()
+        return load_login_flow_guide_text()
 
     @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def credentials_status(ctx: RunContext[ExecutorAgentDeps]) -> str:

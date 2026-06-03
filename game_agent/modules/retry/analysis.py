@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Any
 
 from pydantic_ai import Agent
-from pydantic_ai.messages import BinaryImage
-
 from game_agent.models.deploy_recovery import DeployRecoveryPatch
 from game_agent.models.failure_report import AttemptRoundDiagnosis, FailureDiagnosisReport
 from game_agent.models.gameturbo_config import GameTurboConfigPatch
@@ -21,7 +19,11 @@ logger = logging.getLogger(__name__)
 
 class AnalysisAgent:
     """
-    负责在监控抛出异常后，进行二次日志与画面分析，并决定如何重写配置。
+    Retry / failure structured analysis (config patches, deploy recovery, reports).
+
+    Uses **main LLM** (``cfg.llm``) only — structured ``output_type=...`` maps to
+    API tool_choice. Vision screenshots must be summarized to text separately
+    (``vision_context.summarize_monitor_screenshots`` + ``llm_multimodal``).
     """
     def __init__(
         self,
@@ -101,7 +103,9 @@ Do not suggest changing _platform, default_action, tunnel_patterns (invalid at d
         log_content: str,
         current_config: dict[str, Any],
         domain_analysis: dict[str, Any] | None = None,
-        screenshot_paths: list[Path],
+        screen_context: str = "",
+        blocked_stage_hint: str = "",
+        prior_patch_restored: bool = False,
     ) -> GameTurboConfigPatch:
         logger.info("AnalysisAgent 开始生成结构化 GameTurbo 配置补丁...")
         if not domain_analysis:
@@ -164,6 +168,25 @@ Do not use tunnel_patterns (not in this patch model); acceleration = default_act
 Output GameTurboConfigPatch: analysis required; empty lists if no direct_patterns/port_rules changes.
 Do not patch for baseline noise (heartbeat, recv buffer full, etc.).
 
+## Minimal-change retry policy (mandatory)
+
+- Each Modify round adds **at most a few** new `direct_patterns` entries (or **one** port_rules change), not bulk lists.
+- If `prior_patch_restored` is true, the on-disk config was **reverted to pre-patch baseline** because the last patch did not fix the failure — propose a **different minimal** fix; do not re-apply the same domains.
+- In `analysis`, state which failure stage you target (e.g. resource download) and how the new domains relate to logs/domain JSON.
+
+## Verification focus
+
+- If blocked at **resource download / update / CDN**: only add domains clearly tied to download/CDN/patch traffic seen in domain JSON or [SNI-DIRECT] for large transfers.
+- Next game run must be judged on whether download completes — not merely whether the app opens.
+"""
+        if blocked_stage_hint.strip():
+            prompt += f"\nLast run blocked stage hint: {blocked_stage_hint.strip()}\n"
+        if prior_patch_restored:
+            prompt += (
+                "\n[System] Previous patch was rolled back before this proposal; "
+                "config file is back to pre-patch state. Propose a new minimal diff only.\n"
+            )
+        prompt += f"""
 Anomaly overview:
 {anomaly_reason}
 
@@ -176,15 +199,12 @@ Domain/region JSON (primary for Modify):
 GameTurbo log tail (auxiliary):
 {log_content[-16000:]}
 """
-
-        messages = [prompt]
-        for sp in screenshot_paths[-3:]:
-            if sp.exists():
-                messages.append(BinaryImage.from_path(sp))
+        if screen_context.strip():
+            prompt += f"\n\n{screen_context.strip()}\n"
 
         try:
             with trace_operation("llm", "analyze_and_propose_patch") as rec:
-                result = await self._patch_agent.run(messages)
+                result = await self._patch_agent.run(prompt)
                 patch = result.output or GameTurboConfigPatch(analysis="Model returned no patch")
                 rec.ok(
                     direct_patterns=len(patch.direct_patterns),

@@ -15,6 +15,11 @@ from game_agent.services.gameturbo_log import ensure_gameturbo_log_for_analysis
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.utils.gameturbo_bootstrap import output_apk_path
+from game_agent.services.gameturbo_config_retry import (
+    infer_blocked_stage,
+    prepare_modify_stage,
+    record_patch_applied,
+)
 from game_agent.utils.gameturbo_config_apply import apply_gameturbo_config_patch
 from game_agent.utils.gameturbo_log_domain_extract import (
     DEFAULT_OUTPUT_NAME,
@@ -33,6 +38,8 @@ class RetryConfigHandler:
     app_config: AppConfig
     config_path: Path
     artifact_root: Path | None
+    task_deliverable_root: Path | None = None
+    blocked_stage_hint: str = ""
     audit: RunAuditLogger | None = None
 
     async def run(self, retry_count: int, reason: str) -> None:
@@ -52,6 +59,29 @@ class RetryConfigHandler:
             raise RuntimeError("配置与重试阶段缺少 gameturbo.gid 或 gameturbo.game_config_path")
         if not game_config_path.is_file():
             raise RuntimeError(f"GameTurbo 游戏配置不存在: {game_config_path}")
+
+        deliverable = self.task_deliverable_root
+        blocked = self.blocked_stage_hint or infer_blocked_stage(reason=reason)
+        backup_before = None
+        restored_from: str | None = None
+        if deliverable is not None:
+            backup_before, restored_from = prepare_modify_stage(
+                game_config_path,
+                deliverable,
+                failed_attempt=retry_count,
+                artifact_root=self.artifact_root,
+                blocked_stage_hint=blocked,
+            )
+            if self.audit is not None:
+                self.audit.log_phase(
+                    PipelinePhase.MODIFY.value,
+                    "GameTurbo 配置备份/恢复",
+                    failed_attempt=retry_count,
+                    next_attempt=retry_count + 1,
+                    restored_from=restored_from or "",
+                    backup_before=str(backup_before),
+                    blocked_stage=blocked,
+                )
 
         local_log_path = (
             self.artifact_root / "gameturbo.log"
@@ -75,6 +105,18 @@ class RetryConfigHandler:
                 apply_result = apply_gameturbo_config_patch(game_config_path, patch)
                 rec.ok(changed=apply_result.changed, summary=apply_result.summary)
             logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
+            if deliverable is not None and backup_before is not None:
+                record_patch_applied(
+                    deliverable,
+                    failed_attempt=retry_count,
+                    game_config_path=game_config_path,
+                    patch=patch,
+                    apply_result=apply_result,
+                    restored_from=restored_from,
+                    backup_before_path=backup_before,
+                    artifact_root=self.artifact_root,
+                    blocked_stage_hint=blocked,
+                )
             if self.audit is not None:
                 self.audit.log_phase(
                     PipelinePhase.MODIFY.value,
@@ -89,6 +131,7 @@ class RetryConfigHandler:
                 local_log_path=local_log_path,
                 domain_analysis=domain_json,
                 game_config_path=game_config_path,
+                failed_attempt=retry_count,
             )
             rec.ok(
                 direct_patterns=len(patch.direct_patterns),
@@ -98,6 +141,18 @@ class RetryConfigHandler:
             apply_result = apply_gameturbo_config_patch(game_config_path, patch)
             rec.ok(changed=apply_result.changed, summary=apply_result.summary)
         logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
+        if deliverable is not None and backup_before is not None:
+            record_patch_applied(
+                deliverable,
+                failed_attempt=retry_count,
+                game_config_path=game_config_path,
+                patch=patch,
+                apply_result=apply_result,
+                restored_from=restored_from,
+                backup_before_path=backup_before,
+                artifact_root=self.artifact_root,
+                blocked_stage_hint=blocked,
+            )
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,
@@ -171,10 +226,11 @@ class RetryConfigHandler:
         local_log_path: Path,
         domain_analysis: dict | None,
         game_config_path: Path,
+        failed_attempt: int,
     ) -> GameTurboConfigPatch:
         cfg = self.app_config
         logger.info("AI 二次日志分析并生成配置补丁...")
-        agent = AnalysisAgent(cfg.llm_multimodal or cfg.llm, deepseek=cfg.deepseek)
+        agent = AnalysisAgent(cfg.llm, deepseek=cfg.deepseek)
         log_content = ""
         if local_log_path.is_file():
             try:
@@ -182,9 +238,16 @@ class RetryConfigHandler:
             except Exception:
                 pass
 
-        screenshots: list[Path] = []
-        if self.artifact_root:
-            screenshots = sorted(self.artifact_root.glob("monitor_screen_*.png"))
+        screen_context = ""
+        if self.artifact_root and cfg.llm_multimodal is not None:
+            from game_agent.services.vision_context import summarize_monitor_screenshots
+
+            shots = sorted(self.artifact_root.glob("monitor_screen_*.png"))
+            screen_context = await summarize_monitor_screenshots(
+                cfg.llm_multimodal,
+                shots,
+                max_images=3,
+            )
 
         try:
             import json
@@ -198,7 +261,9 @@ class RetryConfigHandler:
             log_content=log_content,
             current_config=current_config,
             domain_analysis=domain_analysis,
-            screenshot_paths=screenshots,
+            screen_context=screen_context,
+            blocked_stage_hint=self.blocked_stage_hint,
+            prior_patch_restored=bool(self.task_deliverable_root and failed_attempt >= 1),
         )
         logger.info("AI 配置补丁:\n%s", patch.model_dump_json(indent=2))
         if self.audit is not None:

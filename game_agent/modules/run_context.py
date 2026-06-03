@@ -13,6 +13,9 @@ class AttemptContext:
     """
 
     stop_all: asyncio.Event = field(default_factory=asyncio.Event)
+    attempt_index: int = 1
+    max_attempts: int = 1
+    prior_attempt_brief: str = ""
     _fatal_reason: str | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     ui_stage: str = ""
@@ -37,10 +40,13 @@ class AttemptContext:
             self.ui_stage = (stage or "unknown").strip()[:64]
             self.ui_progress = (progress or "").strip()[:64]
 
-    def format_observer_hint(self) -> str:
+    def get_ui_observation(self) -> tuple[str, str]:
         with self._lock:
-            stage = self.ui_stage or "unknown"
-            progress = self.ui_progress
+            return self.ui_stage or "", self.ui_progress or ""
+
+    def format_observer_hint(self) -> str:
+        stage, progress = self.get_ui_observation()
+        stage = stage or "unknown"
         if progress:
             return f"Observer UI hint: stage={stage} progress={progress}"
         return f"Observer UI hint: stage={stage}"

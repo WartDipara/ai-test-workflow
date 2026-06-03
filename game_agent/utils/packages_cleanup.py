@@ -32,11 +32,58 @@ def cleanup_deploy_artifacts(packages_dir: Path = PACKAGES_DIR) -> list[str]:
     return removed
 
 
-def remove_source_apk(source_apk: Path | None) -> bool:
-    """任务最终产出完成后删除原包（仅调用一次）。"""
-    if source_apk is None or not source_apk.is_file():
-        return False
-    name = source_apk.name
-    source_apk.unlink()
-    logger.info("已删除原包: %s", name)
-    return True
+def remove_source_apk(source_apk: Path | None, packages_dir: Path = PACKAGES_DIR) -> list[str]:
+    """删除原包 APK（任务最终结束时调用）。"""
+    removed: list[str] = []
+    candidates: list[Path] = []
+    if source_apk is not None and source_apk.is_file():
+        candidates.append(source_apk.resolve())
+    if packages_dir.is_dir():
+        for apk in packages_dir.glob("*.apk"):
+            if apk.name.startswith("game_gameturbo"):
+                continue
+            if "gameturbo" in apk.name.lower():
+                continue
+            resolved = apk.resolve()
+            if resolved not in candidates:
+                candidates.append(resolved)
+    for path in candidates:
+        name = path.name
+        path.unlink()
+        removed.append(name)
+        logger.info("已删除原包: %s", name)
+    return removed
+
+
+def clear_packages_directory(packages_dir: Path = PACKAGES_DIR) -> list[str]:
+    """任务结束后清空 packages 目录下所有文件（原包 + deploy 产物）。"""
+    removed: list[str] = []
+    if not packages_dir.is_dir():
+        packages_dir.mkdir(parents=True, exist_ok=True)
+        return removed
+    for path in list(packages_dir.iterdir()):
+        if path.is_file():
+            path.unlink()
+            removed.append(path.name)
+    if removed:
+        logger.info("已清空 packages 目录: %s", ", ".join(removed))
+    elif packages_dir.is_dir():
+        logger.info("packages 目录已为空: %s", packages_dir)
+    return removed
+
+
+def finalize_task_packages(
+    packages_dir: Path = PACKAGES_DIR,
+    source_apk: Path | None = None,
+) -> dict[str, list[str]]:
+    """
+    任务最终收尾：先删 deploy 产物，再删原包，最后扫尾清空残留文件。
+    """
+    deploy_removed = cleanup_deploy_artifacts(packages_dir)
+    source_removed = remove_source_apk(source_apk, packages_dir)
+    leftover_removed = clear_packages_directory(packages_dir)
+    return {
+        "deploy": deploy_removed,
+        "source": source_removed,
+        "leftover": leftover_removed,
+    }

@@ -17,3 +17,5 @@ class RunState:
     in_game_confirmed: bool = False
     in_game_confirm_streak: int = 0
     package_install_confirmed: bool = False
+    failure_code: str = ""
+    last_declared_stage: str = ""

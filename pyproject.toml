@@ -31,6 +31,7 @@ target-version = "py312"
 [project.scripts]
 adb-tap = "game_agent.tools.adb_tap:main"
 wait-for-package = "game_agent.tools.wait_for_package:main"
+finalize-task = "game_agent.tools.finalize_task:main"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

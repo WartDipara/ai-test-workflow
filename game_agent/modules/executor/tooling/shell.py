@@ -9,6 +9,7 @@ from typing import Any, TypeVar
 from pydantic_ai import Agent, RunContext
 
 from game_agent.modules.executor.deps import ExecutorAgentDeps
+from game_agent.services.polling import CALLBACK_HINT
 
 F = TypeVar("F", bound=Callable[..., Awaitable[str]])
 

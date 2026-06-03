@@ -14,6 +14,7 @@ deepseek:
 observer:
   skip_vision_probe: false
 
+# 仅画面观察：ScreenMonitor、check_in_game、重试前截图摘要；不做 tool_choice / 配置补丁
 llm_multimodal:
   base_url: "https://ai.14x.cn/coding/v1"
   api_key: "${QWEN_API_KEY}"
@@ -80,10 +81,11 @@ modules:
   max_retries: 3           # retry_on_failure 为 true 时生效
 
 agent:
-  max_rounds: 35
+  max_rounds: 100
   artifacts_dir: "./artifacts"
   persist_learned_skill_on_success: true
-  tap_observe_count: 2
+  tap_observe_count: 1
+  repeat_compact_stage_hint_every_n_rounds: 5
 
 logging:
   level: "INFO"

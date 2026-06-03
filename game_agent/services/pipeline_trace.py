@@ -98,8 +98,17 @@ class PipelineTracer:
         )
 
         if self._jsonl_path is not None:
-            with self._jsonl_path.open("a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            try:
+                self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+                with self._jsonl_path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError as e:
+                _pipeline_logger.warning(
+                    "[PIPELINE] 无法写入 %s: %s（仅保留日志行）",
+                    self._jsonl_path,
+                    e,
+                )
+                self._jsonl_path = None
 
     @contextmanager
     def operation(
