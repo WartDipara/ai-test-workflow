@@ -7,6 +7,7 @@ from pathlib import Path
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.settings import AppConfig
 from game_agent.services.adb_service import AdbService
+from game_agent.services.device_workspace_cleanup import remove_leftover_game_installations
 from game_agent.services.gameturbo_log import (
     ensure_gameturbo_log_for_analysis,
     finalize_gameturbo_log,
@@ -106,32 +107,19 @@ class FailureCleanup:
 
         game_pkg = (cfg.game.package_name or "").strip()
         packages = [game_pkg] if game_pkg else []
-        with trace_operation("cleanup", "force_stop_packages", packages=packages) as rec:
-            logger.info("中止游戏进程: %s", packages)
-            self.adb.force_stop_packages(packages)
-            rec.ok()
+        with trace_operation("cleanup", "uninstall_game_if_present", packages=packages) as rec:
+            results = remove_leftover_game_installations(self.adb, packages)
+            uninstalled = [r.package for r in results if r.was_installed]
+            rec.ok(uninstalled=uninstalled, checked=len(results))
         if self.audit is not None:
-            self.audit.log_phase(
-                PipelinePhase.CLEANUP.value,
-                "已 force-stop",
-                packages=packages,
-            )
-
-        if game_pkg:
-            with trace_operation("cleanup", "uninstall_game", package=game_pkg) as rec:
-                logger.info("卸载游戏: %s", game_pkg)
-                out = self.adb.uninstall(game_pkg)
-                logger.info("%s", out)
-                rec.ok(output=str(out)[:500])
-            if self.audit is not None:
+            if game_pkg:
                 self.audit.log_phase(
                     PipelinePhase.CLEANUP.value,
-                    "已卸载游戏",
+                    "已处理设备游戏包（force-stop + 卸载若已安装）",
                     package=game_pkg,
                 )
-        else:
-            logger.warning("game.package_name 为空，跳过卸载")
-            if self.audit is not None:
+            else:
+                logger.warning("game.package_name 为空，跳过卸载")
                 self.audit.log_phase(PipelinePhase.CLEANUP.value, "跳过卸载（包名为空）")
 
         if self.audit is not None:

@@ -72,6 +72,23 @@ def clear_packages_directory(packages_dir: Path = PACKAGES_DIR) -> list[str]:
     return removed
 
 
+def prepare_packages_for_new_task(packages_dir: Path = PACKAGES_DIR) -> list[str]:
+    """
+    新任务（run.sh / main）开始前清空 packages/ 下全部文件。
+
+    与任务结束时的 finalize_task_packages 对称，用于消化异常中断（断电等）
+    未执行收尾时遗留的原包、deploy 产物与签名文件。预处理会重新放入原包。
+    """
+    removed = clear_packages_directory(packages_dir)
+    if removed:
+        logger.info(
+            "新任务开始前已清空 packages 遗留（%d 个）: %s",
+            len(removed),
+            ", ".join(removed[:12]) + (" …" if len(removed) > 12 else ""),
+        )
+    return removed
+
+
 def finalize_task_packages(
     packages_dir: Path = PACKAGES_DIR,
     source_apk: Path | None = None,

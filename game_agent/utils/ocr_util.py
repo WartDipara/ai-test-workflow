@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -204,3 +205,116 @@ def extract_text_with_bounds(image_path: Path | str) -> str:
     if not lines:
         return "[OCR] 未识别到任何文字"
     return "\n".join(lines)
+
+
+_OCR_LINE_RE = re.compile(
+    r"^- \((\d+),\s*(\d+)\)\s+(.+)$",
+)
+
+
+@dataclass(frozen=True)
+class OcrLine:
+    x: int
+    y: int
+    text: str
+
+
+def is_screencap_mostly_black(
+    image_path: Path | str,
+    *,
+    dark_threshold: int = 28,
+    dark_ratio: float = 0.88,
+    sample_max: int = 96_000,
+) -> bool:
+    """
+    判断截屏是否主要为黑屏（安全键盘 / 密码框焦点时常见）。
+    用于避免把黑屏 OCR 误判为「游戏卡死」。
+    """
+    from PIL import Image
+
+    path = Path(image_path)
+    if not path.is_file():
+        return False
+    try:
+        with Image.open(path) as im:
+            im = im.convert("L")
+            w, h = im.size
+            step = max(1, int((w * h / sample_max) ** 0.5))
+            pixels = list(im.resize((max(1, w // step), max(1, h // step))).getdata())
+    except Exception:
+        return False
+    if not pixels:
+        return False
+    dark = sum(1 for p in pixels if p <= dark_threshold)
+    return (dark / len(pixels)) >= dark_ratio
+
+
+def parse_ocr_lines(ocr_body: str) -> list[OcrLine]:
+    """解析 extract_text_with_bounds 输出的行列表。"""
+    lines: list[OcrLine] = []
+    for raw in (ocr_body or "").splitlines():
+        m = _OCR_LINE_RE.match(raw.strip())
+        if not m:
+            continue
+        text = m.group(3)
+        # 去掉 Paddle 置信度后缀
+        text = re.sub(r"\s*\(置信度:.*\)\s*$", "", text).strip()
+        lines.append(OcrLine(x=int(m.group(1)), y=int(m.group(2)), text=text))
+    return lines
+
+
+def format_device_ocr_for_executor(
+    ocr_body: str,
+    *,
+    screen_height: int,
+    keyboard_min_y_ratio: float = 0.58,
+) -> str:
+    """
+    标注 OCR 来自设备截屏，并将 y >= 阈值 的行标为输入法/安全键盘区（勿当登录按钮）。
+    """
+    h = max(1, int(screen_height))
+    cutoff = int(h * float(keyboard_min_y_ratio))
+    ui_lines: list[str] = []
+    ime_lines: list[str] = []
+    other: list[str] = []
+
+    _dialog_btn = re.compile(
+        r"(同意|不同意|^(登录|立即登录)$|确认|确定|取消|进入游戏|"
+        r"^login$|forgot\s*password)",
+        re.IGNORECASE,
+    )
+    _compound_login = re.compile(
+        r"login\s*/\s*sign|sign\s*up\s*with|login/sign",
+        re.IGNORECASE,
+    )
+
+    for line in (ocr_body or "").splitlines():
+        m = _OCR_LINE_RE.match(line.strip())
+        if not m:
+            other.append(line)
+            continue
+        y = int(m.group(2))
+        text = m.group(3)
+        # 主 Login/登录 可落在 cutoff 以下；复合入口与 IME 键仍归 keyboard 区
+        is_primary_login = bool(_dialog_btn.search(text.strip()))
+        is_compound = bool(_compound_login.search(text))
+        if y >= cutoff and not is_primary_login:
+            ime_lines.append(line)
+        elif y >= cutoff and is_compound:
+            ime_lines.append(line)
+        else:
+            ui_lines.append(line)
+
+    parts = [
+        f"[Device live screencap OCR] screen_height={h}px; "
+        f"UI region y<{cutoff} | keyboard/IME y>={cutoff} (do NOT tap IME keys for Login)",
+    ]
+    parts.append(f"=== Game UI (y < {cutoff}) ===")
+    parts.append("\n".join(ui_lines) if ui_lines else "(no text)")
+    if ime_lines:
+        parts.append(f"=== Keyboard / IME only (y >= {cutoff}) — ignore for Login ===")
+        parts.append("\n".join(ime_lines))
+    if other:
+        parts.append("=== Other ===")
+        parts.append("\n".join(other))
+    return "\n".join(parts)

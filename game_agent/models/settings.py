@@ -99,8 +99,46 @@ class ExecutorSection(BaseModel):
         le=10,
         description="连续非游戏前台轮数的提示阈值，供主脑判断是否需要重新打开游戏。",
     )
-
-
+    credential_fill_settle_s: float = Field(
+        0.4,
+        ge=0.15,
+        le=2.0,
+        description="无障碍填表：点击输入框后等待焦点稳定的秒数。",
+    )
+    dismiss_keyboard_after_password: bool = Field(
+        True,
+        description="填完密码后自动点击屏幕右上角空白区收起安全键盘（坐标按 wm size 比例计算）。",
+    )
+    dismiss_keyboard_press_back: bool = Field(
+        False,
+        description="收起键盘时在点击空白区后再按 BACK（部分游戏可能返回上一页，默认关）。",
+    )
+    credential_verify_after_fill: bool = Field(
+        True,
+        description="填表后无障碍回读节点：校验对准 OCR 坐标且文本/掩码长度正确；失败自动重填一次。",
+    )
+    credential_fill_max_distance_px: float = Field(
+        150.0,
+        ge=40.0,
+        le=400.0,
+        description="填表校验：EditText 中心与 OCR 点击点允许的最大像素距离。",
+    )
+    credential_fill_retry_on_verify_fail: bool = Field(
+        True,
+        description="校验失败时自动再 setText 一次。",
+    )
+    login_submit_press_enter: bool = Field(
+        True,
+        description="密码填完后先对焦点发送 ENTER（部分游戏可直接提交，无需收键盘）。",
+    )
+    login_submit_use_cached_ocr_coords: bool = Field(
+        True,
+        description="使用填表前 get_ocr_summary 缓存的 Login 坐标点击（不依赖收键盘后 OCR）。",
+    )
+    login_submit_ocr_after_dismiss: bool = Field(
+        False,
+        description="仅在收键盘且截屏非黑屏时再 OCR 找 Login；默认关（安全键盘下常失败）。",
+    )
 class GameSection(BaseModel):
     package_name: str = Field(
         ...,
@@ -287,8 +325,11 @@ class ModulesSection(BaseModel):
         description="Monitor：从游戏启动并行监听 GameTurbo logcat；高置信异常 fail-fast。",
     )
     screen_monitor: bool = Field(
-        True,
-        description="Monitor：并行截图；网络类弹窗 fail-fast（不替代执行者点 UI）。",
+        False,
+        description=(
+            "已弃用：原并行 ScreenMonitor。画面/多模态改由执行者工具 "
+            "analyze_screen、check_in_game 按需调用。"
+        ),
     )
     retry_on_failure: bool = Field(
         True,
@@ -307,6 +348,12 @@ class ModulesSection(BaseModel):
 
 class AgentSection(BaseModel):
     max_rounds: int = Field(30, ge=1, le=200)
+    llm_request_limit: int = Field(
+        80,
+        ge=20,
+        le=300,
+        description="单轮 agent.run 内 LLM 请求上限（含 tool 往返）；避免登录链耗尽默认 50。",
+    )
     artifacts_dir: Path = Field(Path("./artifacts"))
     persist_learned_skill_on_success: bool = Field(
         True,

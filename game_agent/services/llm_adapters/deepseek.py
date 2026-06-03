@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import openai.types.chat as chat
 from pydantic_ai.messages import ModelResponse, ThinkingPart, ToolCallPart
@@ -22,6 +23,21 @@ logger = logging.getLogger(__name__)
 
 # Tool Calls 行为说明（实现依赖 Pydantic-AI DeepSeek profile + 本类回传 reasoning_content）
 _DEEPSEEK_TOOL_CALLS_DOC = "https://api-docs.deepseek.com/zh-cn/guides/tool_calls"
+_REASONING_FIELD = "reasoning_content"
+
+
+def _response_has_tool_calls(response: ModelResponse) -> bool:
+    return any(isinstance(p, ToolCallPart) for p in response.parts)
+
+
+def _response_thinking_text(response: ModelResponse) -> str | None:
+    chunks: list[str] = []
+    for part in response.parts:
+        if isinstance(part, ThinkingPart):
+            chunks.append(part.content or "")
+    if not chunks:
+        return None
+    return "\n\n".join(chunks)
 
 
 class DeepSeekChatModel(OpenAIChatModel):
@@ -75,15 +91,72 @@ class DeepSeekChatModel(OpenAIChatModel):
             logger.info("DeepSeek thinking 已解析: parts=%d\n%s", len(items), full)
             return items
 
+        reasoning = getattr(message, _REASONING_FIELD, None)
         extra = getattr(message, "model_extra", None) or {}
-        if not isinstance(extra, dict):
-            return None
+        if not isinstance(reasoning, str) and isinstance(extra, dict):
+            reasoning = extra.get(_REASONING_FIELD) or extra.get("reasoning")
 
-        reasoning = extra.get("reasoning_content") or extra.get("reasoning")
         if isinstance(reasoning, str) and reasoning.strip():
-            logger.info("DeepSeek thinking 通过 model_extra 兜底提取成功")
-            return [ThinkingPart(id="reasoning_content", content=reasoning, provider_name=self.system)]
+            logger.info("DeepSeek thinking 通过 message / model_extra 兜底提取成功")
+            return [
+                ThinkingPart(
+                    id=_REASONING_FIELD,
+                    content=reasoning,
+                    provider_name=self.system,
+                ),
+            ]
+
+        # 思考模式 + tool_calls 时 API 可能返回空 content 与空 reasoning；仍须落库以便回传
+        if self._deepseek.thinking and message.tool_calls:
+            logger.debug(
+                "DeepSeek 响应含 tool_calls 但无 reasoning 文本，写入空 %s 以便后续轮次回传",
+                _REASONING_FIELD,
+            )
+            return [
+                ThinkingPart(
+                    id=_REASONING_FIELD,
+                    content="",
+                    provider_name=self.system,
+                ),
+            ]
         return None
+
+    def _process_response(self, response: chat.ChatCompletion | str) -> ModelResponse:
+        model_response = super()._process_response(response)
+        if not self._deepseek.thinking or not _response_has_tool_calls(model_response):
+            return model_response
+        if _response_thinking_text(model_response) is not None:
+            return model_response
+
+        logger.warning(
+            "DeepSeek 响应含 tool_calls 但未解析出 %s，已补空思维链以防后续 Tool 轮 400",
+            _REASONING_FIELD,
+        )
+        return replace(
+            model_response,
+            parts=[
+                ThinkingPart(
+                    id=_REASONING_FIELD,
+                    content="",
+                    provider_name=self.system,
+                ),
+                *model_response.parts,
+            ],
+        )
+
+    def _attach_reasoning_to_message_param(
+        self,
+        message: ModelResponse,
+        message_param: chat.ChatCompletionMessageParam,
+    ) -> None:
+        """将 ThinkingPart 写入 assistant.reasoning_content（允许空串）。"""
+        for part in message.parts:
+            if isinstance(part, ThinkingPart):
+                message_param[_REASONING_FIELD] = part.content or ""  # type: ignore[literal-required]
+                return
+        text = _response_thinking_text(message)
+        if text is not None:
+            message_param[_REASONING_FIELD] = text  # type: ignore[literal-required]
 
     def _map_model_response(self, message: ModelResponse) -> chat.ChatCompletionMessageParam | None:
         """
@@ -96,21 +169,21 @@ class DeepSeekChatModel(OpenAIChatModel):
         if message_param is None:
             return None
 
-        has_tool_calls = any(isinstance(p, ToolCallPart) for p in message.parts)
-        if not tool_round_requires_reasoning_in_context(has_tool_calls) and not self._deepseek.thinking:
+        has_tool_calls = _response_has_tool_calls(message)
+        if not self._deepseek.thinking and not tool_round_requires_reasoning_in_context(
+            has_tool_calls,
+        ):
             return message_param
 
-        for part in message.parts:
-            if isinstance(part, ThinkingPart) and part.content:
-                message_param["reasoning_content"] = part.content  # type: ignore[typeddict-unknown-key]
-                break
+        self._attach_reasoning_to_message_param(message, message_param)
 
-        if has_tool_calls and not message_param.get("reasoning_content"):  # type: ignore[union-attr]
-            logger.warning(
-                "DeepSeek assistant 含 tool_calls 但缺少 reasoning_content，后续请求可能 400；"
-                "doc=%s",
-                _DEEPSEEK_TOOL_CALLS_DOC,
-            )
+        if has_tool_calls and self._deepseek.thinking:
+            if _REASONING_FIELD not in message_param:  # type: ignore[operator]
+                message_param[_REASONING_FIELD] = ""  # type: ignore[literal-required]
+                logger.warning(
+                    "DeepSeek 历史 assistant 含 tool_calls 但无 %s，已补空串回传（避免 400）",
+                    _REASONING_FIELD,
+                )
 
         return message_param
 

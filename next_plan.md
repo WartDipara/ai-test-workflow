@@ -33,4 +33,4 @@ graph TD
 
 **失败与重试**：导出日志与截图 → force-stop 游戏 → 卸载 → AI 分析并修改 `games/*.json` → `deploy.sh` → 从执行者阶段重新跑完整流程。
 
-详见 [README.md](README.md) 与 [skills/game-launch-ocr/SKILL.md](skills/game-launch-ocr/SKILL.md)。
+详见 [README.md](README.md) 与 [skills/SKILL.md](skills/SKILL.md)（目录）→ [game_launch_ocr_skill.md](skills/game_launch_ocr_skill.md)。

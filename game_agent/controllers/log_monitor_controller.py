@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from game_agent.models.settings import AppConfig
@@ -16,16 +17,10 @@ from game_agent.services.gameturbo_log import (
     gameturbo_log_path,
     read_gameturbo_dedup_keys,
 )
+from game_agent.services.gameturbo_log_anomaly import is_fatal_gameturbo_log_line
 from game_agent.services.run_audit_log import RunAuditLogger
 
 logger = logging.getLogger(__name__)
-
-_ANOMALY_MARKERS = (
-    "channel closed",
-    "tunnel closed",
-    "shutdown",
-    "idle shutdown: no streams for 300s, closing tunnel",
-)
 
 
 @dataclass(slots=True)
@@ -43,15 +38,23 @@ class LogMonitor:
         """会话重启：请求终止当前 logcat 流，外层循环将重新 bootstrap。"""
         self._restart_requested.set()
 
-    async def run_until_anomaly(self, stop_event: asyncio.Event) -> str | None:
+    async def run_until_anomaly(
+        self,
+        stop_event: asyncio.Event,
+        *,
+        skip_initial_bootstrap: bool = False,
+    ) -> str | None:
         logger.info("[LogMonitor] 开始监控 GameTurbo 日志...")
         log_path = gameturbo_log_path(self.artifact_root)
-        bootstrap_gameturbo_log(self.adb, self.artifact_root)
+        if not skip_initial_bootstrap:
+            bootstrap_gameturbo_log(self.adb, self.artifact_root)
         seen_keys = read_gameturbo_dedup_keys(log_path)
+        monitor_started_at = datetime.now()
 
         while not stop_event.is_set():
             if self._restart_requested.is_set():
                 self._restart_requested.clear()
+                monitor_started_at = datetime.now()
                 log_path = gameturbo_log_path(self.artifact_root)
                 seen_keys = read_gameturbo_dedup_keys(log_path)
                 logger.info("[LogMonitor] 会话重启后恢复 logcat 流")
@@ -60,6 +63,7 @@ class LogMonitor:
                 stop_event,
                 log_path=log_path,
                 seen_keys=seen_keys,
+                monitor_started_at=monitor_started_at,
             )
             if anomaly is not None:
                 return anomaly
@@ -76,6 +80,7 @@ class LogMonitor:
         *,
         log_path: Path,
         seen_keys: set[str],
+        monitor_started_at: datetime,
     ) -> str | None:
         cmd = self.adb._base() + ["logcat", "-s", "GameTurbo"]
         logger.info("[LogMonitor] 监听命令: %s", " ".join(cmd))
@@ -122,8 +127,10 @@ class LogMonitor:
                     seen_keys.add(key)
                 if line_count <= 3 or line_count % 20 == 0:
                     logger.info("[LogMonitor] logcat #%d: %s", line_count, line[:200])
-                lower = line.lower()
-                if any(m in lower for m in _ANOMALY_MARKERS):
+                if is_fatal_gameturbo_log_line(
+                    line,
+                    monitor_started_at=monitor_started_at,
+                ):
                     logger.warning("[LogMonitor] 检测到异常日志: %s", line)
                     if self.audit is not None:
                         self.audit.log_observer(

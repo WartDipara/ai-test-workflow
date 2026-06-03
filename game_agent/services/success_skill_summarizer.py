@@ -22,7 +22,7 @@ Rules:
 1. Markdown body only; no preamble; do not wrap the whole output in a code fence.
 2. First line must be `# Learned skill: <short title under ~10 words>`.
 3. Keep under ~800 English words; use short lists: stage ID order, key OCR phrases, buttons per stage, pitfalls.
-4. Contrast `skills/game-launch-ocr/SKILL.md` generic stages with this game's deltas; do not copy large chunks.
+4. Contrast `skills/game_launch_ocr_skill.md` generic stages with this game's deltas; do not copy large chunks.
 5. Do not invent steps not in the transcript; no API keys, tokens, or account secrets.
 6. Do not paste full OCR dumps; keywords only."""
 

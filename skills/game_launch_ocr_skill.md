@@ -1,8 +1,8 @@
 ---
-name: game-launch-ocr
+name: game_launch_ocr
+skill_id: game_launch_ocr
 description: >-
-  Executor-phase guide: launch → login → in-game via OCR + tap. Popups: prefer Agree/Accept;
-  first-launch privacy; download-size dialogs — wait after consent. Path: skills/game-launch-ocr/SKILL.md
+  Executor: launch → login → in-game via OCR + tap. Index: skills/SKILL.md → read_repo_skill("game_launch_ocr").
 ---
 
 # Generic game login flow (OCR + adb tap)
@@ -17,7 +17,7 @@ Classify **current stage** from **live OCR**, then act. Prefer `tap_and_observe`
 
 1. **When in doubt on a dialog, tap the positive / continue side** — not exit, not “later”, not “reject”, unless OCR clearly shows no Agree path.
 2. **First cold start often shows privacy / terms** (`privacy` stage) **before** login — do not skip; find **Agree / Accept / 同意 / 接受 / 我知道了 / 进入游戏** and tap it (`tap_and_observe`).
-3. **Checkbox first** if OCR shows unchecked protocol box next to Agree — tap checkbox, then Agree.
+3. **Checkbox first** if OCR shows unchecked protocol text — tap **left of** the agreement line (checkbox has no OCR text), then Agree/Login; use `tap_and_observe` to verify.
 4. **Download / update popups** may appear **during** `download` stage (“需要下载 XX MB”, “资源更新”, “确认下载”) — tap **确认 / 下载 / 继续 / OK / Agree**, then **`wait_seconds` 3–8s** and re-OCR; **do not** treat the dialog as failure.
 5. After any consent tap, **always** `get_ocr_summary` or `tap_and_observe` — do not assume the screen advanced.
 6. **Parallel monitors** only fail-fast on **network** errors — a download consent popup is **not** a network failure; keep progressing.
@@ -89,7 +89,7 @@ Order varies (privacy before or after announcement); **trust OCR**, not a fixed 
 ### Login (`login`)
 
 - Prefer **游客登录 / 一键登录 / guest / quick start**.
-- Account/password: OCR field centers → `fill_credential_field(username)` → `fill_credential_field(password)` → tap **登录/Login**.
+- Account/password: OCR centers → `fill_credential_field` (auto **VERIFY** position + text; one retry on fail). Read `VERIFY` in tool output — `FAILED` → re-OCR coords, re-fill, or `verify_credential_field`. After password, keyboard dismisses → `get_ocr_summary` → Login only if VERIFY OK/PARTIAL with position OK.
 - Protocol checkbox on login page: tap checkbox before Login if OCR shows it.
 
 ### Server select (`server_select`)
@@ -125,8 +125,8 @@ This stage is **mostly waiting**, but games often show **extra consent popups**:
 | `wait_seconds` | animations, download progress (not a substitute for `wait_for_game_running`) |
 | `wait_for_game_running` | process milestone |
 | `check_in_game` | required to finish |
-| `read_login_flow_guide` | re-read this skill |
-| `credentials_status` / `fill_credential_field` | account login |
+| `read_skills_index` / `read_repo_skill("game_launch_ocr")` | re-read this skill |
+| `credentials_status` / `fill_credential_field` / `verify_credential_field` | account login + self-check |
 | `report_flow_done(success=false)` | unrecoverable blocker only |
 
 ---

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from game_agent.paths import REPO_ROOT
+from game_agent.services.adb_service import AdbService
 from game_agent.services.pipeline_trace import trace_operation
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,27 @@ def _find_bash() -> str:
     return "bash"
 
 
+def verify_package_on_device(
+    package_name: str,
+    *,
+    serial: str | None = None,
+) -> None:
+    """deploy.sh 返回 0 后仍须确认 pm path（install 失败时脚本可能未报错）。"""
+    pkg = (package_name or "").strip()
+    if not pkg:
+        raise RuntimeError("verify_package_on_device: empty package_name")
+    adb = AdbService(serial)
+    if adb.is_package_installed(pkg):
+        logger.info("deploy 后校验: 设备已安装 %s", pkg)
+        return
+    detail = adb.shell(f"pm path {pkg}", timeout=15.0).strip() or "(empty)"
+    raise RuntimeError(
+        f"deploy.sh exited 0 but package {pkg} is not installed on device. "
+        f"pm path output: {detail[:300]}. "
+        "Check deploy.log for adb install (Success/Failure)."
+    )
+
+
 def run_deploy(
     gid: str,
     *,
@@ -44,6 +66,7 @@ def run_deploy(
     artifact_root: Path | None = None,
     log_filename: str = "deploy.log",
     timeout_s: float = 900.0,
+    expected_package: str | None = None,
 ) -> DeployResult:
     """Run GameTurbo android deploy in Git Bash and wait for it to finish."""
     if not DEPLOY_SCRIPT.is_file():
@@ -97,6 +120,9 @@ def run_deploy(
             raise RuntimeError(
                 f"deploy.sh 失败 (exit={result.returncode})，日志: {log_path or '未落盘'}",
             )
+
+        if expected_package:
+            verify_package_on_device(expected_package, serial=serial)
 
         rec.ok(returncode=0, log_path=str(log_path) if log_path else None)
     logger.info("GameTurbo deploy 完成 (gid=%s)", gid)

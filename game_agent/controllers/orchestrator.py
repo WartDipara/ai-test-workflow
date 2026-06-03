@@ -13,7 +13,6 @@ from game_agent.exceptions import DeployPhaseError
 from game_agent.controllers.log_monitor_controller import LogMonitor
 from game_agent.controllers.pre_controller import PreprocessingController
 from game_agent.controllers.retry_controller import AnomalyHandler
-from game_agent.controllers.screen_monitor_controller import ScreenMonitor
 from game_agent.controllers.session_controller import SessionCoordinator
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.run_failure import (
@@ -32,6 +31,10 @@ from game_agent.services.normal_exit import NormalExitState, confirm_in_game_nor
 from game_agent.paths import GAMETURBO_MERGED_CONFIG_PATH
 from game_agent.services.adb_service import AdbService
 from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
+from game_agent.services.device_workspace_cleanup import (
+    DevicePackageCleanupResult,
+    prepare_device_for_new_task,
+)
 from game_agent.services.failure_report import (
     generate_and_save_attempt_failure_report,
     generate_failure_diagnosis_report,
@@ -66,7 +69,11 @@ from game_agent.utils.gameturbo_bootstrap import (
     resolve_task_gid,
     run_bootstrap,
 )
-from game_agent.utils.packages_cleanup import cleanup_deploy_artifacts, finalize_task_packages
+from game_agent.utils.packages_cleanup import (
+    cleanup_deploy_artifacts,
+    finalize_task_packages,
+    prepare_packages_for_new_task,
+)
 from game_agent.utils.settings_yaml import upsert_top_level_section_fields
 
 logger = logging.getLogger(__name__)
@@ -102,6 +109,8 @@ class GameTestOrchestrator:
         self._task_journal: TaskRunJournal | None = None
         self._preprocess_record: PreprocessResult | None = None
         self._preprocessing_enabled = False
+        self._packages_startup_removed: list[str] = []
+        self._device_startup_cleanup: list[DevicePackageCleanupResult] = []
 
     def _load_config(self) -> None:
         raw = load_app_config(self._config_path)
@@ -123,6 +132,46 @@ class GameTestOrchestrator:
         )
         self._adb = AdbService(self._app_config.adb.serial)
 
+    def _prepare_device_at_task_start(self, cfg: AppConfig) -> list[DevicePackageCleanupResult]:
+        """任务最早阶段：卸载设备上上一轮遗留的游戏安装。"""
+        assert self._adb is not None
+        with trace_operation(
+            "device",
+            "prepare_workspace_at_task_start",
+            package=cfg.game.package_name,
+        ) as rec:
+            results = prepare_device_for_new_task(self._adb, cfg.game.package_name)
+            uninstalled = [r.package for r in results if r.was_installed]
+            rec.ok(
+                checked=len(results),
+                uninstalled=uninstalled,
+            )
+        return results
+
+    def _prepare_packages_at_task_start(self) -> list[str]:
+        """任务最早阶段：清空 packages，避免上次异常退出遗留干扰 deploy。"""
+        with trace_operation("packages", "prepare_workspace_at_task_start") as rec:
+            removed = prepare_packages_for_new_task()
+            rec.ok(removed_count=len(removed))
+        return removed
+
+    def _prepare_workspace_at_task_start(self, cfg: AppConfig) -> None:
+        """新任务场地准备：设备遗留卸载 → 清空 packages/。"""
+        self._device_startup_cleanup = self._prepare_device_at_task_start(cfg)
+        self._packages_startup_removed = self._prepare_packages_at_task_start()
+
+    def _sync_game_section_from_packages(self) -> None:
+        """从 packages 内 APK 同步 settings.yaml 的 game 段（deploy 产物优先，否则原包）。"""
+        out_apk = output_apk_path()
+        apk: Path | None = out_apk if out_apk.is_file() else None
+        if apk is None:
+            try:
+                apk = discover_source_apk()
+            except RuntimeError:
+                return
+        if update_settings_yaml_from_apk(self._config_path, apk):
+            self._load_config()
+
     def _log_module_flags(self, cfg: AppConfig) -> None:
         m = cfg.modules
         logger.info(
@@ -143,6 +192,8 @@ class GameTestOrchestrator:
                 cfg = self._app_config
             assert cfg is not None
             assert self._adb is not None
+
+            self._prepare_workspace_at_task_start(cfg)
 
             mods = cfg.modules
             max_retries = mods.max_retries if mods.retry_on_failure else 1
@@ -189,6 +240,7 @@ class GameTestOrchestrator:
             else:
                 self._preprocess_record = None
 
+            self._sync_game_section_from_packages()
             self._establish_task_deliverable(cfg, mods)
 
             for retry in range(1, max_retries + 1):
@@ -416,7 +468,11 @@ class GameTestOrchestrator:
             logger.info("[modules] executor and monitors off, skip game phase")
             return None
 
-        if mods.screen_monitor and not cfg.observer.skip_vision_probe:
+        if (
+            mods.executor
+            and cfg.llm_multimodal is not None
+            and not cfg.observer.skip_vision_probe
+        ):
             vision_err = await probe_startup_for_llm(cfg.llm, cfg.llm_multimodal)
             if vision_err:
                 return f"Multimodal probe failed: {vision_err}"
@@ -430,7 +486,7 @@ class GameTestOrchestrator:
             return await self._run_parallel_game_phase_body(
                 cfg,
                 retry=retry,
-                max_retries=max_retries,
+                max_attempts=max_retries,
                 attempt_ctx=attempt_ctx,
             )
         finally:
@@ -461,8 +517,27 @@ class GameTestOrchestrator:
                 screen_monitor=mods.screen_monitor,
             )
 
+        target_pkg = cfg.game.package_name.strip()
+        if mods.executor and target_pkg:
+            if not self._adb.is_package_installed(target_pkg):
+                return (
+                    f"[E2006] Package {target_pkg} not on device before executor. "
+                    "Deploy may have failed at adb install — check deploy.log."
+                )
+            attempt_ctx.mark_deploy_package_verified()
+            logger.info(
+                "[Orchestrator] 设备已安装 %s，执行者可跳过 wait_for_package_installed",
+                target_pkg,
+            )
+
         if mods.log_monitor:
+            from game_agent.services.gameturbo_log import clear_device_logcat
+
+            clear_device_logcat(self._adb)
             bootstrap_gameturbo_log(self._adb, self._artifact_root)
+            logger.info(
+                "[Orchestrator] 已 logcat -c 并采集本轮 GameTurbo 快照（避免旧缓冲区误报）",
+            )
 
         monitor_tasks: list[asyncio.Task[str | None]] = []
         log_mon: LogMonitor | None = None
@@ -477,7 +552,10 @@ class GameTestOrchestrator:
             )
 
             async def _log_task() -> str | None:
-                result = await log_mon.run_until_anomaly(stop_event)
+                result = await log_mon.run_until_anomaly(
+                    stop_event,
+                    skip_initial_bootstrap=True,
+                )
                 if result:
                     attempt_ctx.signal_fatal(result)
                 return result
@@ -485,22 +563,10 @@ class GameTestOrchestrator:
             monitor_tasks.append(asyncio.create_task(_log_task(), name="log_monitor"))
 
         if mods.screen_monitor:
-            screen_mon = ScreenMonitor(
-                self._adb,
-                cfg,
-                self._artifact_root,
-                session_state=session_state,
-                audit=self._audit,
-                attempt_context=attempt_ctx,
+            logger.warning(
+                "[Orchestrator] modules.screen_monitor=true 已弃用："
+                "请改由主脑工具 analyze_screen / check_in_game 按需调用多模态",
             )
-
-            async def _screen_task() -> str | None:
-                result = await screen_mon.run_until_anomaly(stop_event)
-                if result:
-                    attempt_ctx.signal_fatal(result)
-                return result
-
-            monitor_tasks.append(asyncio.create_task(_screen_task(), name="screen_monitor"))
 
         session_coordinator = SessionCoordinator(
             adb=self._adb,
@@ -626,6 +692,10 @@ class GameTestOrchestrator:
 
         if pending:
             timed_out = True
+            attempt_ctx.signal_fatal(
+                f"Parallel game phase timeout ({cfg.game.timeout_s:.0f}s) "
+                "without in-game confirmation",
+            )
             stop_event.set()
             await _cancel_pending()
 
@@ -699,6 +769,26 @@ class GameTestOrchestrator:
             deliverable=str(self._deliverable.root),
             modules=mods.model_dump(),
         )
+        if self._device_startup_cleanup:
+            self._task_journal.log(
+                "device",
+                "prepared_at_start",
+                results=[
+                    {
+                        "package": r.package,
+                        "was_installed": r.was_installed,
+                        "uninstall": (r.uninstall or "")[:200],
+                        "skipped": r.skipped_reason,
+                    }
+                    for r in self._device_startup_cleanup
+                ],
+            )
+        if self._packages_startup_removed:
+            self._task_journal.log(
+                "packages",
+                "prepared_at_start",
+                removed=self._packages_startup_removed,
+            )
         if self._preprocessing_enabled:
             if self._preprocess_record is not None and self._preprocess_record.ok:
                 pr = self._preprocess_record

@@ -17,6 +17,10 @@ class AdbService:
     def __init__(self, serial: str | None) -> None:
         self._serial = serial.strip() if serial else None
 
+    @property
+    def device_serial(self) -> str | None:
+        return self._serial
+
     def _base(self) -> list[str]:
         if self._serial:
             return ["adb", "-s", self._serial]

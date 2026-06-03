@@ -58,9 +58,9 @@ def build_mission_anchor(
     return (
         "=== Mission anchor (read every round; do not drop this goal) ===\n"
         f"Goal: launch `{package_name}` → complete login/server/download → in-game.\n"
-        "Tools: OCR + tap/swipe; use read_login_flow_guide when stage is unclear.\n"
-        f"Success: `check_in_game` must reach {main_screen_confirm_rounds} consecutive "
-        "confirmations (multimodal). `wait_for_game_running` is only a process milestone.\n"
+        "Tools: OCR + tap/swipe; multimodal only via analyze_screen / check_in_game (JSON errorCode).\n"
+        f"Success: check_in_game data.confirmed=true after {main_screen_confirm_rounds} "
+        "consecutive positives (errorCode=0). wait_for_game_running is process-only.\n"
         "Popups: prefer Agree/Accept/确认/继续/下载; handle privacy on first launch; "
         "confirm download-size dialogs then wait.\n"
         "Each reply: current stage ID + concrete next tool(s).\n"
@@ -82,7 +82,7 @@ def build_prior_attempt_block(prior_brief: str) -> str:
 
 
 def should_include_compact_stage_hint(round_id: int, every_n_rounds: int) -> bool:
-    """首轮必带；之后按间隔附带（完整 skill 仍可通过 read_login_flow_guide 拉取）。"""
+    """首轮必带；之后按间隔附带（完整 skill：read_skills_index → read_repo_skill）。"""
     if round_id == 0:
         return True
     if every_n_rounds <= 0:
@@ -147,6 +147,11 @@ def build_executor_user_parts(
     if round_id == 0 and not run_state.package_install_confirmed:
         dynamic += (
             " Post-deploy: call wait_for_package_installed ONCE, then open_game_app."
+        )
+    elif round_id == 0 and run_state.package_install_confirmed:
+        dynamic += (
+            " Package already on device (verified after deploy). "
+            "Skip wait_for_package_installed; call open_game_app then get_ocr_summary."
         )
     if actx is not None:
         fatal = actx.get_fatal_reason()

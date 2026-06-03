@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai.usage import UsageLimits
 
 from game_agent.config.loader import load_app_config
 from game_agent.models.run_failure import classify_exception
@@ -35,7 +36,12 @@ from game_agent.services.executor_user_context import (
     extract_declared_stage,
 )
 from game_agent.services.success_skill_summarizer import write_skill_from_success_run
-from game_agent.utils.ocr_util import configure_ocr, extract_text_with_bounds, warmup_ocr
+from game_agent.utils.ocr_util import (
+    configure_ocr,
+    extract_text_with_bounds,
+    format_device_ocr_for_executor,
+    warmup_ocr,
+)
 from game_agent.views.console_view import ConsoleView
 
 logger = logging.getLogger(__name__)
@@ -108,6 +114,8 @@ class ExecutorFlowController:
         game_pkg = cfg.game.package_name
 
         run_state = RunState()
+        if attempt_context is not None and attempt_context.deploy_package_verified:
+            run_state.package_install_confirmed = True
         session_id = artifact_root.name
         mem_path = executor_art / MEMORY_FILE
         hist_path = executor_art / HISTORY_FILE
@@ -172,7 +180,11 @@ class ExecutorFlowController:
             if fg_pkg == target_pkg:
                 view.banner("正在执行 OCR 文字识别…")
                 try:
-                    ocr_summary = extract_text_with_bounds(shot_path)
+                    raw_ocr = extract_text_with_bounds(shot_path)
+                    ocr_summary = format_device_ocr_for_executor(
+                        raw_ocr,
+                        screen_height=h,
+                    )
                 except Exception as e:
                     ocr_summary = f"[OCR failed or PaddleOCR not installed] {e}"
                     logger.warning("OCR 失败: %s", e)
@@ -213,7 +225,13 @@ class ExecutorFlowController:
 
             # 完整 message_history 送入 API（不裁剪），保证思考链与工具往返可追溯。
             try:
-                result = await agent.run(user_parts, message_history=history, deps=deps)
+                usage = UsageLimits(request_limit=cfg.agent.llm_request_limit)
+                result = await agent.run(
+                    user_parts,
+                    message_history=history,
+                    deps=deps,
+                    usage_limits=usage,
+                )
             except Exception as e:
                 view.error("agent.run 失败", exc_info=True)
                 run_state.finished = True

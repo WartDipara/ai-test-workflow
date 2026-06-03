@@ -11,18 +11,24 @@ from pathlib import Path
 from typing import Any
 
 from game_agent.modules.preprocessing.preprocessor import PreprocessResult
+from game_agent.services.execution_log_bundle import (
+    EXECUTION_MANIFEST_NAME,
+    FINAL_LOG_NAME,
+    archive_attempt_logs,
+    build_final_logs,
+    write_execution_manifest,
+)
 from game_agent.services.run_deliverable import RunDeliverablePaths
 
 logger = logging.getLogger(__name__)
 
-FINAL_LOG_NAME = "final_logs.log"
 TASK_JOURNAL_NAME = "task_journal.jsonl"
-_DEFAULT_SECTION_BYTES = 400_000
 
 
 @dataclass(slots=True)
 class TaskFinalizeResult:
     final_log_path: Path
+    execution_manifest_path: Path
     artifacts_removed: list[str]
     artifacts_failed: list[str]
 
@@ -46,170 +52,6 @@ class TaskRunJournal:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except OSError as e:
             logger.warning("写入 task_journal 失败: %s", e)
-
-
-def _now_local() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _append_section(lines: list[str], title: str) -> None:
-    lines.append("")
-    lines.append("=" * 80)
-    lines.append(title)
-    lines.append("=" * 80)
-
-
-def _read_text_capped(path: Path, max_bytes: int) -> str:
-    if not path.is_file():
-        return f"(missing: {path.name})"
-    data = path.read_bytes()
-    if len(data) <= max_bytes:
-        return data.decode("utf-8", errors="replace")
-    head = data[:max_bytes].decode("utf-8", errors="replace")
-    return f"{head}\n…[truncated, file size {len(data)} bytes, cap {max_bytes}]\n"
-
-
-def _format_audit_events(path: Path, max_bytes: int) -> str:
-    if not path.is_file():
-        return "(no audit/events.jsonl)"
-    out: list[str] = []
-    used = 0
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            out.append(line)
-            used += len(line) + 1
-            continue
-        ts = ev.get("ts", "")
-        kind = ev.get("kind", ev.get("type", "event"))
-        phase = ev.get("phase", "")
-        msg = ev.get("message", ev.get("text", ""))[:500]
-        out.append(f"{ts} | {kind} | {phase} | {msg}")
-        used += 200
-        if used > max_bytes:
-            out.append("…[audit events truncated]")
-            break
-    return "\n".join(out) if out else "(empty audit/events.jsonl)"
-
-
-def _format_jsonl(path: Path, max_bytes: int) -> str:
-    if not path.is_file():
-        return f"(missing: {path.name})"
-    return _read_text_capped(path, max_bytes)
-
-
-def _preprocess_section(record: PreprocessResult | None, enabled: bool) -> list[str]:
-    lines = ["", "Phase 0 — Preprocessing (once per task)"]
-    lines.append(f"  enabled: {enabled}")
-    if not enabled:
-        lines.append("  (skipped)")
-        return lines
-    if record is None:
-        lines.append("  (no result recorded)")
-        return lines
-    lines.append(f"  ok: {record.ok}")
-    lines.append(f"  message: {record.message}")
-    if record.source_apk:
-        lines.append(f"  source_apk: {record.source_apk}")
-    if record.processed_apk:
-        lines.append(f"  processed_apk: {record.processed_apk}")
-    if record.abis_kept:
-        lines.append(f"  abis_kept: {', '.join(record.abis_kept)}")
-    if record.abis_removed:
-        lines.append(f"  abis_removed: {', '.join(record.abis_removed)}")
-    return lines
-
-
-def build_final_logs(
-    deliverable: RunDeliverablePaths,
-    *,
-    success: bool,
-    max_retries: int,
-    winning_retry: int,
-    last_reason: str,
-    attempt_records: list[tuple[int, Path]],
-    preprocess_record: PreprocessResult | None,
-    preprocessing_enabled: bool,
-    modules_summary: dict[str, Any] | None = None,
-    max_section_bytes: int = _DEFAULT_SECTION_BYTES,
-) -> Path:
-    """Assemble final_logs.log under the task deliverable directory."""
-    out_path = deliverable.root / FINAL_LOG_NAME
-    lines: list[str] = [
-        "GAME AGENT TASK — FINAL LOG",
-        f"generated_at: {_now_local()}",
-        f"gid: {deliverable.gid}",
-        f"task_id: {deliverable.task_id}",
-        f"success: {success}",
-        f"winning_retry: {winning_retry}",
-        f"max_retries: {max_retries}",
-        f"total_attempts: {len(attempt_records)}",
-        f"last_reason: {last_reason[:2000]}",
-        f"deliverable_dir: {deliverable.root}",
-    ]
-
-    if modules_summary:
-        lines.append(f"modules: {json.dumps(modules_summary, ensure_ascii=False)}")
-
-    journal_path = deliverable.root / TASK_JOURNAL_NAME
-    _append_section(lines, "Task journal (orchestrator milestones)")
-    lines.append(_read_text_capped(journal_path, max_section_bytes))
-
-    _append_section(lines, "Preprocessing")
-    lines.extend(_preprocess_section(preprocess_record, preprocessing_enabled))
-
-    for retry_no, artifact_root in attempt_records:
-        _append_section(
-            lines,
-            f"Attempt {retry_no} — {artifact_root.name}",
-        )
-        lines.append(f"artifact_root: {artifact_root}")
-
-        audit_events = artifact_root / "audit" / "events.jsonl"
-        lines.append("")
-        lines.append("--- Phase timeline (audit/events.jsonl) ---")
-        lines.append(_format_audit_events(audit_events, max_section_bytes // 4))
-
-        for label, rel in (
-            ("process.log", "process.log"),
-            ("pipeline_trace.jsonl", "pipeline_trace.jsonl"),
-            ("deploy.log", "deploy.log"),
-            ("gameturbo.log (tail)", "gameturbo.log"),
-        ):
-            p = artifact_root / rel
-            lines.append("")
-            lines.append(f"--- {label} ---")
-            if rel == "gameturbo.log" and p.is_file():
-                raw = p.read_bytes()
-                tail = raw[-min(len(raw), max_section_bytes // 2) :]
-                text = tail.decode("utf-8", errors="replace")
-                if len(raw) > len(tail):
-                    text = f"…[last {len(tail)} bytes of {len(raw)}]\n" + text
-                lines.append(text)
-            else:
-                lines.append(_read_text_capped(p, max_section_bytes // 3))
-
-        attempt_report = artifact_root / "attempt_failure_report.md"
-        if attempt_report.is_file():
-            lines.append("")
-            lines.append("--- attempt_failure_report.md ---")
-            lines.append(_read_text_capped(attempt_report, max_section_bytes // 4))
-
-    _append_section(lines, "Deliverable files (run_outputs)")
-    for p in sorted(deliverable.root.iterdir()) if deliverable.root.is_dir() else []:
-        if p.name in (FINAL_LOG_NAME, TASK_JOURNAL_NAME):
-            continue
-        if p.is_file():
-            lines.append(f"  file: {p.name} ({p.stat().st_size} bytes)")
-        elif p.is_dir():
-            lines.append(f"  dir:  {p.name}/")
-
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    logger.info("已写入 %s (%d bytes)", out_path, out_path.stat().st_size)
-    return out_path
 
 
 def _chmod_writable_and_retry(func, path: str, exc_info) -> None:
@@ -289,7 +131,6 @@ def cleanup_task_artifacts(
     if not artifacts_dir.is_dir():
         return removed, failed
 
-    # 兜底：删除 artifacts 根下名称匹配且未在 attempt_records 中列出的 retry_/run_ 目录
     recorded = {p.resolve() for p in roots}
     for child in sorted(artifacts_dir.iterdir()):
         if not child.is_dir():
@@ -307,28 +148,6 @@ def cleanup_task_artifacts(
     return removed, failed
 
 
-def archive_attempt_pipeline_traces(
-    deliverable_root: Path,
-    attempt_records: list[tuple[int, Path]],
-) -> None:
-    """在删除 artifacts 前，将各轮 pipeline_trace.jsonl 复制到 run_outputs/attempts/。"""
-    if not attempt_records:
-        return
-    attempts_dir = deliverable_root / "attempts"
-    for _retry_no, artifact_root in attempt_records:
-        src = artifact_root / "pipeline_trace.jsonl"
-        if not src.is_file():
-            continue
-        dst_dir = attempts_dir / artifact_root.name
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        dst = dst_dir / "pipeline_trace.jsonl"
-        try:
-            shutil.copy2(src, dst)
-            logger.debug("已归档 pipeline trace: %s", dst)
-        except OSError as e:
-            logger.warning("归档 pipeline trace 失败 %s: %s", src, e)
-
-
 def finalize_task_deliverable(
     deliverable: RunDeliverablePaths,
     *,
@@ -344,11 +163,17 @@ def finalize_task_deliverable(
     modules_summary: dict[str, Any] | None = None,
 ) -> TaskFinalizeResult:
     """
-    Write final_logs.log to run_outputs, then delete attempt artifact trees.
-    Call after publish_success/failure_deliverable.
+    1. 归档完整执行日志到 logs/、分析报告到 reports/
+    2. 生成 final_logs.log（仅执行流，不含 Markdown 失败报告）
+    3. 写入 execution_manifest.json
+    4. 删除 artifacts/retry_*
     """
+    del modules_summary  # 已写入 task_journal / result.json，不塞进 final_logs
+
     journal = TaskRunJournal(deliverable.root)
     journal.log("finalize", "start", success=success)
+
+    archives = archive_attempt_logs(deliverable.root, attempt_records)
 
     final_path = build_final_logs(
         deliverable,
@@ -359,10 +184,8 @@ def finalize_task_deliverable(
         attempt_records=attempt_records,
         preprocess_record=preprocess_record,
         preprocessing_enabled=preprocessing_enabled,
-        modules_summary=modules_summary,
+        archives=archives,
     )
-
-    archive_attempt_pipeline_traces(deliverable.root, attempt_records)
 
     removed: list[str] = []
     failed: list[str] = []
@@ -377,25 +200,32 @@ def finalize_task_deliverable(
                 [p for _, p in attempt_records],
             )
 
-    footer_lines = [
-        "",
-        "=" * 80,
-        "Post-finalize",
-        "=" * 80,
-        f"artifacts_removed: {len(removed)}",
-    ]
-    for p in removed:
-        footer_lines.append(f"  - {p}")
-    if failed:
-        footer_lines.append(f"artifacts_cleanup_errors: {failed}")
-    with final_path.open("a", encoding="utf-8") as f:
-        f.write("\n".join(footer_lines) + "\n")
+    manifest_path = write_execution_manifest(
+        deliverable.root,
+        final_log_path=final_path,
+        success=success,
+        archives=archives,
+        artifacts_removed=removed,
+        artifacts_failed=failed,
+    )
+
+    with final_path.open("a", encoding="utf-8") as out:
+        out.write("\n")
+        out.write("-" * 72 + "\n")
+        out.write("  Post-finalize\n")
+        out.write("-" * 72 + "\n")
+        out.write(f"  artifacts_removed: {len(removed)}\n")
+        for p in removed:
+            out.write(f"    {p}\n")
+        if failed:
+            out.write(f"  artifacts_cleanup_errors: {failed}\n")
 
     journal.log(
         "finalize",
         "completed",
         success=success,
         final_log=str(final_path),
+        execution_manifest=str(manifest_path),
         artifacts_removed=len(removed),
         artifacts_failed=len(failed),
     )
@@ -405,6 +235,7 @@ def finalize_task_deliverable(
         try:
             data = json.loads(result_path.read_text(encoding="utf-8"))
             data["final_logs"] = str(final_path.resolve())
+            data["execution_manifest"] = str(manifest_path.resolve())
             from game_agent.models.run_failure import parse_error_code_from_text
 
             ec = parse_error_code_from_text(str(data.get("last_reason", "")))
@@ -422,6 +253,7 @@ def finalize_task_deliverable(
 
     return TaskFinalizeResult(
         final_log_path=final_path,
+        execution_manifest_path=manifest_path,
         artifacts_removed=removed,
         artifacts_failed=failed,
     )

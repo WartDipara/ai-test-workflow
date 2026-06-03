@@ -112,6 +112,7 @@ async def run_deploy_with_ai_retry(
                     artifact_root=artifact_root,
                     log_filename=log_name,
                     timeout_s=app_config.gameturbo.deploy_timeout_s,
+                    expected_package=app_config.game.package_name,
                 )
                 rec.ok(returncode=0, attempt=attempt)
                 if audit is not None:

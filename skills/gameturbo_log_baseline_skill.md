@@ -1,9 +1,8 @@
 ---
-name: gameturbo-log-baseline
+name: gameturbo_log_baseline
+skill_id: gameturbo_log_baseline
 description: >-
-  Judge whether GameTurbo gameturbo.log is healthy; separate benign noise from real faults.
-  Based on healthy samples (changyou-style, gid=17044, etc.). Use when analyzing gameturbo.log,
-  writing failure reports, proposing GameTurbo config patches, or when asked if acceleration logs look normal.
+  GameTurbo log health baseline. Index: skills/SKILL.md → read_repo_skill("gameturbo_log_baseline").
 ---
 
 # GameTurbo log healthy baseline (AI judgment guide)

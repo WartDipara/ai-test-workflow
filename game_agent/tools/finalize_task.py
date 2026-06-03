@@ -1,5 +1,5 @@
 """
-任务收尾：汇总 final_logs.log 并清理 artifacts/retry_* 目录。
+任务收尾：归档 logs/、生成 final_logs.log（仅执行流）、清理 artifacts/retry_*。
 
 编排器在任务成功或最终失败时会自动调用；也可手动执行：
 
@@ -98,6 +98,7 @@ def main() -> int:
         artifacts_dir=artifacts_dir,
     )
     print(f"final_logs: {outcome.final_log_path}")
+    print(f"execution_manifest: {outcome.execution_manifest_path}")
     print(f"artifacts removed: {len(outcome.artifacts_removed)}")
     if outcome.artifacts_failed:
         print(f"cleanup errors: {outcome.artifacts_failed}", file=sys.stderr)

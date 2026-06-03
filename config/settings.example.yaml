@@ -34,6 +34,15 @@ executor:
   ad_initial_wait_s: 3.0
   post_launch_wait_s: 2.0
   max_foreground_retries: 4
+  credential_fill_settle_s: 0.4
+  dismiss_keyboard_after_password: true   # 作为提交策略之一，非唯一手段
+  dismiss_keyboard_press_back: false
+  login_submit_press_enter: true          # 密码框 ENTER 提交（不依赖收键盘）
+  login_submit_use_cached_ocr_coords: true # 用填表前 get_ocr_summary 缓存的 Login 坐标
+  login_submit_ocr_after_dismiss: false   # 收键盘后再 OCR（安全键盘下常黑屏，默认关）
+  credential_verify_after_fill: true      # 填表后无障碍回读校验位置与内容
+  credential_fill_max_distance_px: 150    # 节点中心与 OCR 点击点最大允许距离
+  credential_fill_retry_on_verify_fail: true
 
 game:
   # 以下两项由启动时从 game_gameturbo.apk 自动覆写，无需手填
@@ -76,12 +85,13 @@ credentials:
 modules:
   executor: true           # Driver：登录链 + check_in_game（与 monitors 并行）
   log_monitor: true        # GameTurbo logcat，异常 fail-fast
-  screen_monitor: true     # 网络类画面弹窗 fail-fast
+  screen_monitor: false    # 已弃用；用执行者 analyze_screen / check_in_game 按需多模态
   retry_on_failure: true   # true：失败收尾后再做 AI 分析/deploy 并多轮重试；false：仅失败收尾
   max_retries: 3           # retry_on_failure 为 true 时生效
 
 agent:
   max_rounds: 100
+  llm_request_limit: 80
   artifacts_dir: "./artifacts"
   persist_learned_skill_on_success: true
   tap_observe_count: 1

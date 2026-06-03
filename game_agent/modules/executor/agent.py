@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -14,14 +15,26 @@ from game_agent.modules.executor.tooling.waits import (
     execute_wait_for_game_running,
     execute_wait_for_package,
 )
+from game_agent.services.accessibility_input import (
+    dismiss_secure_keyboard_focus,
+    fill_credential_via_accessibility,
+    get_last_password_center_y,
+    submit_login_after_password,
+    verify_credential_via_accessibility,
+)
+from game_agent.services.login_form_ocr import resolve_login_form_targets
+from game_agent.utils.ocr_util import extract_text_with_bounds, is_screencap_mostly_black
 from game_agent.services.credentials import (
     credentials_status_message,
     load_game_credentials,
 )
 from game_agent.services.learned_skill_store import format_skill_list_for_tool, read_skill_file
-from game_agent.services.login_flow_skill import read_login_flow_guide as load_login_flow_guide_text
+from game_agent.services.skill_catalog import read_login_flow_guide as load_login_flow_guide_text
+from game_agent.services.skill_catalog import read_repo_skill as load_repo_skill_text
+from game_agent.services.skill_catalog import read_skills_index as load_skills_index_text
+from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.services.llm_service import build_llm_model
-from game_agent.utils.ocr_util import extract_text_with_bounds
+from game_agent.utils.ocr_util import extract_text_with_bounds, format_device_ocr_for_executor
 
 # Re-export for controllers / agents package
 __all__ = ["ExecutorAgentDeps", "build_executor_agent"]
@@ -53,8 +66,18 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         return read_skill_file(filename)
 
     @t(kind=ToolKind.INSTANT, check_stopped=False)
+    async def read_skills_index(ctx: RunContext[ExecutorAgentDeps]) -> str:
+        """Skill 目录（skills/SKILL.md）：先读此文件，再按场景 read_repo_skill。"""
+        return load_skills_index_text()
+
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
+    async def read_repo_skill(ctx: RunContext[ExecutorAgentDeps], skill_id: str) -> str:
+        """阅读内置 skill 全文。skill_id 见 read_skills_index，如 game_launch_ocr。"""
+        return load_repo_skill_text(skill_id)
+
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def read_login_flow_guide(ctx: RunContext[ExecutorAgentDeps]) -> str:
-        """Generic mobile game login flow (skills/game-launch-ocr/SKILL.md)."""
+        """兼容别名：等同 read_repo_skill('game_launch_ocr')。新流程请先 read_skills_index。"""
         return load_login_flow_guide_text()
 
     @t(kind=ToolKind.INSTANT, check_stopped=False)
@@ -73,7 +96,12 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         y: int,
         field: Literal["username", "password"],
     ) -> str:
-        """Tap field center, clear, fill username or password from credentials.yaml."""
+        """
+        凭据仅通过无障碍 setText（安全键盘下 OCR 无法读屏）。
+        (x,y) 为填表前 get_ocr_summary 给出的字段参考坐标；无障碍会选真实 EditText。
+        密码校验通过后：多策略提交登录（ENTER / 无障碍 Login / 填表前缓存坐标；
+        不依赖收键盘后 OCR，避免安全键盘黑屏误判卡死）。
+        """
         cfg = ctx.deps.app_config
         try:
             cred = load_game_credentials(
@@ -84,19 +112,101 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             return f"Cannot load credentials: {e}"
 
         value = cred.username if field == "username" else cred.password
-        msg = ctx.deps.adb.fill_text_at(
+        ex = cfg.executor
+        sw, sh = ctx.deps.screen_width, ctx.deps.screen_height
+
+        msg = await asyncio.to_thread(
+            fill_credential_via_accessibility,
+            ctx.deps.adb.device_serial,
+            x,
+            y,
+            value,
+            width=sw,
+            height=sh,
+            field_label=field,
+            settle_s=ex.credential_fill_settle_s,
+            verify_after_fill=ex.credential_verify_after_fill,
+            max_center_distance_px=ex.credential_fill_max_distance_px,
+            retry_on_verify_fail=ex.credential_fill_retry_on_verify_fail,
+        )
+
+        if field == "password":
+            msg = msg.replace(cred.password, "***")
+            if (
+                "Accessibility fill failed" not in msg
+                and "VERIFY password: PASSED" in msg
+            ):
+                cached = ctx.deps.run_state.cached_login_button_xy
+                cache_note = (
+                    f"Cached Login={cached} '{ctx.deps.run_state.cached_login_button_text[:32]}'"
+                    if cached
+                    else "No cached Login — call get_ocr_summary on login screen before fill."
+                )
+                submit_msg = await asyncio.to_thread(
+                    submit_login_after_password,
+                    ctx.deps.adb.device_serial,
+                    ctx.deps.adb,
+                    width=sw,
+                    height=sh,
+                    cached_login_xy=cached,
+                    password_y=get_last_password_center_y(ctx.deps.adb.device_serial),
+                    artifact_root=ctx.deps.artifact_root,
+                    screen_height=sh,
+                    settle_s=ex.credential_fill_settle_s,
+                    press_enter=ex.login_submit_press_enter,
+                    use_cached_coords=ex.login_submit_use_cached_ocr_coords,
+                    try_dismiss=ex.dismiss_keyboard_after_password,
+                    press_back_on_dismiss=ex.dismiss_keyboard_press_back,
+                    ocr_after_dismiss=ex.login_submit_ocr_after_dismiss,
+                )
+                msg = f"{msg}\n{cache_note}\n{submit_msg}"
+        return msg
+
+    @t(kind=ToolKind.INSTANT)
+    async def verify_credential_field(
+        ctx: RunContext[ExecutorAgentDeps],
+        x: int,
+        y: int,
+        field: Literal["username", "password"],
+    ) -> str:
+        """不写入，仅校验 (x,y) 附近 EditText 是否已填入正确凭据（纠错/填完后复核）。"""
+        cfg = ctx.deps.app_config
+        try:
+            cred = load_game_credentials(
+                cfg.credentials.file_path,
+                settings_path=ctx.deps.settings_path,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            return f"Cannot load credentials: {e}"
+        value = cred.username if field == "username" else cred.password
+        ex = cfg.executor
+        msg = await asyncio.to_thread(
+            verify_credential_via_accessibility,
+            ctx.deps.adb.device_serial,
             x,
             y,
             value,
             width=ctx.deps.screen_width,
             height=ctx.deps.screen_height,
+            field_label=field,
+            max_center_distance_px=ex.credential_fill_max_distance_px,
         )
         if field == "password":
             msg = msg.replace(cred.password, "***")
-        return (
-            f"{msg}\n"
-            f"Filled field {field}. "
-            "Use get_ocr_summary or tap_and_observe before next step (e.g. tap Login)."
+        return msg
+
+    @t(kind=ToolKind.INSTANT)
+    async def dismiss_login_keyboard(ctx: RunContext[ExecutorAgentDeps]) -> str:
+        """手动收起安全键盘（按设备 wm size 点击右上角空白区），便于 get_ocr_summary。"""
+        ex = ctx.deps.app_config.executor
+        sw, sh = await asyncio.to_thread(ctx.deps.adb.wm_size)
+        return await asyncio.to_thread(
+            dismiss_secure_keyboard_focus,
+            ctx.deps.adb.device_serial,
+            width=sw,
+            height=sh,
+            settle_s=ex.credential_fill_settle_s,
+            press_back=ex.dismiss_keyboard_press_back,
         )
 
     def _package_already_message(ctx: RunContext[ExecutorAgentDeps]) -> str:
@@ -162,8 +272,27 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         ts = datetime.now().strftime("%H%M%S_%f")
         path = ctx.deps.artifact_root / f"ocr_{ts}.png"
         ctx.deps.adb.screencap_png(path)
-        s = extract_text_with_bounds(path)
-        return f"[Live OCR] screenshot={path.resolve()}\n{s}"
+        raw = await asyncio.to_thread(extract_text_with_bounds, path)
+        sh = ctx.deps.screen_height
+        s = format_device_ocr_for_executor(raw, screen_height=sh)
+        black = is_screencap_mostly_black(path)
+        cache_line = ""
+        if not black:
+            targets = resolve_login_form_targets(raw, screen_height=sh)
+            if targets.login_button_xy is not None:
+                ctx.deps.run_state.cached_login_button_xy = targets.login_button_xy
+                ctx.deps.run_state.cached_login_button_text = targets.login_text
+                lx, ly = targets.login_button_xy
+                cache_line = (
+                    f"\n[Cached Login for submit] ({lx},{ly}) "
+                    f"'{targets.login_text[:40]}' — use before secure keyboard blocks OCR."
+                )
+        else:
+            cache_line = (
+                "\n[Screencap mostly BLACK] secure keyboard / password focus — "
+                "OCR unreliable; fill via accessibility; submit uses ENTER/u2/cached Login."
+            )
+        return f"[Live OCR from device screencap] file={path.resolve()}\n{s}{cache_line}"
 
     @t(kind=ToolKind.INSTANT)
     async def tap_coordinate(ctx: RunContext[ExecutorAgentDeps], x: int, y: int) -> str:
@@ -198,8 +327,14 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         for i in range(observations):
             shot = ctx.deps.artifact_root / f"tap_obs_{ts}_{i + 1}.png"
             ctx.deps.adb.screencap_png(shot)
-            ocr = extract_text_with_bounds(shot)[:2500]
-            msg_lines.append(f"[observe#{i + 1}] screenshot={shot.resolve()}\n{ocr}")
+            raw = extract_text_with_bounds(shot)
+            ocr = format_device_ocr_for_executor(
+                raw,
+                screen_height=ctx.deps.screen_height,
+            )[:3500]
+            msg_lines.append(
+                f"[observe#{i + 1}] device screencap={shot.resolve()}\n{ocr}",
+            )
             if i < observations - 1:
                 ctx.deps.adb.wait_seconds(interval_s)
 
@@ -247,10 +382,30 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         return await execute_wait_for_game_running(ctx, summary, timeout_s)
 
     @t(kind=ToolKind.INSTANT)
+    async def analyze_screen(
+        ctx: RunContext[ExecutorAgentDeps],
+        reason: str = "",
+    ) -> str:
+        """
+        On-demand multimodal screen analysis (stage / download / network dialog).
+        Returns JSON: errorCode (0=call finished), completed, data{stage, has_anomaly, ...}.
+        Call when OCR is ambiguous, after long wait, or before check_in_game.
+        """
+        return await run_analyze_screen(
+            adb=ctx.deps.adb,
+            cfg=ctx.deps.app_config,
+            artifact_root=ctx.deps.artifact_root,
+            round_id=ctx.deps.round_id,
+            reason=reason,
+            attempt_context=ctx.deps.attempt_context,
+            audit=ctx.deps.audit,
+        )
+
+    @t(kind=ToolKind.INSTANT)
     async def check_in_game(ctx: RunContext[ExecutorAgentDeps]) -> str:
         """
-        Multimodal in-game check. Call after server_select, download, or likely HUD.
-        Requires main_screen_confirm_rounds consecutive positives across calls.
+        Multimodal in-game check (on-demand). Returns JSON with errorCode + data.confirmed.
+        Requires main_screen_confirm_rounds consecutive positives when errorCode=0.
         """
         return await execute_check_in_game(ctx)
 

@@ -21,6 +21,8 @@ class AttemptContext:
     ui_stage: str = ""
     ui_progress: str = ""
     _reset_in_game_streak: bool = field(default=False, repr=False)
+    deploy_package_verified: bool = False
+    session_restarts: int = 0
 
     def signal_fatal(self, reason: str) -> None:
         with self._lock:
@@ -34,6 +36,10 @@ class AttemptContext:
 
     def should_stop_executor(self) -> bool:
         return self.stop_all.is_set()
+
+    def set_session_restarts(self, count: int) -> None:
+        with self._lock:
+            self.session_restarts = max(0, int(count))
 
     def set_ui_observation(self, stage: str, progress: str = "") -> None:
         with self._lock:
@@ -54,6 +60,17 @@ class AttemptContext:
     def request_reset_in_game_streak(self) -> None:
         with self._lock:
             self._reset_in_game_streak = True
+
+    def mark_deploy_package_verified(self) -> None:
+        with self._lock:
+            self.deploy_package_verified = True
+
+    def consume_deploy_package_verified(self) -> bool:
+        with self._lock:
+            if not self.deploy_package_verified:
+                return False
+            self.deploy_package_verified = False
+            return True
 
     def consume_reset_in_game_streak(self) -> bool:
         with self._lock:

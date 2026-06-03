@@ -169,8 +169,13 @@ def classify_failure(
             code = ErrorCode.LLM_AUTH
         elif "multimodal probe" in lower:
             code = ErrorCode.VISION_PROBE
-        elif "package" in lower and "timeout" in lower:
+        elif "package" in lower and (
+            "timeout" in lower
+            or "not installed" in lower
+            or "pm path" in lower
+        ):
             code = ErrorCode.PACKAGE_INSTALL
+            return RunFailure(code, text, retryable=True)
         elif "parallel game phase timeout" in lower:
             code = ErrorCode.TIMEOUT_PHASE
         elif "is not defined" in lower or "nameerror" in lower:

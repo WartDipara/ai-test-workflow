@@ -40,7 +40,9 @@ def block_if_stopped(ctx: RunContext[ExecutorAgentDeps]) -> str | None:
         return "In-game already confirmed; stop calling tools."
     actx = ctx.deps.attempt_context
     if actx is not None and actx.should_stop_executor():
-        reason = actx.get_fatal_reason() or "parallel monitor requested stop"
+        reason = actx.get_fatal_reason() or (
+            "parallel phase stop (game timeout or log monitor — check orchestrator logs)"
+        )
         return f"Executor stopped: {reason}"
     return None
 
