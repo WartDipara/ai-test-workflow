@@ -37,38 +37,48 @@ Only read skills for **edge cases / troubleshooting** you cannot handle from thi
 - **`analyze_screen`** / **`check_in_game`**
 - `read_skills_index` / `read_repo_skill` / `list_learned_skills` / `read_learned_skill`
 - `dismiss_login_keyboard`
+- **`dismiss_overlay`** — uiautomator2 dismisses overlay/mask/announcement popups automatically
 - `credentials_status` / `fill_credential_field` / `verify_credential_field`
 - `get_ocr_summary` / `tap_coordinate` / `tap_and_observe` / `swipe_screen` / `press_back` / `wait_seconds`
-- **`detect_checkbox`** — YOLO vision model locates unlabeled UI elements (checkbox, radio, etc.) from device-native screencap; returns (x,y) for tap_coordinate
+- **`detect_checkbox`** — YOLO locates unlabeled checkbox (privacy terms before "开始游戏"); returns (x,y) for tap_coordinate. Only use for that scenario.
+- **`dismiss_overlay`** — uiautomator2 dismisses announcement / overlay / mask popups automatically.
 - `report_flow_done(success=false, ...)` — unrecoverable stop
 
-## Full login flow (execute in order)
+ ## Stage-driven flow (do NOT execute rigidly)
 
-Each stage may or may not appear; use `get_ocr_summary` to check current screen and decide next action.
+After `open_game_app`, use `get_ocr_summary` to identify the **current stage** from OCR text, then act accordingly.
+Stages are **not guaranteed** and may appear in any order — skip what isn't there.
 
-### Stage 1 — Initial privacy dialog (splash → privacy)
-After game launch, a privacy/terms popup may appear. If OCR sees 同意/接受/确认等, tap the agree button to proceed.
+### privacy — Initial privacy / terms dialog
+OCR may show 同意/接受/协议等. Tap the agree button to proceed. If absent, move on.
 
-### Stage 2 — Resource download (download)
-Game downloads hot-update assets. A dialog may ask to confirm download or show multiple channel options — tap any active button to continue. Call `analyze_screen` if stuck for a long time.
+### download — Resource download / hot-update
+Game may show a download confirm dialog or multiple channel options — tap any active button to continue.
+Call `analyze_screen` if stuck for a long time with no progress. If absent, move on.
 
-### Stage 3 — Account login (login)
-Enter credentials:
-1. `get_ocr_summary` to locate the username/password fields → `fill_credential_field(x, y, username)` → `fill_credential_field(x, y, password)`.
+### login — Account login screen
+OCR shows username/password fields:
+1. `get_ocr_summary` to locate field hints → `fill_credential_field(x, y, username)` → `fill_credential_field(x, y, password)`.
 2. Read **VERIFY** lines; re-OCR and re-fill if FAILED.
-3. After password filled, login button is pressed automatically by runtime (ENTER / u2 / cached coords).
-See Account/password details below.
+3. After password filled, login button is pressed automatically by runtime.
+See Account/password details below. If no login fields visible, move on.
 
-### Stage 4 — Select sub-account (server_select)
-A list of sub-accounts / characters may appear. Tap any one to continue — the specific choice does not matter.
+### server_select — Sub-account / character / server list
+OCR shows a list of sub-accounts, characters, or servers. Tap any one to continue (choice doesn't matter). If absent, move on.
 
-### Stage 5 — Enter game with checkbox (privacy_agree)
-Shows "开始游戏" (Start Game) + server select. **Do NOT tap 开始游戏 directly.** OCR will detect privacy terms text near a small unlabeled checkbox. The checkbox has no OCR-visible text, so:
+### announcement — Post-login popup (semi-transparent overlay)
+After login / server select, a semi-transparent announcement popup with mask overlay may appear.
+OCR may see both the announcement text and "开始游戏" behind it. Call **`dismiss_overlay`** to auto-dismiss it.
+Ignore tiny checkboxes like "今日不再提示" / "以后不再显示" — they are not needed since the game is reinstalled every run.
+
+### privacy_agree — Final privacy terms before "开始游戏"
+OCR shows "开始游戏" + privacy / agreement text ("已阅读并同意", "同意隐私条款" etc.) with an unlabeled checkbox.
+**Do NOT tap 开始游戏 directly.** This is the **only** scenario worth calling detect_checkbox:
 1. Call **`detect_checkbox(prompt="Point to the checkbox")`** → get (x, y).
-2. `tap_coordinate(x, y)` to check it. After tap, the checkbox shows checked state (color fill / checkmark).
-3. Now tap 开始游戏 to enter.
+2. `tap_coordinate(x, y)` to check it (visual state changes to checked).
+3. Now tap 开始游戏 to enter. If no checkbox visible, move on.
 
-### Stage 6 — In-game check
+### in_game — Confirm entry
 Call **`check_in_game`** repeatedly until `data.confirmed=true`.
 
 ## Account/password login (secure keyboard + self-check)
@@ -86,8 +96,8 @@ Do not tap Login while VERIFY shows wrong field or empty username.
 ## General strategy tips
 
 - `get_ocr_summary` / `tap_and_observe` use **live device screencap** OCR. Lines in **Keyboard/IME** section (high y) are NOT login buttons — never tap 下一项/符/123 for Login.
-- `tap_and_observe` for most UI taps; `detect_checkbox` only for unlabeled checkboxes.
-- Call **`analyze_screen`** when black screen, only GT overlay in OCR, or stuck download.
+- `tap_and_observe` for most UI taps; **`detect_checkbox` only for the privacy checkbox before "开始游戏"** — YOLO is relatively expensive, skip for trivial checkboxes ("今日不再提示" etc.).
+- Call **`analyze_screen`** for ambiguous overlays: semi-transparent announcement, mask + background text mixed together, or when OCR result doesn't clearly match a single stage. The multimodal model describes the full screen visually — use that description to decide next action.
 - Call **`check_in_game`** after stage 5.
 
 ## Launch order
@@ -96,4 +106,4 @@ Do not tap Login while VERIFY shows wrong field or empty username.
 2. `open_game_app`.
 3. Follow **Full login flow** stages 1→6; use tools as described.
 
-Each reply: **stage ID** (privacy / download / login / server_select / privacy_agree / in_game) + planned tools.
+Each reply: **stage ID** (privacy / download / login / server_select / announcement / privacy_agree / in_game) + planned tools.

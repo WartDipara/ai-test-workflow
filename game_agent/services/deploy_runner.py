@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from game_agent.paths import REPO_ROOT
 from game_agent.services.adb_service import AdbService
+from game_agent.services.install_monitor import BaseInstallMonitor, create_install_monitor
 from game_agent.services.pipeline_trace import trace_operation
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,7 @@ def run_deploy(
     log_filename: str = "deploy.log",
     timeout_s: float = 900.0,
     expected_package: str | None = None,
+    install_monitor: BaseInstallMonitor | None = None,
 ) -> DeployResult:
     """Run GameTurbo android deploy in Git Bash and wait for it to finish."""
     if not DEPLOY_SCRIPT.is_file():
@@ -78,6 +81,17 @@ def run_deploy(
 
     log_path = (artifact_root / log_filename) if artifact_root else None
     logger.info("执行 GameTurbo deploy: %s", " ".join(cmd))
+
+    if install_monitor is None:
+        install_monitor = create_install_monitor(AdbService(serial))
+
+    stop_event = threading.Event()
+    monitor_thread = threading.Thread(
+        target=install_monitor.monitor_install,
+        args=(AdbService(serial), stop_event),
+        daemon=True,
+    )
+
     with trace_operation(
         "deploy",
         "run_deploy.sh",
@@ -85,16 +99,21 @@ def run_deploy(
         command=cmd,
         cwd=str(ANDROID_DIR),
     ) as rec:
-        result = subprocess.run(
-            cmd,
-            cwd=ANDROID_DIR,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_s,
-            check=False,
-        )
+        monitor_thread.start()
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=ANDROID_DIR,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_s,
+                check=False,
+            )
+        finally:
+            stop_event.set()
+            monitor_thread.join(timeout=10)
 
         if log_path is not None:
             log_path.write_text(

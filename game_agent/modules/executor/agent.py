@@ -26,6 +26,7 @@ from game_agent.services.credentials import (
     credentials_status_message,
     load_game_credentials,
 )
+from game_agent.services.dismiss_overlay import dismiss_overlay as run_dismiss_overlay
 from game_agent.services.learned_skill_store import format_skill_list_for_tool, read_skill_file
 from game_agent.services.llm_service import build_llm_model
 from game_agent.services.login_form_ocr import resolve_login_form_targets
@@ -352,6 +353,22 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             f"[Checkbox detection] prompt={prompt!r} "
             f"target=({x:.1f},{y:.1f}) "
             f"screenshot={path.resolve()}"
+        )
+
+    @t(kind=ToolKind.INSTANT, check_stopped=False)
+    async def dismiss_overlay(
+        ctx: RunContext[ExecutorAgentDeps],
+    ) -> str:
+        """
+        Dismiss semi-transparent announcement / overlay / mask popup.
+        Strategy: uiautomator2 finds known dismiss text → tap top-right corner → adb back.
+        Call when OCR shows "开始游戏" mixed with announcement text, or after login/server_select.
+        """
+        return await asyncio.to_thread(
+            run_dismiss_overlay,
+            ctx.deps.adb.device_serial,
+            ctx.deps.screen_width,
+            ctx.deps.screen_height,
         )
 
     @t(kind=ToolKind.COMPOUND)
