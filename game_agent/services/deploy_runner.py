@@ -72,7 +72,7 @@ def run_deploy(
     if not DEPLOY_SCRIPT.is_file():
         raise RuntimeError(f"找不到 deploy.sh: {DEPLOY_SCRIPT}")
 
-    cmd = [_find_bash(), "./deploy.sh", "-g", gid, "-n"]
+    cmd = [_find_bash(), "-l", "./deploy.sh", "-g", gid, "-n"]
     if serial:
         cmd.extend(["-d", serial])
 
