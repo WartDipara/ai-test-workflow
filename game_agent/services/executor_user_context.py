@@ -4,6 +4,7 @@ import re
 from typing import TYPE_CHECKING
 
 from game_agent.models.run_state import RunState
+from game_agent.services.learned_skill_store import latest_skill_for_package, read_skill_file
 from game_agent.services.login_flow_skill import COMPACT_STAGE_HINT
 
 if TYPE_CHECKING:
@@ -125,6 +126,16 @@ def build_executor_user_parts(
     prior_block = build_prior_attempt_block(prior_brief)
     if prior_block:
         parts.append(prior_block)
+
+    if round_id == 0:
+        skill_path = latest_skill_for_package(target_pkg)
+        if skill_path is not None:
+            content = read_skill_file(skill_path.name, max_bytes=3000)
+            parts.append(
+                "=== Previous learned skill for this package ===\n"
+                "Read the tips below — they may speed up this run.\n"
+                + content
+            )
 
     if should_include_compact_stage_hint(round_id, ag.repeat_compact_stage_hint_every_n_rounds):
         parts.append(COMPACT_STAGE_HINT)

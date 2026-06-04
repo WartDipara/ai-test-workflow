@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 EXPERIENCES_DIR = REPO_ROOT / "experiences"
 AGENT_SKILLS_DIR = EXPERIENCES_DIR / "agent_skills"
+TRACKER_FILE = AGENT_SKILLS_DIR / "learned_skills_tracker.json"
+MAX_SKILLS_PER_PACKAGE = 3
 
 
 def agent_skills_dir() -> Path:
@@ -18,6 +21,60 @@ def agent_skills_dir() -> Path:
 
 def ensure_skills_dir() -> None:
     AGENT_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ── 学习追踪器 ──────────────────────────────────────────────
+
+
+def _tracker_path() -> Path:
+    ensure_skills_dir()
+    return TRACKER_FILE
+
+
+def _load_tracker() -> dict[str, list[str]]:
+    """载入追踪 JSON：{ package_name: [skill_filename.md, ...] }"""
+    path = _tracker_path()
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("技能追踪文件损坏，重置: %s", e)
+        return {}
+
+
+def _save_tracker(data: dict[str, list[str]]) -> None:
+    path = _tracker_path()
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def can_learn_package(package_name: str) -> bool:
+    """该包是否还能继续学习（< MAX_SKILLS_PER_PACKAGE）。"""
+    tracker = _load_tracker()
+    return len(tracker.get(package_name, [])) < MAX_SKILLS_PER_PACKAGE
+
+
+def record_learned_package(package_name: str, skill_basename: str) -> None:
+    """记录该包已学习一个技能。"""
+    tracker = _load_tracker()
+    entry = tracker.setdefault(package_name, [])
+    if skill_basename not in entry:
+        entry.append(skill_basename)
+    _save_tracker(tracker)
+
+
+def latest_skill_for_package(package_name: str) -> Path | None:
+    """返回该包最新一条技能文件路径，若无则 None。"""
+    tracker = _load_tracker()
+    filenames = tracker.get(package_name)
+    if not filenames:
+        return None
+    latest = filenames[-1]
+    path = AGENT_SKILLS_DIR / latest
+    return path if path.is_file() else None
+
+
+# ── 文件名安全 ──────────────────────────────────────────────
 
 
 def safe_skill_basename(name: str) -> str | None:
@@ -33,6 +90,9 @@ def safe_skill_basename(name: str) -> str | None:
     if any(ord(c) < 32 for c in base):
         return None
     return base
+
+
+# ── 文件操作 ────────────────────────────────────────────────
 
 
 def list_skill_files(*, limit: int = 20) -> list[Path]:

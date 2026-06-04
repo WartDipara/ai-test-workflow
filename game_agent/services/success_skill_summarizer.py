@@ -10,7 +10,13 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage
 
 from game_agent.models.settings import AppConfig
-from game_agent.services.learned_skill_store import write_skill_markdown
+from game_agent.services.learned_skill_store import (
+    MAX_SKILLS_PER_PACKAGE,
+    can_learn_package,
+    latest_skill_for_package,
+    record_learned_package,
+    write_skill_markdown,
+)
 from game_agent.services.llm_service import build_llm_model
 from game_agent.services.llm_transcript import format_new_llm_messages
 
@@ -63,6 +69,20 @@ Final report_flow_done summary:
 {transcript}
 """
 
+    # 检查该包是否已达学习上限
+    if not can_learn_package(task_label):
+        existing = latest_skill_for_package(task_label)
+        if existing:
+            logger.info(
+                "包 %s 已达 %d 次学习上限，复用已有技能: %s",
+                task_label,
+                MAX_SKILLS_PER_PACKAGE,
+                existing.name,
+            )
+            return existing
+        logger.info("包 %s 已达学习上限且无已有技能，跳过", task_label)
+        return None
+
     try:
         agent = Agent(
             build_llm_model(app_config.llm, deepseek=app_config.deepseek),
@@ -83,8 +103,10 @@ Final report_flow_done summary:
     basename = f"skill_{stamp}_{h}.md"
     try:
         path = write_skill_markdown(basename=basename, body=body)
+        record_learned_package(task_label, path.name)
     except ValueError:
         basename = f"skill_{stamp}_fallback.md"
         path = write_skill_markdown(basename=basename, body=body)
+        record_learned_package(task_label, path.name)
     logger.info("已写入已学技能: %s", path)
     return path
