@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 _pipeline_logger = logging.getLogger("game_agent.pipeline")
 
@@ -19,7 +20,7 @@ _current_tracer: ContextVar[PipelineTracer | None] = ContextVar(
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat()
+    return datetime.now(tz=UTC).isoformat()
 
 
 @dataclass

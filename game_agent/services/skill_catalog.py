@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from game_agent.paths import REPO_ROOT
 
 SKILLS_DIR = REPO_ROOT / "skills"

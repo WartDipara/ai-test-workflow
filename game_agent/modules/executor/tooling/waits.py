@@ -10,6 +10,8 @@ from game_agent.services.game_entry_check import run_in_game_check
 from game_agent.services.game_launch import is_game_running, mark_game_process_detected
 from game_agent.services.package_install import (
     PackageWaitResult,
+)
+from game_agent.services.package_install import (
     wait_for_package_installed as poll_package_installed,
 )
 from game_agent.services.polling import poll_until_async

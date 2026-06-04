@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from game_agent.models.failure_report import FailureDiagnosisReport
@@ -91,7 +91,7 @@ def publish_success_deliverable(
             "source_merged_config": str(game_config_path.resolve()),
             "winning_artifact": str(winning_artifact_root.resolve()),
             "session_restarts": session_restarts,
-            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "finished_at": datetime.now(tz=UTC).isoformat(),
         },
     )
     return passed_config
@@ -160,7 +160,7 @@ def publish_failure_deliverable(
             "total_attempts": len(attempt_artifact_roots),
             "last_reason": last_reason[:4000],
             "attempts": attempt_summaries,
-            "finished_at": datetime.now(tz=timezone.utc).isoformat(),
+            "finished_at": datetime.now(tz=UTC).isoformat(),
             "note": "未产出游戏配置文件；请优先查看 failure_report.md，其次 attempts/ 下各轮日志。",
             "failure_report_md": str((deliverable.root / "failure_report.md").resolve())
             if ai_report is not None

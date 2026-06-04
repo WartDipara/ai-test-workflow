@@ -5,7 +5,6 @@ import logging
 import socket
 import sys
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from game_agent.paths import REPO_ROOT

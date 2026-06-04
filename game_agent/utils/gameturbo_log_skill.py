@@ -3,8 +3,8 @@ from __future__ import annotations
 from functools import lru_cache
 
 from game_agent.paths import REPO_ROOT
-
 from game_agent.services.skill_catalog import read_repo_skill
+
 _BASELINE_SAMPLE_LOGS = (
     REPO_ROOT / "正常的网络流量情况.log",
     REPO_ROOT / "另一段正常的网络加速日志.log",

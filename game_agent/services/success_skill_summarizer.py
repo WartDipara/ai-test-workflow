@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
-import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic_ai import Agent
@@ -78,7 +78,7 @@ Final report_flow_done summary:
         logger.exception("已学技能：LLM 总结失败")
         return None
 
-    stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    stamp = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
     h = hashlib.sha256(task_label.encode("utf-8")).hexdigest()[:10]
     basename = f"skill_{stamp}_{h}.md"
     try:

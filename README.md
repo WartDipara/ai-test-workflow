@@ -36,9 +36,8 @@ graph TD
     INIT --> PARALLEL[Parallel game phase]
 
     subgraph "从游戏启动并行"
-      PARALLEL --> EX[Executor<br/>OCR+tap+check_in_game]
+      PARALLEL --> EX[Executor<br/>OCR+tap+detect_checkbox+check_in_game]
       PARALLEL --> LM[LogMonitor<br/>logcat fail-fast]
-      PARALLEL --> SM[ScreenMonitor<br/>网络弹窗 fail-fast]
       PARALLEL --> SC[SessionCoordinator]
       SC -->|重启| LM
     end
@@ -72,7 +71,7 @@ graph TD
 | ------------ | --------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------ |
 | **0** — 预处理  | `PreprocessingController`                                                   | 从 `apks.txt` 下载 APK → ABI 剥离 → 移至 `packages/`，清理 `apk_cache/`           | **否**，仅执行一次              |
 | **1** — Init | `GameTestOrchestrator` 内部                                                   | GameTurbo 配置 → `deploy.sh` 打包安装                                         | 每轮                       |
-| **2** — 并行游戏阶段 | `ExecutorFlowController` + `LogMonitor` / `ScreenMonitor` / `SessionCoordinator` | 执行者：登录链 + `check_in_game`；监控：从启动并行采 log、网络画面异常 fail-fast | 每轮 |
+| **2** — 并行游戏阶段 | `ExecutorFlowController` + `LogMonitor` / `SessionCoordinator` | 执行者：登录链 + `check_in_game`；监控：从启动并行采 log 异常 fail-fast | 每轮 |
 | **3** — 失败收尾 | `AnomalyHandler` → `FailureCleanup`                                         | 导出日志、域名分析、杀进程、卸载游戏                                                      | 每轮失败                     |
 | **4** — 修改重试 | `RetryConfigHandler`                                                        | 配置备份/恢复 → AI 最小补丁 → `deploy.sh` → **下一轮 retry 再跑游戏** | `retry_on_failure` 且 **E2xxx** |
 
@@ -96,7 +95,7 @@ graph TD
 | **进入游戏内** | 主界面/可玩（含引导蒙层） | **`check_in_game`** × `main_screen_confirm_rounds` |
 | 加速观察 | 确认后观察窗 | `confirm_in_game_normal_exit` → `normal_exit_observe_s` |
 
-并行 **LogMonitor** / **ScreenMonitor** 从启动即运行；**E2xxx** 网络类异常 **fail-fast**（执行者经 `AttemptContext` 协作停止）。
+**LogMonitor** 从启动即运行；**E2xxx** 网络类异常 **fail-fast**（执行者经 `AttemptContext` 协作停止）。
 
 ### 执行者：通用登录链（无 per-game 脚本）
 
@@ -114,7 +113,6 @@ graph TD
 flowchart LR
   subgraph monitors [与执行者并行]
     LM[LogMonitor]
-    SM[ScreenMonitor]
     SC[SessionCoordinator]
     SC -->|会话重启| LM
   end
@@ -131,12 +129,10 @@ flowchart LR
 - `game.max_session_restarts > 0` 时超限才中止观察者。
 - 正常退出后不再监听 crash。
 
-### LogMonitor / ScreenMonitor
+### LogMonitor
 
 - **LogMonitor**：从启动即 `bootstrap` + `logcat -s GameTurbo` → **gameturbo.log**；高置信异常 **fail-fast**。
-- **ScreenMonitor**：周期截图；仅 **网络类** `has_anomaly` fail-fast（下载卡住仅记 audit）。
 - **进游戏**：由执行者工具 **`check_in_game`**（`check_in_game_*.png`）。
-- **ScreenMonitor**：定时截图多模态；下载进度卡住、错误文案等；与会话重启时重置卡住计数。
 
 ---
 
@@ -360,8 +356,6 @@ game:
   timeout_s: 350.0                         # 观察者总超时
   launch_detect_timeout_s: 90.0            # 等待游戏进程启动超时
   launch_detect_poll_interval_s: 2.0       # 进程轮询间隔
-  main_screen_detect_timeout_s: 240.0      # AI 等待进入游戏内超时
-  main_screen_detect_poll_interval_s: 3.0  # 进入判定截图间隔
   main_screen_confirm_rounds: 2            # 连续确认轮数
   main_screen_min_confidence: 0.75         # 最低置信度
   normal_exit_observe_s: 10.0             # 进入游戏后等待观察秒数
@@ -388,9 +382,16 @@ gameturbo:
 modules:
   executor: true               # 登录链 + check_in_game（与 monitors 并行）
   log_monitor: true            # GameTurbo logcat，异常 fail-fast
-  screen_monitor: true           # 网络类画面弹窗 fail-fast
   retry_on_failure: false      # 失败后是否重试
   max_retries: 3               # 最大重试次数（retry_on_failure=true 时有效）
+```
+
+**detection — YOLO 视觉检测（detect_checkbox 工具使用）：**
+
+```yaml
+detection:
+  api_url: "http://192.168.1.117:8000/predict"  # YOLO 检测服务端点
+  timeout_s: 30.0                                 # 请求超时（秒）
 ```
 
 **agent — AI Agent 行为参数：**
@@ -477,6 +478,7 @@ cp config/credentials.example.yaml credentials.yaml
 | 操作 | 方式 |
 |------|------|
 | 找输入框坐标、点按钮 | OCR + `tap` / `tap_and_observe` |
+| 勾选无语义元素（Checkbox/协议） | YOLO 视觉检测 `detect_checkbox` + `tap_coordinate` |
 | 写入账号/密码 | uiautomator2 `setText` + 无障碍回读 **VERIFY** |
 | 判断是否进游戏 | 主脑按需 `analyze_screen` / `check_in_game`（多模态） |
 
@@ -590,7 +592,6 @@ game_agent/
 │   ├── executor_controller.py       # ExecutorFlowController — OCR+AI + check_in_game
 │   ├── session_controller.py        # SessionCoordinator — 进程 crash/重启监控
 │   ├── log_monitor_controller.py    # LogMonitor — 日志异常监控
-│   ├── screen_monitor_controller.py # ScreenMonitor — 画面异常检测
 │   └── retry_controller.py          # AnomalyHandler — 异常处理+重试入口
 │
 ├── models/                          # M: Pydantic 数据模型
@@ -718,7 +719,8 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 
 - **OCR**：PaddleOCR（`ocr.model_profile`: mobile / server）。
 - **主脑 LLM（`llm`）**：执行者 ADB 工具、重试配置补丁、`AnalysisAgent` / 失败报告（结构化 `output_type`，走 tool_choice）。
-- **多模态 LLM（`llm_multimodal`）**：仅画面观察 — `screen_monitor`、`check_in_game`、重试前 `vision_context` 把截图摘要成文字再交给主脑（不在 Qwen 上做 tool_choice）。
+- **多模态 LLM（`llm_multimodal`）**：仅画面观察 — `check_in_game`、重试前 `vision_context` 把截图摘要成文字再交给主脑（不在 Qwen 上做 tool_choice）。
+- **YOLO 视觉检测（`detect_checkbox`）**：对 OCR 无法定位的无语义 UI 元素（Checkbox/协议勾选等），截设备原生分辨率图传给 YOLO 服务，返回精确点击坐标。
 - **进入游戏判定**：独立 prompt；创角 OCR 硬规则见 `character_creation_ocr.py`。
 - **技能**：遇问题先 `read_skills_index`（`skills/SKILL.md`），再 `read_repo_skill(skill_id)`；内置 `game_launch_ocr`、`gameturbo_log_baseline`。`experiences/agent_skills/` 为成功 run 自动生成的 per-game 笔记（`list_learned_skills` / `read_learned_skill`）。
 
@@ -733,7 +735,7 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 | [services/llm_adapters/](game_agent/services/llm_adapters/)   | openai / deepseek / qwen |
 
 
-**llm** 为通用 OpenAI 兼容主脑；**deepseek** 段仅在 model 为 DeepSeek 时由 `DeepSeekAdapter` 读取（[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)）。**llm_multimodal** 仅用于画面（`check_in_game`、ScreenMonitor、重试截图摘要），**不要**用于 `AnalysisAgent`（避免与 `tool_choice=required` 冲突）。**observer.skip_vision_probe** 控制多模态启动探针。
+**llm** 为通用 OpenAI 兼容主脑；**deepseek** 段仅在 model 为 DeepSeek 时由 `DeepSeekAdapter` 读取（[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)）。**llm_multimodal** 仅用于画面（`check_in_game`、重试截图摘要），**不要**用于 `AnalysisAgent`（避免与 `tool_choice=required` 冲突）。**observer.skip_vision_probe** 控制多模态启动探针。
 
 ---
 

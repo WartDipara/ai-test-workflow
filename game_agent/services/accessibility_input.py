@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import re
 import threading
 import time
 from pathlib import Path
@@ -235,7 +234,7 @@ def verify_credential_node(
         lines.append(f"VERIFY position: OK (within {max_center_distance_px:.0f}px)")
     else:
         lines.append(
-            f"VERIFY position: FAIL — node too far from tap; likely wrong field. Re-OCR both fields."
+            "VERIFY position: FAIL — node too far from tap; likely wrong field. Re-OCR both fields."
         )
 
     text_ok = False

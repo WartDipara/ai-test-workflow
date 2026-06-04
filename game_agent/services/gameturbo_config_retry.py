@@ -4,7 +4,7 @@ import json
 import logging
 import shutil
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -255,7 +255,7 @@ def record_patch_applied(
     entry = ConfigRetryJournalEntry(
         failed_attempt=failed_attempt,
         next_attempt=next_attempt,
-        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+        timestamp=datetime.now(tz=UTC).isoformat(),
         game_config_path=str(game_config_path.resolve()),
         restored_from=restored_from,
         backup_before_path=str(backup_before_path.resolve()),

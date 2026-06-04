@@ -22,19 +22,22 @@ from game_agent.services.accessibility_input import (
     submit_login_after_password,
     verify_credential_via_accessibility,
 )
-from game_agent.services.login_form_ocr import resolve_login_form_targets
-from game_agent.utils.ocr_util import extract_text_with_bounds, is_screencap_mostly_black
 from game_agent.services.credentials import (
     credentials_status_message,
     load_game_credentials,
 )
 from game_agent.services.learned_skill_store import format_skill_list_for_tool, read_skill_file
+from game_agent.services.llm_service import build_llm_model
+from game_agent.services.login_form_ocr import resolve_login_form_targets
 from game_agent.services.skill_catalog import read_login_flow_guide as load_login_flow_guide_text
 from game_agent.services.skill_catalog import read_repo_skill as load_repo_skill_text
 from game_agent.services.skill_catalog import read_skills_index as load_skills_index_text
 from game_agent.services.vision_tools import run_analyze_screen
-from game_agent.services.llm_service import build_llm_model
-from game_agent.utils.ocr_util import extract_text_with_bounds, format_device_ocr_for_executor
+from game_agent.utils.ocr_util import (
+    extract_text_with_bounds,
+    format_device_ocr_for_executor,
+    is_screencap_mostly_black,
+)
 
 # Re-export for controllers / agents package
 __all__ = ["ExecutorAgentDeps", "build_executor_agent"]
@@ -298,6 +301,58 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
     async def tap_coordinate(ctx: RunContext[ExecutorAgentDeps], x: int, y: int) -> str:
         msg = ctx.deps.adb.tap(x, y, width=ctx.deps.screen_width, height=ctx.deps.screen_height)
         return f"{msg}\nHint: UI may have changed — call get_ocr_summary for fresh OCR."
+
+    @t(kind=ToolKind.INSTANT)
+    async def detect_checkbox(
+        ctx: RunContext[ExecutorAgentDeps],
+        prompt: str,
+    ) -> str:
+        """
+        Use YOLO vision model to detect an untagged UI element and return its tap coordinates.
+        Screencap is captured at device native resolution for accurate coordinate mapping.
+        The returned (x, y) can be fed into tap_coordinate or tap_and_observe.
+        """
+        import httpx
+
+        ts = datetime.now().strftime("%H%M%S_%f")
+        path = ctx.deps.artifact_root / f"detect_{ts}.png"
+        ctx.deps.adb.screencap_png(path)
+
+        cfg = ctx.deps.app_config.detection
+        with open(path, "rb") as f:
+            try:
+                resp = httpx.post(
+                    cfg.api_url,
+                    files={"file": f},
+                    data={"prompt": prompt},
+                    timeout=cfg.timeout_s,
+                )
+            except httpx.TimeoutException:
+                return f"YOLO API timeout after {cfg.timeout_s}s: {cfg.api_url}"
+            except httpx.RequestError as e:
+                return f"YOLO API request failed: {e}"
+
+        if resp.status_code != 200:
+            return f"YOLO API error: status={resp.status_code}, body={resp.text[:500]}"
+
+        data = resp.json()
+        point = data.get("point")
+        if not point or not isinstance(point, list) or len(point) != 2:
+            return f"YOLO API invalid response format: {data}"
+
+        x, y = point
+        sw, sh = ctx.deps.screen_width, ctx.deps.screen_height
+        if not (0 <= x < sw and 0 <= y < sh):
+            return (
+                f"YOLO returned out-of-bounds coordinates: ({x:.1f},{y:.1f}) "
+                f"for screen {sw}x{sh}"
+            )
+
+        return (
+            f"[Checkbox detection] prompt={prompt!r} "
+            f"target=({x:.1f},{y:.1f}) "
+            f"screenshot={path.resolve()}"
+        )
 
     @t(kind=ToolKind.COMPOUND)
     async def tap_and_observe(

@@ -54,8 +54,6 @@ game:
   package_install_wait_timeout_s: 120.0
   package_install_poll_interval_s: 2.0
   # AI 判定「已进入游戏内」（进程已起之后）
-  main_screen_detect_timeout_s: 240.0
-  main_screen_detect_poll_interval_s: 5.0
   main_screen_confirm_rounds: 2
   main_screen_min_confidence: 0.75
   # 确认进入游戏后观察加速的秒数，随后 force-stop 游戏
@@ -85,9 +83,13 @@ credentials:
 modules:
   executor: true           # Driver：登录链 + check_in_game（与 monitors 并行）
   log_monitor: true        # GameTurbo logcat，异常 fail-fast
-  screen_monitor: false    # 已弃用；用执行者 analyze_screen / check_in_game 按需多模态
   retry_on_failure: true   # true：失败收尾后再做 AI 分析/deploy 并多轮重试；false：仅失败收尾
   max_retries: 3           # retry_on_failure 为 true 时生效
+
+# YOLO 视觉检测服务（detect_checkbox 工具使用）
+detection:
+  api_url: "http://192.168.1.117:8000/predict"
+  timeout_s: 30.0
 
 agent:
   max_rounds: 100

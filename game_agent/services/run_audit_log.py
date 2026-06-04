@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,10 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
-from game_agent.services.llm_transcript import format_new_llm_messages, format_user_parts_for_console
+from game_agent.services.llm_transcript import (
+    format_new_llm_messages,
+    format_user_parts_for_console,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -276,4 +279,4 @@ class RunAuditLogger:
 
 
 def _now_iso() -> str:
-    return datetime.now(tz=timezone.utc).astimezone().isoformat(timespec="seconds")
+    return datetime.now(tz=UTC).astimezone().isoformat(timespec="seconds")

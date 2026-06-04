@@ -173,18 +173,6 @@ class GameSection(BaseModel):
         le=15.0,
         description="检测包是否已安装的轮询间隔（秒）。",
     )
-    main_screen_detect_timeout_s: float = Field(
-        240.0,
-        ge=30.0,
-        le=900.0,
-        description="AI 判定「已进入游戏内」的最长等待秒数（进程已起之后）。",
-    )
-    main_screen_detect_poll_interval_s: float = Field(
-        5.0,
-        ge=2.0,
-        le=30.0,
-        description="进入游戏 AI 判定轮询间隔（秒）。",
-    )
     main_screen_confirm_rounds: int = Field(
         2,
         ge=1,
@@ -324,13 +312,6 @@ class ModulesSection(BaseModel):
         True,
         description="Monitor：从游戏启动并行监听 GameTurbo logcat；高置信异常 fail-fast。",
     )
-    screen_monitor: bool = Field(
-        False,
-        description=(
-            "已弃用：原并行 ScreenMonitor。画面/多模态改由执行者工具 "
-            "analyze_screen、check_in_game 按需调用。"
-        ),
-    )
     retry_on_failure: bool = Field(
         True,
         description=(
@@ -343,6 +324,21 @@ class ModulesSection(BaseModel):
         ge=1,
         le=10,
         description="retry_on_failure 为 true 时的最大尝试次数；为 false 时仅跑 1 次。",
+    )
+
+
+class DetectionSection(BaseModel):
+    """YOLO 视觉检测模型配置（detect_checkbox 等工具使用）。"""
+
+    api_url: str = Field(
+        "http://192.168.1.117:8000/predict",
+        description="YOLO 检测服务 API 端点。",
+    )
+    timeout_s: float = Field(
+        30.0,
+        ge=5.0,
+        le=120.0,
+        description="API 请求超时时间（秒）。",
     )
 
 
@@ -463,4 +459,5 @@ class AppConfig(BaseModel):
     preprocessing: PreprocessingSection = Field(default_factory=PreprocessingSection)
     modules: ModulesSection = Field(default_factory=ModulesSection)
     agent: AgentSection = Field(default_factory=AgentSection)
+    detection: DetectionSection = Field(default_factory=DetectionSection)
     logging: LoggingSection = Field(default_factory=LoggingSection)

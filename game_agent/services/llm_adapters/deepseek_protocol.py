@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 from typing import Any, Literal
+
 from game_agent.models.settings import DeepSeekSection
 
 ReasoningEffort = Literal["high", "max"]

@@ -16,6 +16,11 @@ from game_agent.modules.executor.agent import ExecutorAgentDeps, build_executor_
 from game_agent.modules.run_context import AttemptContext
 from game_agent.paths import REPO_ROOT
 from game_agent.services.adb_service import AdbService
+from game_agent.services.credentials import credentials_status_message
+from game_agent.services.executor_user_context import (
+    build_executor_user_parts,
+    extract_declared_stage,
+)
 from game_agent.services.llm_transcript import (
     format_new_llm_messages,
     format_user_parts_for_console,
@@ -29,11 +34,6 @@ from game_agent.services.session_memory import (
     new_session_memory,
     save_conversation_history,
     save_session_memory,
-)
-from game_agent.services.credentials import credentials_status_message
-from game_agent.services.executor_user_context import (
-    build_executor_user_parts,
-    extract_declared_stage,
 )
 from game_agent.services.success_skill_summarizer import write_skill_from_success_run
 from game_agent.utils.ocr_util import (

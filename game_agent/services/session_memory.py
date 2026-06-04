@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, ToolCallPart
@@ -107,5 +107,5 @@ def load_conversation_history(path: Path) -> list[ModelMessage] | None:
 def new_session_memory(session_id: str) -> SessionMemory:
     return SessionMemory(
         session_id=session_id,
-        started_at=datetime.now(tz=timezone.utc).isoformat(),
+        started_at=datetime.now(tz=UTC).isoformat(),
     )

@@ -9,28 +9,25 @@ from pathlib import Path
 
 from game_agent.config.loader import load_app_config
 from game_agent.controllers.executor_controller import run_executor_flow_sync
-from game_agent.exceptions import DeployPhaseError
 from game_agent.controllers.log_monitor_controller import LogMonitor
 from game_agent.controllers.pre_controller import PreprocessingController
 from game_agent.controllers.retry_controller import AnomalyHandler
 from game_agent.controllers.session_controller import SessionCoordinator
+from game_agent.exceptions import DeployPhaseError
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.run_failure import (
     ErrorCode,
     RunFailure,
     classify_failure,
-    classify_exception,
     parse_error_code_from_text,
 )
 from game_agent.models.settings import AppConfig, ModulesSection
 from game_agent.modules.observer_session import ObserverSessionState
+from game_agent.modules.preprocessing.preprocessor import PreprocessResult
+from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
 from game_agent.modules.run_context import AttemptContext
-from game_agent.services.gameturbo_config_retry import infer_blocked_stage
-from game_agent.services.gameturbo_log import bootstrap_gameturbo_log
-from game_agent.services.normal_exit import NormalExitState, confirm_in_game_normal_exit
 from game_agent.paths import GAMETURBO_MERGED_CONFIG_PATH
 from game_agent.services.adb_service import AdbService
-from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
 from game_agent.services.device_workspace_cleanup import (
     DevicePackageCleanupResult,
     prepare_device_for_new_task,
@@ -40,7 +37,9 @@ from game_agent.services.failure_report import (
     generate_failure_diagnosis_report,
 )
 from game_agent.services.game_launch import is_game_running
-from game_agent.services.gameturbo_log import finalize_gameturbo_log
+from game_agent.services.gameturbo_config_retry import infer_blocked_stage
+from game_agent.services.gameturbo_log import bootstrap_gameturbo_log, finalize_gameturbo_log
+from game_agent.services.normal_exit import NormalExitState, confirm_in_game_normal_exit
 from game_agent.services.pipeline_trace import (
     activate_pipeline_trace,
     deactivate_pipeline_trace,
@@ -48,7 +47,6 @@ from game_agent.services.pipeline_trace import (
     trace_operation,
 )
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.modules.preprocessing.preprocessor import PreprocessResult
 from game_agent.services.run_deliverable import (
     RunDeliverablePaths,
     create_task_output_dir,
@@ -175,11 +173,9 @@ class GameTestOrchestrator:
     def _log_module_flags(self, cfg: AppConfig) -> None:
         m = cfg.modules
         logger.info(
-            "模块开关: executor=%s log_monitor=%s screen_monitor=%s "
-            "retry=%s max_retries=%s",
+            "模块开关: executor=%s log_monitor=%s retry=%s max_retries=%s",
             m.executor,
             m.log_monitor,
-            m.screen_monitor,
             m.retry_on_failure,
             m.max_retries if m.retry_on_failure else 1,
         )
@@ -463,7 +459,7 @@ class GameTestOrchestrator:
         assert self._artifact_root is not None
 
         mods = cfg.modules
-        monitors_on = mods.log_monitor or mods.screen_monitor
+        monitors_on = mods.log_monitor
         if not mods.executor and not monitors_on:
             logger.info("[modules] executor and monitors off, skip game phase")
             return None
@@ -514,7 +510,6 @@ class GameTestOrchestrator:
                 "parallel game phase start",
                 executor=mods.executor,
                 log_monitor=mods.log_monitor,
-                screen_monitor=mods.screen_monitor,
             )
 
         target_pkg = cfg.game.package_name.strip()
@@ -562,12 +557,6 @@ class GameTestOrchestrator:
 
             monitor_tasks.append(asyncio.create_task(_log_task(), name="log_monitor"))
 
-        if mods.screen_monitor:
-            logger.warning(
-                "[Orchestrator] modules.screen_monitor=true 已弃用："
-                "请改由主脑工具 analyze_screen / check_in_game 按需调用多模态",
-            )
-
         session_coordinator = SessionCoordinator(
             adb=self._adb,
             app_config=cfg,
@@ -599,7 +588,7 @@ class GameTestOrchestrator:
                 ),
                 name="executor",
             )
-        elif monitors_on:
+        elif mods.log_monitor:
             if not is_game_running(self._adb, cfg.game.package_name):
                 logger.warning(
                     "executor=false but monitors on; game process not running (%s)",

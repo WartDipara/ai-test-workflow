@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from game_agent.paths import REPO_ROOT
@@ -63,7 +63,7 @@ def format_skill_list_for_tool(*, limit: int = 15) -> str:
         return "(No learned skill files yet; generated after successful run with persist_learned_skill_on_success.)"
     lines: list[str] = []
     for p in files:
-        ts = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ts = datetime.fromtimestamp(p.stat().st_mtime, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
         lines.append(f"- {p.name} | mtime={ts} | {_preview_first_line(p)}")
     return "\n".join(lines)
 

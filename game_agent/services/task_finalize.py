@@ -6,14 +6,12 @@ import os
 import shutil
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from game_agent.modules.preprocessing.preprocessor import PreprocessResult
 from game_agent.services.execution_log_bundle import (
-    EXECUTION_MANIFEST_NAME,
-    FINAL_LOG_NAME,
     archive_attempt_logs,
     build_final_logs,
     write_execution_manifest,
@@ -42,7 +40,7 @@ class TaskRunJournal:
 
     def log(self, phase: str, event: str, **extra: Any) -> None:
         row = {
-            "ts": datetime.now(tz=timezone.utc).isoformat(),
+            "ts": datetime.now(tz=UTC).isoformat(),
             "phase": phase,
             "event": event,
             **extra,

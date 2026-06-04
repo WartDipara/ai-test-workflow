@@ -66,6 +66,8 @@ test.py
 check_balance.py
 run_outputs/
 artifacts/
+test_api.py
+image.png
 
 # --- GameTurbo-Native Not Tracked ---
 GameTurbo-Native/

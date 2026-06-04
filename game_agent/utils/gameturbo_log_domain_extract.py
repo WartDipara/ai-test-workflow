@@ -14,7 +14,7 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -278,7 +278,7 @@ class GameTurboLogDomainExtractor:
         return DomainRegionAnalysis(
             schema_version=SCHEMA_VERSION,
             source_log=source_log,
-            analyzed_at=datetime.now(timezone.utc).isoformat(),
+            analyzed_at=datetime.now(UTC).isoformat(),
             port=self.port,
             extractor_module="game_agent.utils.gameturbo_log_domain_extract",
             aligned_scripts=[
