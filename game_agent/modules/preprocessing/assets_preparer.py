@@ -1,15 +1,3 @@
-"""
-独立脚本：从 apks.txt 读取 URL 下载 APK。
-
-可作为 CLI 独立运行，也可作为模块由 controller 导入调用。
-
-apks.txt 格式：每行一个 APK 下载直链，支持 # 开头的注释。
-
-CLI 用法:
-    python assets_preparer.py                          # 从默认 apk_cache/apks.txt 读取
-    python assets_preparer.py --apks-txt ./my_list.txt  # 指定文件
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -83,7 +71,6 @@ def download_apk(
     cache_dir = cache_dir.resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # 从 URL 尾段提取文件名
     raw_name = url.rstrip("/").rsplit("/", 1)[-1] if "/" in url else "downloaded.apk"
     if not raw_name.endswith(".apk"):
         raw_name += ".apk"
@@ -149,7 +136,6 @@ def download_apk_from_file(
     if not urls:
         return None
 
-    # 取第一个有效链接
     return download_apk(urls[0], cache_dir, timeout_s=timeout_s)
 
 

@@ -22,7 +22,7 @@ from game_agent.models.run_failure import (
     parse_error_code_from_text,
 )
 from game_agent.models.settings import AppConfig, ModulesSection
-from game_agent.modules.observer_session import ObserverSessionState
+from game_agent.modules.observer_session.state import ObserverSessionState
 from game_agent.modules.preprocessing.preprocessor import PreprocessResult
 from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
 from game_agent.modules.run_context import AttemptContext
@@ -202,7 +202,7 @@ class GameTestOrchestrator:
             self._task_journal = None
             self._source_apk_path = None
 
-            # ── 预处理（先于 run_outputs，以便从 packages 解析 gid）──
+            # preprocessing before run_outputs: need packages/ to resolve gid
             self._preprocessing_enabled = cfg.preprocessing.enabled
             if cfg.preprocessing.enabled:
                 with trace_operation("preprocessing", "run") as rec:
@@ -388,10 +388,6 @@ class GameTestOrchestrator:
             winning_retry=retry,
             max_retries=max_retries,
         )
-
-    # ------------------------------------------------------------------
-    # 预处理阶段（retry 循环之前执行一次）
-    # ------------------------------------------------------------------
 
     def _run_preprocessing(self, cfg: AppConfig):
         """执行预处理阶段：APK 下载/ABI 剥离。返回 PreprocessResult。"""

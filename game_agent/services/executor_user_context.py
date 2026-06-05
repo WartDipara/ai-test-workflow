@@ -11,11 +11,6 @@ if TYPE_CHECKING:
     from game_agent.models.settings import AppConfig
     from game_agent.modules.run_context import AttemptContext
 
-# 记忆策略（与产品优先级一致）：
-# 1. AI 分析正确 — 完整 message_history + 任务锚点 + 工具链 action log + 跨 retry 摘要
-# 2. 响应速度 — 不裁剪 history；仅减少每轮重复的静态 hint（history 仍保留首轮完整 skill 摘要）
-# 3. 上下文体积 — 最多 3 次尝试，默认不压缩 API history
-
 _STAGE_RE = re.compile(
     r"\bstage(?:\s*id)?\s*[:=]\s*[`'\"]?([a-z][a-z0-9_]*)\b",
     re.IGNORECASE,

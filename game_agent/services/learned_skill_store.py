@@ -23,9 +23,6 @@ def ensure_skills_dir() -> None:
     AGENT_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── 学习追踪器 ──────────────────────────────────────────────
-
-
 def _tracker_path() -> Path:
     ensure_skills_dir()
     return TRACKER_FILE
@@ -74,9 +71,6 @@ def latest_skill_for_package(package_name: str) -> Path | None:
     return path if path.is_file() else None
 
 
-# ── 文件名安全 ──────────────────────────────────────────────
-
-
 def safe_skill_basename(name: str) -> str | None:
     """仅允许单层 *.md 文件名，防路径穿越。"""
     raw = (name or "").strip()
@@ -90,9 +84,6 @@ def safe_skill_basename(name: str) -> str | None:
     if any(ord(c) < 32 for c in base):
         return None
     return base
-
-
-# ── 文件操作 ────────────────────────────────────────────────
 
 
 def list_skill_files(*, limit: int = 20) -> list[Path]:

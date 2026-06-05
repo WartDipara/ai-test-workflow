@@ -45,8 +45,9 @@ class BaseInstallMonitor(ABC):
             logger.debug("install monitor 截图失败: %s", e)
             return False
 
+        dw, dh = adb.wm_size()
         try:
-            ocr_text = extract_text_with_bounds(shot)
+            ocr_text = extract_text_with_bounds(shot, device_w=dw, device_h=dh)
         except Exception as e:
             logger.debug("install monitor OCR 失败: %s", e)
             return False

@@ -5,7 +5,6 @@ from game_agent.paths import REPO_ROOT
 SKILLS_DIR = REPO_ROOT / "skills"
 SKILLS_INDEX_PATH = SKILLS_DIR / "SKILL.md"
 
-# skill_id → filename under skills/
 REPO_SKILL_FILES: dict[str, str] = {
     "game_launch_ocr": "game_launch_ocr_skill.md",
     "gameturbo_log_baseline": "gameturbo_log_baseline_skill.md",

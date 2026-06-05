@@ -233,6 +233,28 @@ class AdbService:
                     return int(w), int(h)
         return 1080, 1920
 
+    def get_screen_rotation(self) -> int:
+        """返回屏幕旋转角度: 0, 90, 180, 270。"""
+        out = self.shell("dumpsys window", timeout=15.0)
+        for line in out.splitlines():
+            if "display=0" in line and "mRotation=" in line:
+                for token in line.split():
+                    if token.startswith("mRotation="):
+                        try:
+                            deg = int(token.split("=")[1].replace("ROTATION_", ""))
+                            return deg
+                        except (ValueError, IndexError):
+                            pass
+        return 0
+
+    def touch_size(self) -> tuple[int, int]:
+        """返回当前方向下 adb input tap 的有效触控空间（含旋转补偿）。"""
+        w, h = self.wm_size()
+        rot = self.get_screen_rotation()
+        if rot in (90, 270):
+            w, h = h, w
+        return w, h
+
     def current_foreground_app(self) -> tuple[str | None, str | None]:
         """
         返回当前前台 (package, activity)；解析失败时为 (None, None)。

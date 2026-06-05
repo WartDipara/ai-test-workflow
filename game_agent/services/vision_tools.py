@@ -85,7 +85,8 @@ async def run_analyze_screen(
         )
 
     try:
-        ocr_summary = extract_text_with_bounds(shot_path)
+        dw, dh = adb.wm_size()
+        ocr_summary = extract_text_with_bounds(shot_path, device_w=dw, device_h=dh)
     except Exception as e:
         ocr_summary = f"[OCR failed] {e}"
         logger.warning("analyze_screen OCR 失败: %s", e)

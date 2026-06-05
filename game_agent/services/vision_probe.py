@@ -10,7 +10,6 @@ from game_agent.models.settings import LLMSection
 
 logger = logging.getLogger(__name__)
 
-# 16x16 PNG（白色），体积极小。
 # Qwen 等多模态网关可能拒绝宽高 <= 10 的图片，因此不要使用 1x1 探针图。
 _MIN_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAI0lEQVR4nGP8//8/AymAiSTVDKMaiANMRKqDg1ENxACSQwkAVW0DHeN02ZEAAAAASUVORK5CYII="

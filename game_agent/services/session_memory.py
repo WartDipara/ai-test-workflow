@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 HISTORY_FILE = "conversation_history.json"
 MEMORY_FILE = "session_memory.json"
-# user 每轮 action log；完整工具链仍在 conversation_history.json
 _MAX_ACTION_LINES = 80
 _MAX_ARG_CHARS = 120
 

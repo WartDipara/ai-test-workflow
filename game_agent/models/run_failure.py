@@ -22,6 +22,7 @@ class ErrorCode(str, Enum):
     EXECUTOR_FLOW = "E1008"
     PACKAGE_INSTALL = "E1009"
     TIMEOUT_PHASE = "E1010"
+    NET_TUNNEL_IDLE = "E1011"  # tunnel up but zero SNI — not effective, not retryable
 
     # --- Retryable: GameTurbo / network acceleration / routing ---
     NET_LOG_ANOMALY = "E2001"
@@ -199,6 +200,9 @@ def classify_failure(
 
     if "gameturbo" in lower and "前置" in text:
         return RunFailure(ErrorCode.CONFIG, text, retryable=False)
+
+    if "no sni traffic" in lower:
+        return RunFailure(ErrorCode.NET_TUNNEL_IDLE, text, retryable=False)
 
     return RunFailure(
         ErrorCode.INTERNAL,

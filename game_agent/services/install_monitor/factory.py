@@ -14,11 +14,6 @@ _INSTALL_MONITOR_CLASSES: list[type[BaseInstallMonitor]] = [
 
 
 def create_install_monitor(adb: AdbService) -> BaseInstallMonitor:
-    """
-    根据设备品牌自动选择安装监控适配器。
-    遍历所有已知监控类，匹配品牌则返回对应实例；
-    无匹配则返回 NullInstallMonitor（空实现）。
-    """
     for cls in _INSTALL_MONITOR_CLASSES:
         try:
             monitor = cls()
@@ -29,11 +24,3 @@ def create_install_monitor(adb: AdbService) -> BaseInstallMonitor:
             logger.warning("安装监控 %s 初始化失败: %s", cls.__name__, e)
     logger.info("安装监控: 无匹配品牌，使用 NullInstallMonitor")
     return NullInstallMonitor()
-
-
-__all__ = [
-    "BaseInstallMonitor",
-    "NullInstallMonitor",
-    "XiaomiInstallMonitor",
-    "create_install_monitor",
-]

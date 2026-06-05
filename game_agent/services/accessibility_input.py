@@ -12,14 +12,11 @@ logger = logging.getLogger(__name__)
 _device_lock = threading.Lock()
 _devices: dict[str, Any] = {}
 
-# 最近一次成功填入账号/密码的 EditText 中心（按设备 serial）
 _last_username_center: dict[str, tuple[int, int]] = {}
 _last_password_center: dict[str, tuple[int, int]] = {}
 
-# 常见账号/密码输入框类型（含 AppCompat / 自动完成）
 _EDIT_TEXT_CLASS_PATTERN = ".*(EditText|AutoCompleteTextView).*"
 
-# 密码框须在账号框下方至少这么多像素；两框中心距小于此视为同一框
 _MIN_PASSWORD_BELOW_USERNAME_PX = 48
 _SAME_FIELD_CENTER_PX = 55
 
@@ -776,6 +773,7 @@ def submit_login_after_password(
         targets, shot, summary = capture_login_form_targets(
             adb,
             artifact_root,
+            screen_width=width,
             screen_height=screen_height,
             tag="login_post_dismiss",
         )

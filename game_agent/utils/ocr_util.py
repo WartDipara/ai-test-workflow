@@ -83,8 +83,20 @@ class _PreparedImage:
     temp_path: Path | None
 
 
-def _prepare_image_for_ocr(image_path: Path) -> _PreparedImage:
-    """必要时缩小截图以加速 OCR；返回用于推理的路径与坐标缩放比。"""
+def _prepare_image_for_ocr(
+    image_path: Path,
+    *,
+    device_w: int | None = None,
+    device_h: int | None = None,
+) -> _PreparedImage:
+    """必要时缩小截图以加速 OCR；返回用于推理的路径与坐标缩放比。
+
+    当提供 device_w/device_h 时，坐标映射到设备逻辑像素（adb input tap 坐标空间）；
+    否则映射到截图像素空间（向后兼容）。
+
+    自动处理横竖屏方向不匹配：截图尺寸可能反映物理像素（含密度倍率），
+    或方向与 wm_size 不一致（横屏游戏截图宽高与设备逻辑像素宽高交换）。
+    """
     from PIL import Image
 
     max_w = _OCR_CONFIG.max_image_width
@@ -92,17 +104,33 @@ def _prepare_image_for_ocr(image_path: Path) -> _PreparedImage:
     with Image.open(src) as im:
         im = im.convert("RGB")
         ow, oh = im.size
+
+        # touch_size() 已经包含旋转补偿，直接使用
+        if device_w and device_h:
+            logger.info("OCR dims: src=%dx%d device=%dx%d", ow, oh, device_w, device_h)
+
         if ow <= max_w:
-            return _PreparedImage(path=src, scale_x=1.0, scale_y=1.0, temp_path=None)
+            sx = 1.0
+            sy = 1.0
+            if device_w:
+                sx = device_w / ow
+                sy = device_h / oh if device_h else 1.0
+            return _PreparedImage(path=src, scale_x=sx, scale_y=sy, temp_path=None)
         nw = max_w
         nh = max(1, int(oh * nw / ow))
         resized = im.resize((nw, nh), Image.Resampling.LANCZOS)
         tmp = src.parent / f"{src.stem}_ocr_{nw}w.png"
         resized.save(tmp, format="PNG")
+        if device_w:
+            scale_x = device_w / nw
+            scale_y = device_h / nh if device_h else 1.0
+        else:
+            scale_x = ow / nw
+            scale_y = oh / nh
         return _PreparedImage(
             path=tmp,
-            scale_x=ow / nw,
-            scale_y=oh / nh,
+            scale_x=scale_x,
+            scale_y=scale_y,
             temp_path=tmp,
         )
 
@@ -154,15 +182,20 @@ def warmup_ocr() -> None:
     logger.info("PaddleOCR 模型已加载（warmup）")
 
 
-def extract_text_with_bounds(image_path: Path | str) -> str:
+def extract_text_with_bounds(
+    image_path: Path | str,
+    *,
+    device_w: int | None = None,
+    device_h: int | None = None,
+) -> str:
     """
-    对指定图片进行 OCR，返回带中心坐标的文本摘要（原图分辨率坐标）。
-    兼容 PaddleOCR 2.x（ocr.ocr）与 3.x（predict）。
+    对指定图片进行 OCR，返回带中心坐标的文本摘要。
+    当 device_w/device_h 提供时，坐标映射到设备逻辑像素（adb input tap 坐标空间）。
     """
     src = Path(image_path)
     logger.debug("OCR 开始: %s", src.name)
     ocr = get_ocr_instance()
-    prepared = _prepare_image_for_ocr(src)
+    prepared = _prepare_image_for_ocr(src, device_w=device_w, device_h=device_h)
     infer_path = str(prepared.path)
     sx, sy = prepared.scale_x, prepared.scale_y
 
@@ -257,7 +290,6 @@ def parse_ocr_lines(ocr_body: str) -> list[OcrLine]:
         if not m:
             continue
         text = m.group(3)
-        # 去掉 Paddle 置信度后缀
         text = re.sub(r"\s*\(置信度:.*\)\s*$", "", text).strip()
         lines.append(OcrLine(x=int(m.group(1)), y=int(m.group(2)), text=text))
     return lines

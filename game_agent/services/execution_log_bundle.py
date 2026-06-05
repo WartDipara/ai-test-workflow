@@ -18,7 +18,6 @@ EXECUTION_MANIFEST_NAME = "execution_manifest.json"
 LOGS_SUBDIR = "logs"
 REPORTS_SUBDIR = "reports"
 
-# 执行过程原始日志（完整拷贝到 logs/<attempt>/）
 EXECUTION_FILE_NAMES: tuple[str, ...] = (
     "process.log",
     "pipeline_trace.jsonl",
@@ -26,7 +25,6 @@ EXECUTION_FILE_NAMES: tuple[str, ...] = (
     "gameturbo.log",
 )
 
-# 仅归档到 reports/，不写入 final_logs.log
 ANALYSIS_FILE_NAMES: tuple[str, ...] = (
     "attempt_failure_report.md",
     "attempt_failure_report.json",

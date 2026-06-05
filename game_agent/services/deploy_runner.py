@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import locale
 import logging
 import shutil
 import subprocess
@@ -9,7 +10,8 @@ from pathlib import Path
 
 from game_agent.paths import REPO_ROOT
 from game_agent.services.adb_service import AdbService
-from game_agent.services.install_monitor import BaseInstallMonitor, create_install_monitor
+from game_agent.services.install_monitor.base import BaseInstallMonitor
+from game_agent.services.install_monitor.factory import create_install_monitor
 from game_agent.services.pipeline_trace import trace_operation
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,18 @@ class DeployResult:
     cwd: Path
     log_path: Path | None
     returncode: int
+
+
+def _decode_output(data: bytes) -> str:
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return data.decode(locale.getpreferredencoding(), errors="replace")
+        except (LookupError, UnicodeDecodeError):
+            return data.decode("utf-8", errors="replace")
 
 
 def _find_bash() -> str:
@@ -105,9 +119,6 @@ def run_deploy(
                 cmd,
                 cwd=ANDROID_DIR,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 timeout=timeout_s,
                 check=False,
             )
@@ -122,9 +133,9 @@ def run_deploy(
                         "$ " + " ".join(cmd),
                         "",
                         "=== stdout ===",
-                        result.stdout or "",
+                        _decode_output(result.stdout),
                         "=== stderr ===",
-                        result.stderr or "",
+                        _decode_output(result.stderr),
                     ],
                 ),
                 encoding="utf-8",

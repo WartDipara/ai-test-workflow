@@ -99,8 +99,8 @@ class ExecutorFlowController:
             audit.log_phase("executor", f"开始执行者阶段 artifact={artifact_root.name}")
 
         adb = AdbService(cfg.adb.serial)
-        w, h = adb.wm_size()
-        view.banner(f"wm size {w}x{h}")
+        w, h = adb.touch_size()
+        view.banner(f"touch size {w}x{h}")
 
         configure_ocr(cfg.ocr)
         view.banner(
@@ -161,6 +161,9 @@ class ExecutorFlowController:
                 break
             view.round(r, "执行者: OCR -> think -> tap / check_in_game")
             deps.round_id = r
+            w, h = adb.touch_size()
+            deps.screen_width = w
+            deps.screen_height = h
             if audit is not None:
                 audit.log_round_start("executor", r, note=f"foreground 目标={target_pkg}")
 
@@ -180,7 +183,7 @@ class ExecutorFlowController:
             if fg_pkg == target_pkg:
                 view.banner("正在执行 OCR 文字识别…")
                 try:
-                    raw_ocr = extract_text_with_bounds(shot_path)
+                    raw_ocr = extract_text_with_bounds(shot_path, device_w=w, device_h=h)
                     ocr_summary = format_device_ocr_for_executor(
                         raw_ocr,
                         screen_height=h,

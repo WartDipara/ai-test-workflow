@@ -175,6 +175,7 @@ def capture_login_form_targets(
     adb: AdbService,
     artifact_root: Path,
     *,
+    screen_width: int,
     screen_height: int,
     tag: str = "login",
 ) -> tuple[LoginFormOcrTargets, Path, str]:
@@ -182,7 +183,7 @@ def capture_login_form_targets(
     ts = datetime.now().strftime("%H%M%S_%f")
     path = artifact_root / f"{tag}_ocr_{ts}.png"
     adb.screencap_png(path)
-    raw = extract_text_with_bounds(path)
+    raw = extract_text_with_bounds(path, device_w=screen_width, device_h=screen_height)
     targets = resolve_login_form_targets(raw, screen_height=screen_height)
     summary = format_targets_summary(targets, screencap=path)
     return targets, path, summary

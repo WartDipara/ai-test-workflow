@@ -4,7 +4,6 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 from game_agent.models.settings import AppConfig
@@ -49,12 +48,9 @@ class LogMonitor:
         if not skip_initial_bootstrap:
             bootstrap_gameturbo_log(self.adb, self.artifact_root)
         seen_keys = read_gameturbo_dedup_keys(log_path)
-        monitor_started_at = datetime.now()
-
         while not stop_event.is_set():
             if self._restart_requested.is_set():
                 self._restart_requested.clear()
-                monitor_started_at = datetime.now()
                 log_path = gameturbo_log_path(self.artifact_root)
                 seen_keys = read_gameturbo_dedup_keys(log_path)
                 logger.info("[LogMonitor] 会话重启后恢复 logcat 流")
@@ -63,7 +59,6 @@ class LogMonitor:
                 stop_event,
                 log_path=log_path,
                 seen_keys=seen_keys,
-                monitor_started_at=monitor_started_at,
             )
             if anomaly is not None:
                 return anomaly
@@ -80,7 +75,6 @@ class LogMonitor:
         *,
         log_path: Path,
         seen_keys: set[str],
-        monitor_started_at: datetime,
     ) -> str | None:
         cmd = self.adb._base() + ["logcat", "-s", "GameTurbo"]
         logger.info("[LogMonitor] 监听命令: %s", " ".join(cmd))
@@ -93,6 +87,7 @@ class LogMonitor:
         line_count = 0
         last_heartbeat = time.monotonic()
         heartbeat_interval_s = 30.0
+        sni_count = 0
 
         try:
             while not stop_event.is_set() and not self._restart_requested.is_set():
@@ -125,12 +120,20 @@ class LogMonitor:
                 if key not in seen_keys:
                     append_gameturbo_line(log_path, line)
                     seen_keys.add(key)
+                if "[SNI-" in line:
+                    sni_count += 1
                 if line_count <= 3 or line_count % 20 == 0:
                     logger.info("[LogMonitor] logcat #%d: %s", line_count, line[:200])
-                if is_fatal_gameturbo_log_line(
-                    line,
-                    monitor_started_at=monitor_started_at,
-                ):
+                if is_fatal_gameturbo_log_line(line):
+                    if "idle shutdown" in line.lower() and sni_count == 0:
+                        logger.warning("[LogMonitor] 闲置关闭 + 零 SNI (GameTurbo 未生效): %s", line)
+                        if self.audit is not None:
+                            self.audit.log_observer(
+                                kind="log_anomaly",
+                                message=line,
+                                extra={"marker": "no_sni", "sni_count": 0},
+                            )
+                        return f"Log anomaly detected (no SNI traffic): idle shutdown, {line[:200]}"
                     logger.warning("[LogMonitor] 检测到异常日志: %s", line)
                     if self.audit is not None:
                         self.audit.log_observer(

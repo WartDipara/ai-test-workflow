@@ -48,7 +48,7 @@ game:
   # 以下两项由启动时从 game_gameturbo.apk 自动覆写，无需手填
   package_name: "com.example.testgame"
   launch_activity: "com.example.testgame/.MainActivity"
-  timeout_s: 300.0
+  timeout_s: 1200.0
   launch_detect_timeout_s: 90.0
   launch_detect_poll_interval_s: 2.0
   package_install_wait_timeout_s: 120.0

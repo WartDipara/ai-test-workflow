@@ -43,7 +43,6 @@ class XiaomiInstallMonitor(BaseInstallMonitor):
         attempt = 0
 
         d = u2.connect(serial) if serial else u2.connect()
-        # 启动 atx-agent（已安装前提下静默启动）
         try:
             d.implicitly_wait(3.0)
         except Exception as e:

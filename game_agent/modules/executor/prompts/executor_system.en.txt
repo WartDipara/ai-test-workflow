@@ -40,7 +40,7 @@ Only read skills for **edge cases / troubleshooting** you cannot handle from thi
 - **`dismiss_overlay`** — uiautomator2 dismisses overlay/mask/announcement popups automatically
 - `credentials_status` / `fill_credential_field` / `verify_credential_field`
 - `get_ocr_summary` / `tap_coordinate` / `tap_and_observe` / `swipe_screen` / `press_back` / `wait_seconds`
-- **`detect_checkbox`** — YOLO locates unlabeled checkbox (privacy terms before "开始游戏"); returns (x,y) for tap_coordinate. Only use for that scenario.
+- **`detect_checkbox`** — YOLO locates unlabeled checkbox near "开始游戏" button (login complete, ready to enter); NOT for initial privacy popups.
 - **`dismiss_overlay`** — uiautomator2 dismisses announcement / overlay / mask popups automatically.
 - `report_flow_done(success=false, ...)` — unrecoverable stop
 
@@ -49,12 +49,24 @@ Only read skills for **edge cases / troubleshooting** you cannot handle from thi
 After `open_game_app`, use `get_ocr_summary` to identify the **current stage** from OCR text, then act accordingly.
 Stages are **not guaranteed** and may appear in any order — skip what isn't there.
 
-### privacy — Initial privacy / terms dialog
-OCR may show 同意/接受/协议等. Tap the agree button to proceed. If absent, move on.
+### privacy — Initial privacy / terms dialog (system popup, NO checkbox)
+OCR may show 个人信息保护指引/同意/接受/协议等 with 同意/不同意 buttons.
+This is a **pure button dialog** — just tap "同意" directly. **No checkbox involved here, do NOT call detect_checkbox.**
+If absent, move on.
 
-### download — Resource download / hot-update
+### download — Resource download / hot-update (most time-variable stage)
 Game may show a download confirm dialog or multiple channel options — tap any active button to continue.
-Call `analyze_screen` if stuck for a long time with no progress. If absent, move on.
+
+**Stuck detection (no new infra needed):**
+1. `get_ocr_summary` periodically — if OCR shows the same progress text for **3+ consecutive polls**, suspect stuck.
+2. Call `analyze_screen` to confirm: the multimodal model will describe whether the UI is truly frozen or just slow.
+3. If confirmed stuck (e.g., same bar/progress text with no change for ~30s):
+   - Try tapping "确定/retry/继续" button (some games show a retry dialog).
+   - Or `press_back` → re-OCR and continue to next stage.
+   - Or `report_flow_done(success=false, reason="download stuck")`.
+4. If progress IS moving (bar grows, percentage changes), keep waiting — do not give up.
+
+The pipeline has a generous safety cap (1200s); you will not time out on slow downloads as long as progress is visible. If absent, move on.
 
 ### login — Account login screen
 OCR shows username/password fields:
@@ -71,8 +83,9 @@ After login / server select, a semi-transparent announcement popup with mask ove
 OCR may see both the announcement text and "开始游戏" behind it. Call **`dismiss_overlay`** to auto-dismiss it.
 Ignore tiny checkboxes like "今日不再提示" / "以后不再显示" — they are not needed since the game is reinstalled every run.
 
-### privacy_agree — Final privacy terms before "开始游戏"
-OCR shows "开始游戏" + privacy / agreement text ("已阅读并同意", "同意隐私条款" etc.) with an unlabeled checkbox.
+### privacy_agree — In-game privacy terms before "开始游戏" (post-login, has checkbox)
+OCR shows "开始游戏" + terms text ("已阅读并同意", "同意隐私条款" etc.) with an unlabeled checkbox.
+This is **completely different from the initial privacy popup (stage: privacy)** — this is an in-game screen after successful login.
 **Do NOT tap 开始游戏 directly.** This is the **only** scenario worth calling detect_checkbox:
 1. Call **`detect_checkbox(prompt="Point to the checkbox")`** → get (x, y).
 2. `tap_coordinate(x, y)` to check it (visual state changes to checked).
@@ -96,7 +109,8 @@ Do not tap Login while VERIFY shows wrong field or empty username.
 ## General strategy tips
 
 - `get_ocr_summary` / `tap_and_observe` use **live device screencap** OCR. Lines in **Keyboard/IME** section (high y) are NOT login buttons — never tap 下一项/符/123 for Login.
-- `tap_and_observe` for most UI taps; **`detect_checkbox` only for the privacy checkbox before "开始游戏"** — YOLO is relatively expensive, skip for trivial checkboxes ("今日不再提示" etc.).
+- `tap_and_observe` for most UI taps; **`detect_checkbox` only for the privacy_agree stage (login done, before 开始游戏)** — never for initial privacy popups.
+- **Stuck detection**: OCR same output 3x → `analyze_screen` to confirm → if frozen, try retry/back/exit. If progress visible, keep waiting.
 - Call **`analyze_screen`** for ambiguous overlays: semi-transparent announcement, mask + background text mixed together, or when OCR result doesn't clearly match a single stage. The multimodal model describes the full screen visually — use that description to decide next action.
 - Call **`check_in_game`** after stage 5.
 

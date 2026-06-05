@@ -9,7 +9,7 @@ from pydantic_ai import Agent, RunContext
 
 from game_agent.models.settings import AppConfig
 from game_agent.modules.executor.deps import ExecutorAgentDeps
-from game_agent.modules.executor.tooling import RunRequirement, ToolKind, make_tool_registrar
+from game_agent.modules.executor.tooling.shell import RunRequirement, ToolKind, make_tool_registrar
 from game_agent.modules.executor.tooling.waits import (
     execute_check_in_game,
     execute_wait_for_game_running,
@@ -40,7 +40,6 @@ from game_agent.utils.ocr_util import (
     is_screencap_mostly_black,
 )
 
-# Re-export for controllers / agents package
 __all__ = ["ExecutorAgentDeps", "build_executor_agent"]
 
 
@@ -276,8 +275,12 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         ts = datetime.now().strftime("%H%M%S_%f")
         path = ctx.deps.artifact_root / f"ocr_{ts}.png"
         ctx.deps.adb.screencap_png(path)
-        raw = await asyncio.to_thread(extract_text_with_bounds, path)
-        sh = ctx.deps.screen_height
+        sw, sh = ctx.deps.adb.touch_size()
+        ctx.deps.screen_width, ctx.deps.screen_height = sw, sh
+        raw = await asyncio.to_thread(
+            extract_text_with_bounds, path,
+            device_w=sw, device_h=sh,
+        )
         s = format_device_ocr_for_executor(raw, screen_height=sh)
         black = is_screencap_mostly_black(path)
         cache_line = ""
@@ -300,7 +303,8 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
 
     @t(kind=ToolKind.INSTANT)
     async def tap_coordinate(ctx: RunContext[ExecutorAgentDeps], x: int, y: int) -> str:
-        msg = ctx.deps.adb.tap(x, y, width=ctx.deps.screen_width, height=ctx.deps.screen_height)
+        sw, sh = ctx.deps.adb.touch_size()
+        msg = ctx.deps.adb.tap(x, y, width=sw, height=sh)
         return f"{msg}\nHint: UI may have changed — call get_ocr_summary for fresh OCR."
 
     @t(kind=ToolKind.INSTANT)
@@ -309,15 +313,18 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         prompt: str,
     ) -> str:
         """
-        Use YOLO vision model to detect an untagged UI element and return its tap coordinates.
-        Screencap is captured at device native resolution for accurate coordinate mapping.
-        The returned (x, y) can be fed into tap_coordinate or tap_and_observe.
+        Use YOLO vision model to detect an untagged UI element and return its tap coordinates
+        in device logical pixel space.
         """
         import httpx
+        from PIL import Image
 
         ts = datetime.now().strftime("%H%M%S_%f")
         path = ctx.deps.artifact_root / f"detect_{ts}.png"
         ctx.deps.adb.screencap_png(path)
+
+        with Image.open(path) as im:
+            img_w, img_h = im.size
 
         cfg = ctx.deps.app_config.detection
         with open(path, "rb") as f:
@@ -342,11 +349,14 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             return f"YOLO API invalid response format: {data}"
 
         x, y = point
-        sw, sh = ctx.deps.screen_width, ctx.deps.screen_height
+        sw, sh = ctx.deps.adb.touch_size()
+        sx = sw / img_w
+        sy = sh / img_h
+        x, y = x * sx, y * sy
         if not (0 <= x < sw and 0 <= y < sh):
             return (
                 f"YOLO returned out-of-bounds coordinates: ({x:.1f},{y:.1f}) "
-                f"for screen {sw}x{sh}"
+                f"for screen {sw}x{sh} (image was {img_w}x{img_h}, scale {sx:.3f})"
             )
 
         return (
@@ -364,11 +374,12 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         Strategy: uiautomator2 finds known dismiss text → tap top-right corner → adb back.
         Call when OCR shows "开始游戏" mixed with announcement text, or after login/server_select.
         """
+        sw, sh = ctx.deps.adb.touch_size()
         return await asyncio.to_thread(
             run_dismiss_overlay,
             ctx.deps.adb.device_serial,
-            ctx.deps.screen_width,
-            ctx.deps.screen_height,
+            sw,
+            sh,
         )
 
     @t(kind=ToolKind.COMPOUND)
@@ -385,11 +396,12 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         observations = max(2, min(int(observations), 6))
         ts = datetime.now().strftime("%H%M%S_%f")
 
+        sw, sh = ctx.deps.adb.touch_size()
         tap_msg = ctx.deps.adb.tap(
             x,
             y,
-            width=ctx.deps.screen_width,
-            height=ctx.deps.screen_height,
+            width=sw,
+            height=sh,
         )
         if "Refused tap" in tap_msg or "rejected" in tap_msg.lower():
             return tap_msg
@@ -399,10 +411,10 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         for i in range(observations):
             shot = ctx.deps.artifact_root / f"tap_obs_{ts}_{i + 1}.png"
             ctx.deps.adb.screencap_png(shot)
-            raw = extract_text_with_bounds(shot)
+            raw = extract_text_with_bounds(shot, device_w=sw, device_h=sh)
             ocr = format_device_ocr_for_executor(
                 raw,
-                screen_height=ctx.deps.screen_height,
+                screen_height=sh,
             )[:3500]
             msg_lines.append(
                 f"[observe#{i + 1}] device screencap={shot.resolve()}\n{ocr}",

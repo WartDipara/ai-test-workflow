@@ -19,13 +19,8 @@ _DISMISS_TEXT_PATTERNS = (
 
 
 def dismiss_overlay(serial: str | None, width: int, height: int) -> str:
-    """
-    尝试关闭当前界面上的蒙版/公告/弹窗。
-    优先级：uiautomator2 查找已知文本按钮 → 点右上角区域 → adb back。
-    """
     steps: list[str] = []
 
-    # 1. uiautomator2 查找已知文本按钮
     try:
         import uiautomator2 as u2
 
@@ -41,7 +36,6 @@ def dismiss_overlay(serial: str | None, width: int, height: int) -> str:
             except Exception:
                 continue
         else:
-            # 2. 没有找到已知文本按钮，点右上角
             corner_x = int(width * 0.92)
             corner_y = int(height * 0.08)
             d.click(corner_x, corner_y)
@@ -53,7 +47,6 @@ def dismiss_overlay(serial: str | None, width: int, height: int) -> str:
 
     time.sleep(0.5)
 
-    # 3. 尝试 adb back（不影响已关闭的弹窗）
     try:
         from game_agent.services.adb_service import AdbService
 

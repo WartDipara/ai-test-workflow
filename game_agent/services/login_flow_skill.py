@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from game_agent.services.skill_catalog import read_login_flow_guide
 
-# Short stage hint injected each round (does not replace full skill)
 COMPACT_STAGE_HINT = """
 === Login stage cheat sheet (UI varies; classify from OCR) ===
 Popups: prefer Agree/Accept/确认/继续/下载 — avoid 拒绝/取消 unless no continue button.

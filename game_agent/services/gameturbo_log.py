@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 GAMETURBO_LOG_FILENAME = "gameturbo.log"
 
-# logcat 行首时间戳（adb 常见两种格式）
 _LOGCAT_TS_PATTERNS = (
     re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})"),  # 2026-05-20 11:27:56.837
     re.compile(r"^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})"),  # 05-20 11:27:56.837

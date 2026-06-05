@@ -78,7 +78,8 @@ async def run_in_game_check(
         )
 
     try:
-        ocr_summary = extract_text_with_bounds(shot_path)
+        dw, dh = adb.wm_size()
+        ocr_summary = extract_text_with_bounds(shot_path, device_w=dw, device_h=dh)
     except Exception as e:
         ocr_summary = f"[OCR failed] {e}"
 

@@ -69,7 +69,6 @@ Final report_flow_done summary:
 {transcript}
 """
 
-    # 检查该包是否已达学习上限
     if not can_learn_package(task_label):
         existing = latest_skill_for_package(task_label)
         if existing:
