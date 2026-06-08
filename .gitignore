@@ -66,6 +66,7 @@ test.py
 check_balance.py
 run_outputs/
 artifacts/
+experiences/
 test_api.py
 image.png
 
