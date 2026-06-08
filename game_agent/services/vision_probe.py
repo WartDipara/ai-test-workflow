@@ -17,14 +17,6 @@ _MIN_PNG_B64 = (
 
 
 async def probe_multimodal_support(llm: LLMSection) -> str | None:
-    """
-    发送一条带 `image_url`（data URI）的 chat 请求。
-
-    若 API 不支持多模态，通常返回 400（如 DeepSeek 文本接口报 unknown variant `image_url`）。
-
-    Returns:
-        None 表示通过；非空为简短错误说明（供日志与 RunState.note）。
-    """
     base = llm.base_url.rstrip("/")
     client = AsyncOpenAI(base_url=base, api_key=llm.api_key)
     try:

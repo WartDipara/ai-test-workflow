@@ -22,3 +22,4 @@ class RunState:
     # 键盘弹出前 get_ocr_summary 缓存的主 Login 坐标（安全键盘下截屏常黑屏）
     cached_login_button_xy: tuple[int, int] | None = None
     cached_login_button_text: str = ""
+    checkbox_bbox_cache: tuple[int, int, int] | None = None  # (base_cx, cy, ch) — 避免重复 OCR

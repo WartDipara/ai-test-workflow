@@ -40,7 +40,8 @@ Only read skills for **edge cases / troubleshooting** you cannot handle from thi
 - **`dismiss_overlay`** — uiautomator2 dismisses overlay/mask/announcement popups automatically
 - `credentials_status` / `fill_credential_field` / `verify_credential_field`
 - `get_ocr_summary` / `tap_coordinate` / `tap_and_observe` / `swipe_screen` / `press_back` / `wait_seconds`
-- **`detect_checkbox`** — YOLO locates unlabeled checkbox near "开始游戏" button (login complete, ready to enter); NOT for initial privacy popups.
+- **`detect_checkbox`** — YOLO locates unlabeled checkbox near "开始游戏" button; auto-falls back to OCR bbox if YOLO fails.
+- **`locate_checkbox_near_text(step=0)`** — OCR-only fallback; step=N moves 30px further left each retry.
 - **`dismiss_overlay`** — uiautomator2 dismisses announcement / overlay / mask popups automatically.
 - `report_flow_done(success=false, ...)` — unrecoverable stop
 
@@ -86,10 +87,13 @@ Ignore tiny checkboxes like "今日不再提示" / "以后不再显示" — they
 ### privacy_agree — In-game privacy terms before "开始游戏" (post-login, has checkbox)
 OCR shows "开始游戏" + terms text ("已阅读并同意", "同意隐私条款" etc.) with an unlabeled checkbox.
 This is **completely different from the initial privacy popup (stage: privacy)** — this is an in-game screen after successful login.
-**Do NOT tap 开始游戏 directly.** This is the **only** scenario worth calling detect_checkbox:
-1. Call **`detect_checkbox(prompt="Point to the checkbox")`** → get (x, y).
-2. `tap_coordinate(x, y)` to check it (visual state changes to checked).
-3. Now tap 开始游戏 to enter. If no checkbox visible, move on.
+**Do NOT tap 开始游戏 directly.** 
+1. `get_ocr_summary` — locate "开始游戏" / "进入游戏" button, remember its coordinates (reuse cached, re-OCR only if forgotten).
+2. Call **`detect_checkbox(prompt="Point to the checkbox")`** → get (x, y) → `tap_coordinate(x, y)`.
+3. Tap 开始游戏 directly (no verification needed — if checkbox was wrong, tap simply won't work).
+4. If tapping 开始游戏 doesn't work, call **`locate_checkbox_near_text(step=0)`** → `tap_coordinate` → tap 开始游戏.
+5. If still doesn't work, increase step: `step=1`, `step=2`, etc. — each step moves 30px further left from the text. Retry tap + 开始游戏 each time.
+6. If all steps hit the screen edge or 开始游戏 still doesn't work, move on.
 
 ### in_game — Confirm entry
 Call **`check_in_game`** repeatedly until `data.confirmed=true`.

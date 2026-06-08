@@ -36,7 +36,7 @@ graph TD
     INIT --> PARALLEL[Parallel game phase]
 
     subgraph "从游戏启动并行"
-      PARALLEL --> EX[Executor<br/>OCR+tap+detect_checkbox+check_in_game]
+      PARALLEL --> EX[Executor<br/>OCR+tap+checkbox+check_in_game]
       PARALLEL --> LM[LogMonitor<br/>logcat fail-fast]
       PARALLEL --> SC[SessionCoordinator]
       SC -->|重启| LM
@@ -386,11 +386,11 @@ modules:
   max_retries: 3               # 最大重试次数（retry_on_failure=true 时有效）
 ```
 
-**detection — YOLO 视觉检测（detect_checkbox 工具使用）：**
+**detection — （可选）YOLO 视觉检测：**
 
 ```yaml
 detection:
-  api_url: "http://192.168.1.117:8000/predict"  # YOLO 检测服务端点
+  api_url: "http://192.168.1.117:8000/predict"  # YOLO 检测服务端点（当前注释，默认走 OCR bbox）
   timeout_s: 30.0                                 # 请求超时（秒）
 ```
 
@@ -478,7 +478,7 @@ cp config/credentials.example.yaml credentials.yaml
 | 操作 | 方式 |
 |------|------|
 | 找输入框坐标、点按钮 | OCR + `tap` / `tap_and_observe` |
-| 勾选无语义元素（Checkbox/协议） | YOLO 视觉检测 `detect_checkbox` + `tap_coordinate` |
+| 勾选无语义元素（Checkbox/协议） | OCR 文本 bbox 推估 `locate_checkbox_near_text(step=N)` + `tap_coordinate`（YOLO `detect_checkbox` 可选备用） |
 | 写入账号/密码 | uiautomator2 `setText` + 无障碍回读 **VERIFY** |
 | 判断是否进游戏 | 主脑按需 `analyze_screen` / `check_in_game`（多模态） |
 
@@ -720,7 +720,7 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 - **OCR**：PaddleOCR（`ocr.model_profile`: mobile / server）。
 - **主脑 LLM（`llm`）**：执行者 ADB 工具、重试配置补丁、`AnalysisAgent` / 失败报告（结构化 `output_type`，走 tool_choice）。
 - **多模态 LLM（`llm_multimodal`）**：仅画面观察 — `check_in_game`、重试前 `vision_context` 把截图摘要成文字再交给主脑（不在 Qwen 上做 tool_choice）。
-- **YOLO 视觉检测（`detect_checkbox`）**：对 OCR 无法定位的无语义 UI 元素（Checkbox/协议勾选等），截设备原生分辨率图传给 YOLO 服务，返回精确点击坐标。
+- **Checkbox 定位（`detect_checkbox` / `locate_checkbox_near_text`）**：优先 OCR 文本 bbox → 从左边缘向左侧逐步偏移 30px（step=N）尝试定位无语义 checkbox。YOLO 视觉检测作为可选备用方案（当前测试阶段注释，默认走 OCR bbox fallback）。
 - **进入游戏判定**：独立 prompt；创角 OCR 硬规则见 `character_creation_ocr.py`。
 - **技能**：遇问题先 `read_skills_index`（`skills/SKILL.md`），再 `read_repo_skill(skill_id)`；内置 `game_launch_ocr`、`gameturbo_log_baseline`。`experiences/agent_skills/` 为成功 run 自动生成的 per-game 笔记（`list_learned_skills` / `read_learned_skill`）。
 

@@ -22,6 +22,7 @@ from game_agent.services.accessibility_input import (
     submit_login_after_password,
     verify_credential_via_accessibility,
 )
+from game_agent.services.checkbox_locator import _STEP_PX, _TERMS_PATTERNS, locate_checkbox_via_ocr
 from game_agent.services.credentials import (
     credentials_status_message,
     load_game_credentials,
@@ -35,6 +36,8 @@ from game_agent.services.skill_catalog import read_repo_skill as load_repo_skill
 from game_agent.services.skill_catalog import read_skills_index as load_skills_index_text
 from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.utils.ocr_util import (
+    OcrBbox,
+    extract_text_with_bbox,
     extract_text_with_bounds,
     format_device_ocr_for_executor,
     is_screencap_mostly_black,
@@ -45,6 +48,41 @@ __all__ = ["ExecutorAgentDeps", "build_executor_agent"]
 
 def _prompt_path() -> Path:
     return Path(__file__).resolve().parent / "prompts" / "executor_system.en.txt"
+
+
+async def _fallback_detect(
+    ctx: RunContext[ExecutorAgentDeps],
+    prompt: str,
+    reason: str,
+) -> str:
+    sw, sh = ctx.deps.adb.touch_size()
+    ts = datetime.now().strftime("%H%M%S_%f")
+    shot = ctx.deps.artifact_root / f"check_fallback_{ts}.png"
+    ctx.deps.adb.screencap_png(shot)
+    bboxes = await asyncio.to_thread(extract_text_with_bbox, shot, device_w=sw, device_h=sh)
+    if not bboxes:
+        return f"[Checkbox] {reason}, OCR found no text (fallback unavailable)"
+    result = locate_checkbox_via_ocr(bboxes, sw, sh)
+    if result is None:
+        return f"[Checkbox] {reason}, OCR found no matching terms text (fallback unavailable)"
+    cx, cy = result
+    return (
+        f"[Checkbox fallback] {reason}, OCR bbox fallback activated. "
+        f"target=({cx},{cy}) screenshot={shot.resolve()}"
+    )
+
+
+def _find_matching_terms_bbox(bboxes: list[OcrBbox]) -> tuple[int, int, int] | None:
+    for b in bboxes:
+        if not any(p.search(b.text) for p in _TERMS_PATTERNS):
+            continue
+        ch = b.y2 - b.y1
+        if ch <= 0:
+            continue
+        base = b.x1 - ch // 2
+        cy = (b.y1 + b.y2) // 2
+        return (base, cy, ch)
+    return None
 
 
 def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]:
@@ -314,56 +352,91 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
     ) -> str:
         """
         Use YOLO vision model to detect an untagged UI element and return its tap coordinates
-        in device logical pixel space.
+        in device logical pixel space. Falls back to OCR bbox method if YOLO fails.
         """
-        import httpx
-        from PIL import Image
+        # import httpx  # uncomment with YOLO block below
+        # from PIL import Image
 
         ts = datetime.now().strftime("%H%M%S_%f")
         path = ctx.deps.artifact_root / f"detect_{ts}.png"
         ctx.deps.adb.screencap_png(path)
 
-        with Image.open(path) as im:
-            img_w, img_h = im.size
+        # with Image.open(path) as im:
+        #     img_w, img_h = im.size
 
-        cfg = ctx.deps.app_config.detection
-        with open(path, "rb") as f:
-            try:
-                resp = httpx.post(
-                    cfg.api_url,
-                    files={"file": f},
-                    data={"prompt": prompt},
-                    timeout=cfg.timeout_s,
-                )
-            except httpx.TimeoutException:
-                return f"YOLO API timeout after {cfg.timeout_s}s: {cfg.api_url}"
-            except httpx.RequestError as e:
-                return f"YOLO API request failed: {e}"
+        # cfg = ctx.deps.app_config.detection
+        # with open(path, "rb") as f:
+        #     try:
+        #         resp = httpx.post(
+        #             cfg.api_url,
+        #             files={"file": f},
+        #             data={"prompt": prompt},
+        #             timeout=cfg.timeout_s,
+        #         )
+        #     except (httpx.TimeoutException, httpx.RequestError):
+        #         return await _fallback_detect(ctx, prompt, "YOLO request failed")
+        #
+        # if resp.status_code != 200:
+        #     return await _fallback_detect(ctx, prompt, f"YOLO status={resp.status_code}")
+        #
+        # data = resp.json()
+        # point = data.get("point")
+        # if not point or not isinstance(point, list) or len(point) != 2:
+        #     return await _fallback_detect(ctx, prompt, "YOLO invalid response")
+        #
+        # x, y = point
+        # sw, sh = ctx.deps.adb.touch_size()
+        # sx = sw / img_w
+        # sy = sh / img_h
+        # x, y = x * sx, y * sy
+        # if not (0 <= x < sw and 0 <= y < sh):
+        #     return await _fallback_detect(ctx, prompt, f"YOLO OOB ({x:.0f},{y:.0f})")
+        #
+        # return (
+        #     f"[Checkbox detection] prompt={prompt!r} "
+        #     f"target=({x:.0f},{y:.0f}) "
+        #     f"screenshot={path.resolve()}"
+        # )
 
-        if resp.status_code != 200:
-            return f"YOLO API error: status={resp.status_code}, body={resp.text[:500]}"
+        return await _fallback_detect(ctx, prompt, "YOLO disabled for testing")
 
-        data = resp.json()
-        point = data.get("point")
-        if not point or not isinstance(point, list) or len(point) != 2:
-            return f"YOLO API invalid response format: {data}"
-
-        x, y = point
+    @t(kind=ToolKind.INSTANT)
+    async def locate_checkbox_near_text(
+        ctx: RunContext[ExecutorAgentDeps],
+        step: int = 0,
+    ) -> str:
+        """
+        OCR-based checkbox locator. step=0 does fresh OCR+bbox and returns the first coordinate.
+        step>0 reuses cached bbox from the last step=0 call (no new screenshot/OCR) and moves
+        further left by 30px. Returns None when left edge is reached.
+        """
         sw, sh = ctx.deps.adb.touch_size()
-        sx = sw / img_w
-        sy = sh / img_h
-        x, y = x * sx, y * sy
-        if not (0 <= x < sw and 0 <= y < sh):
-            return (
-                f"YOLO returned out-of-bounds coordinates: ({x:.1f},{y:.1f}) "
-                f"for screen {sw}x{sh} (image was {img_w}x{img_h}, scale {sx:.3f})"
-            )
 
-        return (
-            f"[Checkbox detection] prompt={prompt!r} "
-            f"target=({x:.1f},{y:.1f}) "
-            f"screenshot={path.resolve()}"
-        )
+        if step == 0 or ctx.deps.run_state.checkbox_bbox_cache is None:
+            ts = datetime.now().strftime("%H%M%S_%f")
+            shot = ctx.deps.artifact_root / f"check_ocr_{ts}.png"
+            ctx.deps.adb.screencap_png(shot)
+            bboxes = extract_text_with_bbox(shot, device_w=sw, device_h=sh)
+            if not bboxes:
+                return "[OCR checkbox] OCR found no text (fallback unavailable)"
+            match = _find_matching_terms_bbox(bboxes)
+            if match is None:
+                return "[OCR checkbox] No matching terms text found. Try report_flow_done if stuck."
+            base_x, cy, ch = match
+            ctx.deps.run_state.checkbox_bbox_cache = (base_x, cy, ch)
+            cx = base_x - step * _STEP_PX
+        else:
+            base_x, cy, ch = ctx.deps.run_state.checkbox_bbox_cache
+            cx = base_x - step * _STEP_PX
+
+        if cx < 0 or cx >= sw or cy < 0 or cy >= sh:
+            ctx.deps.run_state.checkbox_bbox_cache = None
+            return (
+                f"[OCR checkbox] step={step} out of bounds (cx={cx}, sw={sw}) "
+                "- all steps exhausted, checkbox not found."
+            )
+        return f"[OCR checkbox] step={step} target=({cx},{cy})"
+        return None
 
     @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def dismiss_overlay(

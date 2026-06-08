@@ -252,6 +252,83 @@ class OcrLine:
     text: str
 
 
+@dataclass(frozen=True)
+class OcrBbox:
+    text: str
+    cx: int
+    cy: int
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+def _v3_to_bboxes(data, *, scale_x: float, scale_y: float) -> list[OcrBbox]:
+    polys = data.get("rec_polys") or data.get("dt_polys") or []
+    texts = data.get("rec_texts") or []
+    result: list[OcrBbox] = []
+    for i, text in enumerate(texts):
+        if not str(text).strip():
+            continue
+        poly = polys[i] if i < len(polys) else None
+        if poly is None:
+            continue
+        xs = [float(p[0]) * scale_x for p in poly]
+        ys = [float(p[1]) * scale_y for p in poly]
+        if not xs:
+            continue
+        x1, y1, x2, y2 = int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        result.append(OcrBbox(text=str(text), cx=cx, cy=cy, x1=x1, y1=y1, x2=x2, y2=y2))
+    return result
+
+
+def _v2_to_bboxes(result, *, scale_x: float, scale_y: float) -> list[OcrBbox]:
+    if not result or not result[0]:
+        return []
+    bboxes: list[OcrBbox] = []
+    for line in result[0]:
+        box, (text, _score) = line
+        xs = [float(p[0]) * scale_x for p in box]
+        ys = [float(p[1]) * scale_y for p in box]
+        if not xs:
+            continue
+        x1, y1, x2, y2 = int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        bboxes.append(OcrBbox(text=str(text), cx=cx, cy=cy, x1=x1, y1=y1, x2=x2, y2=y2))
+    return bboxes
+
+
+def extract_text_with_bbox(
+    image_path: Path | str,
+    *,
+    device_w: int | None = None,
+    device_h: int | None = None,
+) -> list[OcrBbox]:
+    src = Path(image_path)
+    ocr = get_ocr_instance()
+    prepared = _prepare_image_for_ocr(src, device_w=device_w, device_h=device_h)
+    infer_path = str(prepared.path)
+    sx, sy = prepared.scale_x, prepared.scale_y
+    try:
+        if _PADDLEOCR_V3:
+            results = ocr.predict(infer_path)
+            bboxes: list[OcrBbox] = []
+            for item in results or []:
+                bboxes.extend(_v3_to_bboxes(item, scale_x=sx, scale_y=sy))
+        else:
+            bboxes = _v2_to_bboxes(ocr.ocr(infer_path, cls=False), scale_x=sx, scale_y=sy)
+        return bboxes
+    except Exception:
+        return []
+    finally:
+        if prepared.temp_path is not None and prepared.temp_path.is_file():
+            try:
+                prepared.temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def is_screencap_mostly_black(
     image_path: Path | str,
     *,
