@@ -80,6 +80,78 @@ graph TD
 
 ---
 
+## 批跑与多设备架构
+
+`main.py` → `run_orchestrator()` **统一走批跑入口**（`batch_runner.run_batch_orchestrator`）：`apks.txt` 一条 URL 也是单任务批跑，多条 URL 自动多任务。不再依赖 `settings.yaml` 的 `adb.serial` 指定设备。
+
+```mermaid
+flowchart TD
+  apks[apk_cache/apks.txt 或缓存 APK] --> resolve[resolve_batch_urls]
+  resolve --> lock[TaskQueueLock<br/>run_outputs/.task_queue.lock]
+  lock --> queue[GlobalTaskQueue]
+  adb[adb devices 全部 state=device] --> workers
+  queue --> workers[每设备一个 worker 线程]
+  workers --> claim[claim_next 原子认领]
+  claim --> orch[GameTestOrchestrator<br/>TaskContext + TaskRuntime]
+  orch --> out[run_outputs/gid_task_id/]
+  workers --> manifest[batch_manifest.json]
+```
+
+| 组件 | 路径 | 职责 |
+|------|------|------|
+| `batch_urls.resolve_batch_urls` | `controllers/batch_urls.py` | 从 `apks.txt` 或 `apk_cache/*.apk` 解析任务列表 |
+| `GlobalTaskQueue` | `controllers/task_queue.py` | 内存任务队列：`claim_next` / `mark_finished` |
+| `TaskQueueLock` | 同上 | 文件锁，防止两个 runner 同时消费队列 |
+| `BatchManifest` | 同上 | `run_outputs/batch_{时间戳}/batch_manifest.json` 批汇总 |
+| `batch_runner` | `controllers/batch_runner.py` | 每设备 worker 线程 + 轮询 `join` |
+| `TaskContext` / `TaskRuntime` | `models/task_context.py`、`task_runtime.py` | 每任务独立 gid、包名、路径；**不写 settings.yaml** |
+| `TaskRuntimeRegistry` | `task_runtime.py` | 进程内 `task_id → TaskRuntime` 索引 |
+
+**多设备并发规则：**
+
+- `adb devices` 中每个 `device` 状态序列号启动 **一个 worker 线程**，从同一队列 `claim_next(serial)` 领取尚未认领的 URL。
+- 单条 URL 时仅一个 worker 实际跑任务；多 URL + 多设备时并行，任务数 > 设备数则先完成的设备继续领下一项。
+- 每任务独立 `task_id`、独立 `run_outputs/{gid}_{task_id}/`；批跑时 APK 下载到 `run_outputs/batch_{时间戳}/task_{index}/apk_cache/`（单任务缓存模式仍用全局 `apk_cache/`）。
+- **批跑不清空**整个 `packages/`，按 gid 精准清理 deploy 产物；单任务模式仍先清空 `packages/`。
+
+**Ctrl+C 与批跑：** worker 收到停止请求后不再 `claim_next`；当前任务标记失败（`result_code=130`）；`batch_manifest.json` 记录未完成项。详见下文「SIGINT 级联停止」。
+
+---
+
+## SIGINT 级联停止（Ctrl+C）
+
+进程级停止令牌 `ShutdownContext`（`services/shutdown.py`）在 `main.py` 通过 `install_signal_handlers()` 注册 **SIGINT / SIGTERM**：
+
+| 行为 | 说明 |
+|------|------|
+| **第一次 Ctrl+C** | 请求优雅停止：停止接新批跑任务、取消当前 attempt、终止 `deploy.sh` 子进程树 |
+| **第二次 Ctrl+C** | 强制停止，进程以退出码 **130** 结束 |
+
+```mermaid
+flowchart TD
+  sig[Ctrl+C] --> ctx[ShutdownContext]
+  ctx --> batch[BatchRunner 停止 claim_next]
+  ctx --> deploy[DeployRunner taskkill 子进程树]
+  ctx --> orch[Orchestrator shutdown_watcher]
+  orch --> stop[AttemptContext.stop_all]
+  stop --> lm[LogMonitor 结束 logcat]
+  stop --> ex[Executor 长等待工具 abort]
+  orch --> no_retry[跳过 AI Modify / 重试]
+```
+
+| 模块 | 行为 |
+|------|------|
+| `batch_runner` | `join(timeout=0.5)` 轮询；worker 捕获 `ShutdownRequested` |
+| `deploy_runner` + `subprocess_tree` | `Popen` 轮询 + Windows `taskkill /T`；**实时 `[deploy]` 日志**（见下） |
+| `orchestrator` | 各阶段 `_check_shutdown()`；并行阶段 `shutdown_watcher` 设置 `stop_all` |
+| `retry_controller` / `_on_attempt_failure` | 中断时不进入 E2 Modify |
+| `run_context.should_stop_executor` | 同时检查 `stop_all` 与全局 shutdown |
+| `adb_service.wait_seconds`、executor `wait_for_*` | 分段 sleep / 轮询，可中断 |
+
+**deploy 实时输出：** `deploy_runner` 对 `deploy.sh` 开启 `stream_output`，控制台可见 `[deploy]` 前缀的 build / inject / adb install 进度；`deploy.sh` 内 inject 与 install 使用 `tee`，避免长时间无输出（大 APK inject 仍可能需数分钟，属正常）。
+
+---
+
 ## 成功判定（并行阶段）
 
 **`result.json` 中 `success: true` 仅当：** 并行阶段无错误 + **`check_in_game`** 连续确认 + 正常退出观察完成。
@@ -170,7 +242,7 @@ flowchart LR
 
 预处理阶段工作流（`apk_resolver` + `Preprocessor`）：
 
-1. 若 `apk_cache/apks.txt` 含 **多条**有效 URL → **自动启用批跑**：全局任务队列 + `adb devices` 中所有 `device` 设备并发认领（忽略 `settings.yaml` 的 `adb.serial`）；每条 URL 独立 `task_id`、独立 `apk_cache`、独立 `run_outputs/{gid}_{task_id}/`
+1. **统一批跑入口**：`apks.txt` 每条有效 URL 对应一个任务（仅 1 条亦为单任务批跑）；`GlobalTaskQueue` + `adb devices` 中所有 `device` 设备并发认领（**忽略** `settings.yaml` 的 `adb.serial`）；每条 URL 独立 `task_id`、独立缓存目录、独立 `run_outputs/{gid}_{task_id}/`
 2. 若仅 **一条** URL（单任务）→ 取第一个有效 URL 下载到 `apk_cache/`；下载失败则尝试使用缓存中已有 `*.apk`
 3. 若无 `apks.txt` 但 `apk_cache/` 已有 `*.apk` → 直接使用（支持手动放入 APK，跳过下载）
 4. 单任务模式下多个 APK 并存时取排序后第一个并打告警
@@ -187,7 +259,7 @@ flowchart LR
 | 状态                 | 目录内容                             |
 | ------------------ | -------------------------------- |
 | **新任务开始（单任务）** | **先清空** `packages/` → 预处理放入原包 → 从 APK 同步 `package_name` → **再**卸载设备上该包 |
-| **批跑任务** | **不清空**整个 `packages/`；deploy 输出 `packages/{gid}_gameturbo.apk`，合并配置 `.gameturbo_merged_{gid}.json`；任务结束按 gid 精准清理 |
+| **批跑任务** | **不清空**整个 `packages/`；deploy 输出 `packages/{gid}_gameturbo.apk`；合并配置写入 **`artifacts/retry_*`/.gameturbo_merged_{gid}.json`**（不长期堆积在 `GameTurbo-Native/`）；任务结束按 gid 精准清理 |
 | **初始化前**           | **仅 1 个**原包 APK（文件名前缀为 `gid`）    |
 | `**deploy.sh` 之后** | 原包 + `game_gameturbo.apk` + 签名文件 |
 | **每轮尝试结束（仍重试）**    | 删除 `game_gameturbo`*，**保留原包**    |
@@ -204,7 +276,7 @@ flowchart LR
 
 | 文件 | 说明 |
 |------|------|
-| `.gameturbo_merged.json` | deploy 合并配置副本（**成功依据**，须已 `check_in_game`） |
+| `.gameturbo_merged_{gid}.json` 或同名副本 | deploy 合并配置（**成功依据**，须已 `check_in_game`）；deploy 阶段先落在 `artifacts/retry_*`，成功时复制到本目录 |
 | `result.json` | `success`、`winning_retry`、`total_attempts`、`final_logs`、`artifacts_cleaned` 等 |
 | `final_logs.log` | **仅执行过程**：按轮合并 process / pipeline / deploy / gameturbo + audit 时间线（无失败报告 Markdown） |
 | `execution_manifest.json` | 各轮 `logs/`、`reports/` 路径与文件大小索引 |
@@ -537,7 +609,7 @@ echo "https://cdn.example.com/game_1.2.3.apk" > apk_cache/apks.txt
 
 单任务：`apk_resolver` 解析顺序为 `apks.txt` 首条 URL 下载 → 失败则缓存已有 APK → 均无则预处理失败。
 
-批跑（`apks.txt` 多条 URL）：每任务按 URL 下载到 `run_outputs/batch_{时间戳}/task_{index}/apk_cache/`，批汇总见 `batch_manifest.json`；任一任务失败则进程退出码为 1。
+批跑（`apks.txt` 多条 URL）：每任务按 URL 下载到 `run_outputs/batch_{时间戳}/task_{index}/apk_cache/`，批汇总见 `batch_manifest.json`；多设备时各 worker 从全局队列认领；任一任务失败则进程退出码为 **1**，用户 Ctrl+C 为 **130**。
 
 ### 第五步：运行
 
@@ -576,9 +648,10 @@ python -m pytest tests/ -q
 
 | 退出码   | 含义            | 产出                                                      |
 | ----- | ------------- | ------------------------------------------------------- |
-| **0** | 全部通过（须 check_in_game） | `run_outputs/{gid}_{task_id}/.gameturbo_merged.json` |
+| **0** | 全部通过（须 check_in_game） | `run_outputs/{gid}_{task_id}/.gameturbo_merged_{gid}.json`（或合并配置副本） |
 | **1** | 失败（耗尽重试或不可恢复） | `run_outputs/{gid}_{task_id}/failure_report.md`         |
 | **2** | 配置文件错误        | 控制台报错详情                                                 |
+| **130** | 用户中断（SIGINT / Ctrl+C） | `batch_manifest.json` 或任务 `result.json` 标记未完成；`deploy.log` 含已捕获输出 |
 
 
 #### 日志产出
@@ -599,6 +672,9 @@ run_outputs/{gid}_{task_id}/
 └── failure_report.md
 
 artifacts/retry_1_*/             # 任务结束后删除
+├── .gameturbo_merged_{gid}.json # deploy 合并配置（每轮 retry；成功时复制到 run_outputs）
+├── deploy.log                   # deploy.sh 全量输出（含中断时 snapshot）
+├── install_monitor/             # 小米等安装弹窗监控截图
 ├── executor/
 │   ├── conversation_history.json
 │   ├── session_memory.json
@@ -618,7 +694,7 @@ artifacts/retry_1_*/             # 任务结束后删除
 
 ```
 game_agent/
-├── main.py                          # CLI 入口
+├── main.py                          # CLI 入口 + SIGINT/SIGTERM（install_signal_handlers）
 ├── paths.py                         # 全局路径常量（REPO_ROOT、APK_CACHE_DIR 等）
 ├── __init__.py / __main__.py        # 包声明与入口
 │
@@ -628,7 +704,11 @@ game_agent/
 │
 ├── controllers/                     # C: 编排控制（流水线阶段）
 │   ├── orchestrator.py              # GameTestOrchestrator — 主编排 + retry 循环
+│   ├── batch_runner.py              # 批跑入口：多设备 worker + shutdown 轮询 join
+│   ├── batch_urls.py                # apks.txt / apk_cache → 任务 URL 列表
+│   ├── task_queue.py                # GlobalTaskQueue、BatchManifest、TaskQueueLock
 │   ├── parallel_phase_policy.py     # 并行阶段超时 vs 进游戏成功信号判定（可单测）
+│   ├── network_anomaly_coordinator.py  # 日志+画面双通道网络异常佐证
 │   ├── pre_controller.py            # PreprocessingController — 预处理（下载+ABI剥离）
 │   ├── executor_controller.py       # ExecutorFlowController — OCR+AI + check_in_game
 │   ├── session_controller.py        # SessionCoordinator — 进程 crash/重启监控
@@ -638,7 +718,9 @@ game_agent/
 ├── models/                          # M: Pydantic 数据模型
 │   ├── settings.py                  # 全量配置（AppConfig + 各子段模型）
 │   ├── run_state.py                 # RunState — 跨轮次运行时状态
-│   ├── run_failure.py               # E1/E2 错误码、classify_failure
+│   ├── task_context.py              # TaskContext — 批跑任务封装（TaskRuntime）
+│   ├── task_runtime.py              # TaskRuntime + TaskRuntimeRegistry
+│   ├── run_failure.py               # E1/E2 错误码、classify_failure（含 ShutdownRequested）
 │   ├── pipeline_phase.py            # PipelinePhase — 流水线阶段枚举
 │   ├── game_entry_judgment.py       # GameEntryJudgment — 进入游戏判定结果
 │   ├── gameturbo_config.py          # GameTurboConfigPatch — AI 配置修改补丁
@@ -674,8 +756,14 @@ game_agent/
 │   │   └── qwen.py                  # Qwen 多模态
 │   ├── llm_transcript.py            # LLM 消息格式化（控制台输出）
 │   ├── vision_probe.py              # 多模态启动探针
-│   ├── deploy_runner.py             # deploy.sh + 设备安装监控线程 + pm 校验
+│   ├── deploy_runner.py             # deploy.sh 流式输出 + 可中断 Popen + 安装监控
+│   ├── deploy_build_lock.py         # deploy/cmake 跨进程文件锁
+│   ├── subprocess_tree.py           # Popen 轮询、taskkill 子进程树、stdout 实时 tee
+│   ├── shutdown.py                  # ShutdownContext、SIGINT/SIGTERM、ShutdownRequested
+│   ├── adb_devices.py               # adb devices 枚举（批跑多设备）
 │   ├── install_monitor/             # 小米/三星/vivo 安装拦截 OCR/u2 策略
+│   ├── gameturbo_log_health.py      # GameTurbo 日志网络健康（双通道）
+│   ├── screen_download_health.py    # 画面下载进度健康（双通道）
 │   ├── gameturbo_log_anomaly.py     # logcat 高置信故障行判定
 │   ├── checkbox_locator.py          # 隐私协议 checkbox：OCR 行聚合 + 左推坐标
 │   ├── vision_tools.py              # analyze_screen（按需画面分析）
@@ -751,7 +839,7 @@ apk_cache/                           # APK 下载缓存
 tests/                               # pytest 单元测试（错误分类、预处理、checkbox 左推、安装监控等）
 
 GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
-├── .gameturbo_merged.json           # deploy 产出合并配置
+├── .gameturbo_merged_{gid}.json     # 旧版/兼容：deploy 合并配置（现默认写入 artifacts/retry_*）
 ├── games/                           # 游戏 JSON 配置
 │   └── template.json                # 配置模板
 ├── client/android/
@@ -846,7 +934,19 @@ A：SessionCoordinator 会归档旧段为 `gameturbo_session_*.log`，清空 log
 A：调低 `session_absent_threshold_s`（如 0.8）与 `session_poll_interval_s`；执行者在关键阶段多调用 `check_in_game`。
 
 **Q：成功交付哪个 JSON？**  
-A：`run_outputs/{gid}_{task_id}/.gameturbo_merged.json`（来自 `GameTurbo-Native/.gameturbo_merged.json`），不是 `games/gameturbo_{gid}_*.json` 源文件。
+A：`run_outputs/{gid}_{task_id}/` 下的 deploy 合并配置副本（如 `.gameturbo_merged_{gid}.json`），来源于当轮 `artifacts/retry_*` 中 deploy 产出，**不是** `games/gameturbo_{gid}_*.json` 源文件。
+
+**Q：Ctrl+C 后进程很久才退出？**  
+A：现版有 SIGINT 级联：`deploy.sh` 子进程树会被 `taskkill /T` 终止，批跑 worker 停止领新任务，并行阶段 `shutdown_watcher` 取消 logcat/executor。若仍卡住，再按一次 Ctrl+C 强制退出（130）。
+
+**Q：deploy 很久没日志是不是卡死？**  
+A：大体积 APK（数百 MB）的 **inject** 可能需数分钟。现版控制台会打 `[deploy]` 实时输出；若停在 `[2/4] Injecting APK...` 较久，多半仍在 inject，可看 `artifacts/retry_*/deploy.log`。
+
+**Q：多设备怎么配 serial？**  
+A：批跑模式**忽略** `settings.yaml` 的 `adb.serial`，自动使用 `adb devices` 全部在线设备。单设备插线即跑；多设备并行领 `apks.txt` 中不同 URL。
+
+**Q：两个终端同时跑 `./run.sh`？**  
+A：第二个会因 `run_outputs/.task_queue.lock` 报错，避免重复消费同一批任务。
 
 **Q：tunnel closed 算失败吗？**  
 A：不一定，见 [gameturbo_log_baseline_skill.md](skills/gameturbo_log_baseline_skill.md)。
@@ -879,7 +979,7 @@ python -m pytest tests/ -q
 ruff check game_agent tests
 ```
 
-覆盖：错误分类（E1/E2）、`apk_resolver`、ABI 剥离、`checkbox_locator` 前缀锚点与半字左推、`parallel_phase_policy` 超时判定、`install_monitor` OCR/品牌匹配、log 异常判定、路径解析等（无需真机）。
+覆盖：错误分类（E1/E2）、`apk_resolver`、ABI 剥离、`checkbox_locator` 前缀锚点与半字左推、`parallel_phase_policy` 超时判定、`install_monitor` OCR/品牌匹配、log 异常判定、路径解析、`ShutdownContext` / deploy 中断、`batch` 停止认领、`subprocess_tree` 流式输出等（无需真机）。
 
 ---
 
