@@ -70,10 +70,6 @@ def main() -> int:
         data = json.loads(result_path.read_text(encoding="utf-8"))
         gid = str(data.get("gid", gid))
         task_id = str(data.get("task_id", task_id))
-    elif args.config.is_file():
-        cfg = load_app_config(args.config)
-        gid = (cfg.gameturbo.gid or "unknown").strip() or "unknown"
-
     attempt_records: list[tuple[int, Path]] = []
     for i, art in enumerate(args.artifacts, start=1):
         attempt_records.append((i, art.resolve()))

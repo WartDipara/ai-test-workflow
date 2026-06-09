@@ -4,6 +4,7 @@ import logging
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -326,6 +327,17 @@ class AdbService:
         r2 = self._run(["shell", "pgrep", "-f", pkg], timeout=10.0)
         return r2.returncode == 0 and bool((r2.stdout or "").strip())
 
-    def wait_seconds(self, seconds: float) -> str:
-        time.sleep(max(0.0, min(seconds, 60.0)))
+    def wait_seconds(
+        self,
+        seconds: float,
+        *,
+        should_abort: Callable[[], bool] | None = None,
+    ) -> str:
+        total = max(0.0, min(seconds, 60.0))
+        deadline = time.monotonic() + total
+        while time.monotonic() < deadline:
+            if should_abort and should_abort():
+                waited = total - (deadline - time.monotonic())
+                return f"Wait aborted after {max(0.0, waited):.1f}s"
+            time.sleep(min(0.25, deadline - time.monotonic()))
         return f"Waited {seconds:.1f}s"

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from game_agent.modules.preprocessing.apk_resolver import (
     resolve_apk_for_preprocess,
+    resolve_apk_url,
     resolve_failure_message,
 )
 from game_agent.modules.preprocessing.preprocessor import Preprocessor, PreprocessResult
@@ -30,12 +31,21 @@ class PreprocessingController:
             preserved_abis=preserved_abis,
         )
 
-    def run(self) -> PreprocessResult:
-        resolved = resolve_apk_for_preprocess(self._cache_dir)
-        if resolved is None:
-            return PreprocessResult(
-                ok=False,
-                message=resolve_failure_message(self._cache_dir),
-            )
+    def run(self, *, apk_url: str | None = None) -> PreprocessResult:
+        if apk_url:
+            resolved = resolve_apk_url(apk_url, self._cache_dir)
+            if resolved is None:
+                return PreprocessResult(
+                    ok=False,
+                    message=f"APK 下载失败: {apk_url}",
+                )
+        else:
+            # 无 URL：从任务 cache（或全局 apk_cache）读取已有 APK
+            resolved = resolve_apk_for_preprocess(self._cache_dir)
+            if resolved is None:
+                return PreprocessResult(
+                    ok=False,
+                    message=resolve_failure_message(self._cache_dir),
+                )
 
         return self._preprocessor.run(apk_path=resolved.path)

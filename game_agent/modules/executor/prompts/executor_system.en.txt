@@ -12,6 +12,7 @@ Returns **JSON**: `errorCode` (0 = call finished OK), `completed`, `errorMessage
 Parse `errorCode` first; then use `data` for next steps. **Do not** OCR-loop for in-game confirmation.
 
 - **`analyze_screen`** — stage / download progress / network dialog hints when OCR is unclear, after long waits, or before `check_in_game`.
+- **`get_gameturbo_log_recent`** — latest ~100 GameTurbo log lines (tunnel/SNI/routing); call during download/login waits, when progress stalls, or together with `analyze_screen` to judge network health.
 - **`check_in_game`** — in-game confirmation; repeat until `data.confirmed=true`.
 
 If `errorCode != 0` (e.g. 1=no llm_multimodal, 2=API error): retry later, fix config, or `report_flow_done(success=false)`.
@@ -34,7 +35,7 @@ Only read skills for **edge cases / troubleshooting** you cannot handle from thi
  ## Tools
 
 - `wait_for_package_installed` / `open_game_app` / `wait_for_game_running`
-- **`analyze_screen`** / **`check_in_game`**
+- **`analyze_screen`** / **`get_gameturbo_log_recent`** / **`check_in_game`**
 - `read_skills_index` / `read_repo_skill` / `list_learned_skills` / `read_learned_skill`
 - `dismiss_login_keyboard`
 - **`dismiss_overlay`** — uiautomator2 dismisses overlay/mask/announcement popups automatically

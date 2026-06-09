@@ -52,6 +52,8 @@ Tasks:
    wrong account/password, login failed, captcha, account frozen; any account/verification/real-name errors;
    server picker, queue, normal loading; privacy/terms/announcement/event popups.
 3. If resource_download, extract progress percent if visible.
+4. **Ignore top-left GameTurbo acceleration overlay** (speed/MB/s/Mbps, 加速, 网速角标) — it is NOT download progress.
+   Only count center/bottom resource download bar or explicit download percentage.
 
 Return valid JSON only (no markdown fence):
 {{

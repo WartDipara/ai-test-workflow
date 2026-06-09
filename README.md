@@ -170,11 +170,12 @@ flowchart LR
 
 预处理阶段工作流（`apk_resolver` + `Preprocessor`）：
 
-1. 若存在 `apk_cache/apks.txt` → 取第一个有效 URL 下载到 `apk_cache/`；下载失败则尝试使用缓存中已有 `*.apk`
-2. 若无 `apks.txt` 但 `apk_cache/` 已有 `*.apk` → 直接使用（支持手动放入 APK，跳过下载）
-3. 多个 APK 并存时取排序后第一个并打告警
-4. 按 `preprocessing.preserved_abis` 检查 `lib/`，移除非保留 ABI（仅 ZIP 条目过滤，不解压重压）
-5. 将处理后的 APK **移动**至 `packages/`；若产生剥离副本，删除 `apk_cache/` 中的原始 APK
+1. 若 `apk_cache/apks.txt` 含 **多条**有效 URL → **自动启用批跑**：全局任务队列 + `adb devices` 中所有 `device` 设备并发认领（忽略 `settings.yaml` 的 `adb.serial`）；每条 URL 独立 `task_id`、独立 `apk_cache`、独立 `run_outputs/{gid}_{task_id}/`
+2. 若仅 **一条** URL（单任务）→ 取第一个有效 URL 下载到 `apk_cache/`；下载失败则尝试使用缓存中已有 `*.apk`
+3. 若无 `apks.txt` 但 `apk_cache/` 已有 `*.apk` → 直接使用（支持手动放入 APK，跳过下载）
+4. 单任务模式下多个 APK 并存时取排序后第一个并打告警
+5. 按 `preprocessing.preserved_abis` 检查 `lib/`，移除非保留 ABI（仅 ZIP 条目过滤，不解压重压）
+6. 将处理后的 APK **移动**至 `packages/`；若产生剥离副本，删除 `apk_cache/` 中的原始 APK
 
 > **注意**：APK 是从 `apk_cache/` 移动到 `packages/` 的（不是复制），处理完成后 `apk_cache/` 中不应残留 APK 文件。
 
@@ -185,7 +186,8 @@ flowchart LR
 
 | 状态                 | 目录内容                             |
 | ------------------ | -------------------------------- |
-| **新任务开始（run.sh）** | **先清空** `packages/` → 预处理放入原包 → 从 APK 同步 `package_name` → **再**卸载设备上该包（避免用旧配置清错包） |
+| **新任务开始（单任务）** | **先清空** `packages/` → 预处理放入原包 → 从 APK 同步 `package_name` → **再**卸载设备上该包 |
+| **批跑任务** | **不清空**整个 `packages/`；deploy 输出 `packages/{gid}_gameturbo.apk`，合并配置 `.gameturbo_merged_{gid}.json`；任务结束按 gid 精准清理 |
 | **初始化前**           | **仅 1 个**原包 APK（文件名前缀为 `gid`）    |
 | `**deploy.sh` 之后** | 原包 + `game_gameturbo.apk` + 签名文件 |
 | **每轮尝试结束（仍重试）**    | 删除 `game_gameturbo`*，**保留原包**    |
@@ -533,7 +535,9 @@ echo "https://cdn.example.com/game_1.2.3.apk" > apk_cache/apks.txt
 # 也可以不建 apks.txt，直接把 APK 放入 apk_cache/（apk_resolver 会走缓存 fallback）
 ```
 
-`apk_resolver` 解析顺序：`apks.txt` 下载 → 失败则缓存已有 APK → 均无则预处理失败并给出明确提示。
+单任务：`apk_resolver` 解析顺序为 `apks.txt` 首条 URL 下载 → 失败则缓存已有 APK → 均无则预处理失败。
+
+批跑（`apks.txt` 多条 URL）：每任务按 URL 下载到 `run_outputs/batch_{时间戳}/task_{index}/apk_cache/`，批汇总见 `batch_manifest.json`；任一任务失败则进程退出码为 1。
 
 ### 第五步：运行
 

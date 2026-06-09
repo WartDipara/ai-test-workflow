@@ -39,6 +39,7 @@ from game_agent.services.login_form_ocr import resolve_login_form_targets
 from game_agent.services.skill_catalog import read_login_flow_guide as load_login_flow_guide_text
 from game_agent.services.skill_catalog import read_repo_skill as load_repo_skill_text
 from game_agent.services.skill_catalog import read_skills_index as load_skills_index_text
+from game_agent.services.gameturbo_log import format_latest_gameturbo_log_for_agent
 from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.utils.ocr_util import (
     extract_text_with_bbox,
@@ -532,10 +533,16 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
     async def press_back(ctx: RunContext[ExecutorAgentDeps]) -> str:
         return ctx.deps.adb.press_back()
 
-    @t(kind=ToolKind.INSTANT, check_stopped=False)
+    @t(kind=ToolKind.WAIT)
     async def wait_seconds(ctx: RunContext[ExecutorAgentDeps], seconds: float) -> str:
+        from game_agent.modules.executor.tooling.waits import should_abort_executor
+
         seconds = max(0.5, min(float(seconds), 45.0))
-        return ctx.deps.adb.wait_seconds(seconds)
+        return await asyncio.to_thread(
+            ctx.deps.adb.wait_seconds,
+            seconds,
+            should_abort=lambda: should_abort_executor(ctx),
+        )
 
     @t(kind=ToolKind.WAIT)
     async def wait_for_game_running(
@@ -545,6 +552,26 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
     ) -> str:
         """Poll game.package_name process until present or timeout (milestone, not final success)."""
         return await execute_wait_for_game_running(ctx, summary, timeout_s)
+
+    @t(kind=ToolKind.INSTANT)
+    async def get_gameturbo_log_recent(
+        ctx: RunContext[ExecutorAgentDeps],
+        limit: int = 100,
+    ) -> str:
+        """
+        Return the latest GameTurbo log lines (default 100, newest at bottom).
+        Refreshes from device logcat before read. Use during download/login waits,
+        when progress looks stuck, or before check_in_game — cross-check with analyze_screen.
+        """
+        capped = max(10, min(int(limit), 200))
+        return await asyncio.to_thread(
+            format_latest_gameturbo_log_for_agent,
+            ctx.deps.artifact_root,
+            ctx.deps.adb,
+            limit=capped,
+            refresh_from_device=True,
+            include_health_hint=True,
+        )
 
     @t(kind=ToolKind.INSTANT)
     async def analyze_screen(

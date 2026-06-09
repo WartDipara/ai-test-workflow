@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from game_agent.modules.preprocessing.assets_preparer import download_apk_from_file
+from game_agent.modules.preprocessing.assets_preparer import (
+    download_apk,
+    download_apk_from_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,21 @@ class ResolvedApk:
 def list_cache_apks(cache_dir: Path) -> list[Path]:
     cache_dir.mkdir(parents=True, exist_ok=True)
     return sorted(p for p in cache_dir.glob("*.apk") if p.is_file())
+
+
+def resolve_apk_url(
+    url: str,
+    cache_dir: Path,
+    *,
+    timeout_s: float = 300.0,
+) -> ResolvedApk | None:
+    """按指定 URL 下载 APK 到独立 cache 目录。"""
+    cache_dir = cache_dir.resolve()
+    downloaded = download_apk(url, cache_dir, timeout_s=timeout_s)
+    if downloaded is None:
+        return None
+    logger.info("预处理 APK 来源: URL 下载 -> %s", downloaded.name)
+    return ResolvedApk(downloaded.resolve(), ApkSourceKind.DOWNLOADED)
 
 
 def resolve_apk_for_preprocess(cache_dir: Path) -> ResolvedApk | None:

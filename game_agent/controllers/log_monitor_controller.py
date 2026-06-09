@@ -132,23 +132,48 @@ class LogMonitor:
                 if line_count <= 3 or line_count % 20 == 0:
                     logger.info("[LogMonitor] logcat #%d: %s", line_count, line[:200])
                 if is_fatal_gameturbo_log_line(line):
-                    if "idle shutdown" in line.lower() and sni_count == 0:
-                        logger.warning("[LogMonitor] 闲置关闭 + 零 SNI (GameTurbo 未生效): %s", line)
+                    dual_channel = getattr(
+                        self.app_config,
+                        "network_anomaly",
+                        None,
+                    )
+                    defer = bool(
+                        dual_channel is not None and getattr(dual_channel, "enabled", False),
+                    )
+                    if not defer:
+                        if "idle shutdown" in line.lower() and sni_count == 0:
+                            logger.warning(
+                                "[LogMonitor] 闲置关闭 + 零 SNI (GameTurbo 未生效): %s",
+                                line,
+                            )
+                            if self.audit is not None:
+                                self.audit.log_observer(
+                                    kind="log_anomaly",
+                                    message=line,
+                                    extra={"marker": "no_sni", "sni_count": 0},
+                                )
+                            return (
+                                "Log anomaly detected (no SNI traffic): "
+                                f"idle shutdown, {line[:200]}"
+                            )
+                        logger.warning("[LogMonitor] 检测到异常日志: %s", line)
                         if self.audit is not None:
                             self.audit.log_observer(
                                 kind="log_anomaly",
                                 message=line,
-                                extra={"marker": "no_sni", "sni_count": 0},
+                                extra={"marker": "matched"},
                             )
-                        return f"Log anomaly detected (no SNI traffic): idle shutdown, {line[:200]}"
-                    logger.warning("[LogMonitor] 检测到异常日志: %s", line)
+                        return f"Log anomaly detected: {line}"
+                    logger.warning(
+                        "[LogMonitor] 高置信日志标记（由双通道协调器佐证）: %s",
+                        line[:200],
+                    )
                     if self.audit is not None:
                         self.audit.log_observer(
-                            kind="log_anomaly",
-                            message=line,
-                            extra={"marker": "matched"},
+                            kind="log_line_marker",
+                            message=line[:500],
+                            extra={"marker": "fatal_deferred"},
                         )
-                    return f"Log anomaly detected: {line}"
         finally:
             if process.returncode is None:
                 process.terminate()

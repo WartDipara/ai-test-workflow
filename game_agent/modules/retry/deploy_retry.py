@@ -8,20 +8,18 @@ from pathlib import Path
 from game_agent.exceptions import DeployPhaseError
 from game_agent.models.deploy_recovery import DeployRecoveryPatch
 from game_agent.models.gameturbo_config import GameTurboConfigPatch
-from game_agent.models.settings import AppConfig
+from game_agent.models.task_config import TaskConfig
 from game_agent.modules.retry.analysis import AnalysisAgent
 from game_agent.services.deploy_runner import DeployResult, run_deploy
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.utils.apk_util import update_settings_yaml_from_apk
-from game_agent.utils.gameturbo_bootstrap import output_apk_path
+from game_agent.utils.gameturbo_bootstrap import merged_config_path, output_apk_name
 from game_agent.utils.gameturbo_config_apply import (
     ConfigApplyResult,
     apply_gameturbo_config_patch,
 )
 
 logger = logging.getLogger(__name__)
-
 
 def _read_deploy_log_tail(log_path: Path | None, *, limit: int = 24_000) -> str:
     if log_path is None or not log_path.is_file():
@@ -74,18 +72,15 @@ def apply_deploy_recovery_patch(
 
 
 async def run_deploy_with_ai_retry(
-    app_config: AppConfig,
+    app_config: TaskConfig,
     *,
     gid: str,
     game_config_path: Path,
-    settings_path: Path,
     artifact_root: Path | None,
     audit: RunAuditLogger | None = None,
     phase: str = "init",
 ) -> DeployResult:
-    """
-    执行 deploy.sh；失败时读 deploy.log → AI 恢复建议 → 改配置或仅重试，直至成功或耗尽次数。
-    """
+    """执行 deploy.sh；失败时读 deploy.log → AI 恢复建议 → 改配置或仅重试。"""
     max_attempts = app_config.gameturbo.deploy_max_ai_retries
     analysis = AnalysisAgent(app_config.llm, deepseek=app_config.deepseek)
 
@@ -112,7 +107,9 @@ async def run_deploy_with_ai_retry(
                     artifact_root=artifact_root,
                     log_filename=log_name,
                     timeout_s=app_config.gameturbo.deploy_timeout_s,
-                    expected_package=app_config.game.package_name,
+                    expected_package=app_config.runtime.package_name,
+                    output_apk=output_apk_name(gid),
+                    merged_config_output=merged_config_path(gid),
                 )
                 rec.ok(returncode=0, attempt=attempt)
                 if audit is not None:
@@ -123,7 +120,6 @@ async def run_deploy_with_ai_retry(
                         attempt=attempt,
                         log_path=str(result.log_path or ""),
                     )
-                update_settings_yaml_from_apk(settings_path, output_apk_path())
                 return result
             except RuntimeError as e:
                 last_error = str(e)
@@ -199,8 +195,7 @@ async def run_deploy_with_ai_retry(
 
 
 def run_deploy_with_ai_retry_sync(
-    app_config: AppConfig,
-    settings_path: Path,
+    app_config: TaskConfig,
     *,
     gid: str,
     game_config_path: Path,
@@ -213,7 +208,6 @@ def run_deploy_with_ai_retry_sync(
             app_config,
             gid=gid,
             game_config_path=game_config_path,
-            settings_path=settings_path,
             artifact_root=artifact_root,
             audit=audit,
             phase=phase,

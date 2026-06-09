@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from game_agent.models.pipeline_phase import PipelinePhase
-from game_agent.models.settings import AppConfig
+from game_agent.models.task_config import TaskConfig
 from game_agent.services.adb_service import AdbService
 from game_agent.services.device_workspace_cleanup import remove_leftover_game_installations
 from game_agent.services.gameturbo_log import (
@@ -27,7 +27,7 @@ class FailureCleanup:
     """失败收尾：导出 GameTurbo 日志、结束游戏进程、卸载游戏。"""
 
     adb: AdbService
-    app_config: AppConfig
+    app_config: TaskConfig
     artifact_root: Path | None
     audit: RunAuditLogger | None = None
 
@@ -39,8 +39,8 @@ class FailureCleanup:
                 PipelinePhase.CLEANUP.value,
                 "开始失败收尾",
                 reason=reason[:2000],
-                gid=self.app_config.gameturbo.gid,
-                game_config_path=str(self.app_config.gameturbo.game_config_path or ""),
+                gid=self.app_config.runtime.gid,
+                game_config_path=str(self.app_config.runtime.game_config_path or ""),
             )
 
         with trace_operation("cleanup", "export_gameturbo_log") as rec:
@@ -105,7 +105,7 @@ class FailureCleanup:
                         error=str(e)[:500],
                     )
 
-        game_pkg = (cfg.game.package_name or "").strip()
+        game_pkg = (cfg.runtime.package_name or "").strip()
         packages = [game_pkg] if game_pkg else []
         with trace_operation("cleanup", "uninstall_game_if_present", packages=packages) as rec:
             results = remove_leftover_game_installations(self.adb, packages)
@@ -119,7 +119,7 @@ class FailureCleanup:
                     package=game_pkg,
                 )
             else:
-                logger.warning("game.package_name 为空，跳过卸载")
+                logger.warning("TaskRuntime.package_name 为空，跳过卸载")
                 self.audit.log_phase(PipelinePhase.CLEANUP.value, "跳过卸载（包名为空）")
 
         if self.audit is not None:

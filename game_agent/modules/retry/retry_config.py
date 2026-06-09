@@ -7,7 +7,7 @@ from pathlib import Path
 from game_agent.exceptions import DeployPhaseError
 from game_agent.models.gameturbo_config import GameTurboConfigPatch
 from game_agent.models.pipeline_phase import PipelinePhase
-from game_agent.models.settings import AppConfig
+from game_agent.models.task_config import TaskConfig
 from game_agent.modules.retry.analysis import AnalysisAgent
 from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry
 from game_agent.services.adb_service import AdbService
@@ -35,7 +35,7 @@ class RetryConfigHandler:
     """配置与重试阶段：读取域名 JSON、AI 报告、deploy（仅 retry_on_failure 时）。"""
 
     adb: AdbService
-    app_config: AppConfig
+    app_config: TaskConfig
     config_path: Path
     artifact_root: Path | None
     task_deliverable_root: Path | None = None
@@ -44,21 +44,19 @@ class RetryConfigHandler:
 
     async def run(self, retry_count: int, reason: str) -> None:
         logger.info("[RetryConfig] 配置与重试 (第 %d 次): %s", retry_count, reason[:200])
+        runtime = self.app_config.runtime
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,
                 "进入配置与重试",
                 reason=reason[:2000],
-                gid=self.app_config.gameturbo.gid,
-                game_config_path=str(self.app_config.gameturbo.game_config_path or ""),
+                gid=runtime.gid,
+                game_config_path=str(runtime.game_config_path or ""),
             )
-
-        gid = self.app_config.gameturbo.gid
-        game_config_path = self.app_config.gameturbo.game_config_path
-        if not gid or game_config_path is None:
-            raise RuntimeError("配置与重试阶段缺少 gameturbo.gid 或 gameturbo.game_config_path")
-        if not game_config_path.is_file():
-            raise RuntimeError(f"GameTurbo 游戏配置不存在: {game_config_path}")
+        runtime.require_gameturbo()
+        gid = runtime.gid
+        game_config_path = runtime.game_config_path
+        assert game_config_path is not None
 
         deliverable = self.task_deliverable_root
         blocked = self.blocked_stage_hint or infer_blocked_stage(reason=reason)
@@ -168,7 +166,6 @@ class RetryConfigHandler:
                     self.app_config,
                     gid=gid,
                     game_config_path=game_config_path,
-                    settings_path=self.config_path,
                     artifact_root=self.artifact_root,
                     audit=self.audit,
                     phase=PipelinePhase.MODIFY.value,
@@ -177,7 +174,7 @@ class RetryConfigHandler:
             except DeployPhaseError as e:
                 rec.fail(error=str(e)[:500])
                 raise
-        apk_path = output_apk_path()
+        apk_path = output_apk_path(gid)
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,

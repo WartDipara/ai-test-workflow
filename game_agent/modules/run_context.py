@@ -38,7 +38,14 @@ class AttemptContext:
             return self._fatal_reason
 
     def should_stop_executor(self) -> bool:
-        return self.stop_all.is_set()
+        if self.stop_all.is_set():
+            return True
+        try:
+            from game_agent.services.shutdown import is_shutdown_requested
+
+            return is_shutdown_requested()
+        except Exception:
+            return False
 
     def set_session_restarts(self, count: int) -> None:
         with self._lock:

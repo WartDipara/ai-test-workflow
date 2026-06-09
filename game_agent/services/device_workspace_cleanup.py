@@ -94,9 +94,9 @@ def prepare_device_for_new_task(
     adb: AdbService,
     game_package: str,
 ) -> list[DevicePackageCleanupResult]:
-    """新任务开始前：按 settings 中的 game.package_name 清理设备遗留安装。"""
+    """新任务开始前：按 TaskRuntime.package_name 清理设备遗留安装。"""
     pkg = (game_package or "").strip()
     if not pkg:
-        logger.info("game.package_name 为空，跳过设备遗留卸载")
+        logger.info("package_name 为空，跳过设备遗留卸载")
         return []
     return remove_leftover_game_installations(adb, [pkg])

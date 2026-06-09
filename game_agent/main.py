@@ -31,8 +31,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     from game_agent.controllers.orchestrator import run_orchestrator
+    from game_agent.services.shutdown import (
+        ShutdownRequested,
+        install_signal_handlers,
+        shutdown_exit_code,
+    )
 
-    return run_orchestrator(cfg_path)
+    try:
+        with install_signal_handlers():
+            return run_orchestrator(cfg_path)
+    except (KeyboardInterrupt, ShutdownRequested) as exc:
+        logging.getLogger(__name__).warning("用户中断: %s", exc)
+        return shutdown_exit_code(exc)
 
 
 if __name__ == "__main__":

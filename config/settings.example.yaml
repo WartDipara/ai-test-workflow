@@ -45,9 +45,7 @@ executor:
   credential_fill_retry_on_verify_fail: true
 
 game:
-  # 以下两项由启动时从 game_gameturbo.apk 自动覆写，无需手填
-  package_name: "com.example.testgame"
-  launch_activity: "com.example.testgame/.MainActivity"
+  # 包名/启动 Activity 由 TaskRuntime 从 APK 解析，勿写入本文件
   timeout_s: 1200.0
   launch_detect_timeout_s: 90.0
   launch_detect_poll_interval_s: 2.0
@@ -64,12 +62,7 @@ game:
   max_session_restarts: 0
 
 gameturbo:
-  # 前置处理会从 client/android/packages 里的唯一原包 APK 文件名前缀写入 gid。
-  gid: ""
-  # 前置处理会沿用或新建 GameTurbo-Native/games/gameturbo_<gid>_*.json 后写入。
-  game_config_path: ""
-  # 审计用：前置处理发现的原始 APK。
-  source_apk: ""
+  # gid / game_config_path / source_apk 由 TaskRuntime 按任务维护
   deploy_timeout_s: 900.0
   deploy_max_ai_retries: 3   # deploy 失败后 AI 读 deploy.log 并重试（含首次）的次数
   # 单次任务最终产出：run_outputs/{gid}_{task_id}/（成功为配置文件，失败为日志包）

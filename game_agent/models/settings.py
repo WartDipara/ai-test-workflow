@@ -140,14 +140,7 @@ class ExecutorSection(BaseModel):
         description="仅在收键盘且截屏非黑屏时再 OCR 找 Login；默认关（安全键盘下常失败）。",
     )
 class GameSection(BaseModel):
-    package_name: str = Field(
-        ...,
-        description="测试游戏包名；force-stop / uninstall / 前台校验使用。",
-    )
-    launch_activity: str = Field(
-        ...,
-        description="am start -n 的完整组件串；由 APK 自动写入，禁止 monkey 启动游戏。",
-    )
+    """游戏流程超时与判定参数；包名/Activity 由 TaskRuntime 管理。"""
     timeout_s: float = Field(300.0, description="并行监控的最大允许时间（秒），超时算作异常。")
     launch_detect_timeout_s: float = Field(
         90.0,
@@ -165,7 +158,7 @@ class GameSection(BaseModel):
         120.0,
         ge=10.0,
         le=600.0,
-        description="deploy 后等待设备上出现 game.package_name 的最长时间（秒）。",
+        description="deploy 后等待设备上出现目标包名的最长时间（秒）。",
     )
     package_install_poll_interval_s: float = Field(
         2.0,
@@ -214,37 +207,9 @@ class GameSection(BaseModel):
         description="单轮观察者允许的最大会话重启次数；0 表示不限制。",
     )
 
-    @model_validator(mode="after")
-    def _normalize_launch_component(self) -> GameSection:
-        package_name = self.package_name.strip()
-        launch_activity = self.launch_activity.strip()
-        if not package_name and not launch_activity:
-            return self
-        if package_name and not launch_activity:
-            raise ValueError("game.launch_activity 不能为空（已配置 package_name）")
-        if launch_activity and not package_name:
-            raise ValueError("game.package_name 不能为空（已配置 launch_activity）")
-        if "/" not in launch_activity:
-            launch_activity = f"{package_name}/{launch_activity}"
-        elif launch_activity.startswith("/"):
-            launch_activity = f"{package_name}{launch_activity}"
-        self.package_name = package_name
-        self.launch_activity = launch_activity
-        return self
-
-
 class GameTurboSection(BaseModel):
-    """GameTurbo 前置处理与重试阶段的运行上下文。"""
+    """GameTurbo deploy 静态参数；gid/路径由 TaskRuntime 管理。"""
 
-    gid: str = Field("", description="原包文件名前缀解析出的游戏 gid。")
-    game_config_path: Path | None = Field(
-        None,
-        description="当前轮次允许修改的 games/gameturbo_<gid>_*.json。",
-    )
-    source_apk: Path | None = Field(
-        None,
-        description="初始化时发现的原始游戏 APK。",
-    )
     deploy_timeout_s: float = Field(
         900.0,
         ge=60.0,
@@ -261,16 +226,6 @@ class GameTurboSection(BaseModel):
         Path("./run_outputs"),
         description="单次任务最终产出目录根路径，子目录为 {gid}_{task_id}。",
     )
-
-    @model_validator(mode="after")
-    def _normalize_blank_paths(self) -> GameTurboSection:
-        self.gid = self.gid.strip()
-        if self.game_config_path is not None and not str(self.game_config_path).strip():
-            self.game_config_path = None
-        if self.source_apk is not None and not str(self.source_apk).strip():
-            self.source_apk = None
-        return self
-
 
 class CredentialsSection(BaseModel):
     """游戏登录账号密码（独立 YAML，勿提交 git）。"""
@@ -301,6 +256,43 @@ class PreprocessingSection(BaseModel):
     )
 
 
+class NetworkAnomalySection(BaseModel):
+    """并行阶段日志/画面双通道网络异常监视（50-50 交叉佐证）。"""
+
+    enabled: bool = Field(
+        True,
+        description="为 true 时在并行阶段运行 NetworkAnomalyCoordinator。",
+    )
+    poll_interval_s: float = Field(
+        5.0,
+        ge=2.0,
+        le=30.0,
+        description="双通道轮询间隔（秒）。",
+    )
+    min_log_lines: int = Field(
+        15,
+        ge=5,
+        le=100,
+        description="日志软异常规则生效前至少需要的 GameTurbo 行数。",
+    )
+    download_progress_stall_s: float = Field(
+        90.0,
+        ge=30.0,
+        le=600.0,
+        description="资源下载进度/阶段不变多久视为画面通道 suspect。",
+    )
+    use_ocr_poll: bool = Field(
+        True,
+        description="画面通道是否独立 OCR 轮询（不依赖执行者 analyze_screen）。",
+    )
+    exclude_top_ratio: float = Field(
+        0.15,
+        ge=0.05,
+        le=0.35,
+        description="OCR 忽略画面上方比例（GameTurbo 加速角标区域）。",
+    )
+
+
 class ModulesSection(BaseModel):
     """流水线模块开关；便于单独测试各子系统。默认均为 true。"""
 
@@ -310,7 +302,7 @@ class ModulesSection(BaseModel):
     )
     log_monitor: bool = Field(
         True,
-        description="Monitor：从游戏启动并行监听 GameTurbo logcat；高置信异常 fail-fast。",
+        description="Monitor：并行采集 GameTurbo logcat，供双通道网络异常监视使用。",
     )
     retry_on_failure: bool = Field(
         True,
@@ -398,9 +390,18 @@ class AppConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_nested_fields(cls, data: Any) -> Any:
-        """将误写在 llm 下的厂商/观察者字段迁到独立段。"""
+        """迁移 YAML：剥离运行态字段，修正 llm 段历史嵌套。"""
         if not isinstance(data, dict):
             return data
+        game = data.get("game")
+        if isinstance(game, dict):
+            game.pop("package_name", None)
+            game.pop("launch_activity", None)
+        gameturbo = data.get("gameturbo")
+        if isinstance(gameturbo, dict):
+            gameturbo.pop("gid", None)
+            gameturbo.pop("game_config_path", None)
+            gameturbo.pop("source_apk", None)
         llm = data.get("llm")
         if isinstance(llm, dict):
             for key in ("deepseek_litellm_compat", "deepseek_thinking_mode"):
@@ -429,16 +430,11 @@ class AppConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _require_game_when_executor(self) -> AppConfig:
-        if self.modules.executor:
-            if not self.game.package_name.strip():
-                raise ValueError("game.package_name 不能为空（modules.executor 为 true 时）")
-            if not self.game.launch_activity.strip():
-                raise ValueError("game.launch_activity 不能为空（modules.executor 为 true 时）")
-            if self.llm_multimodal is None:
-                raise ValueError(
-                    "modules.executor 为 true 时 llm_multimodal 必填（check_in_game 依赖视觉模型）"
-                )
+    def _require_multimodal_when_executor(self) -> AppConfig:
+        if self.modules.executor and self.llm_multimodal is None:
+            raise ValueError(
+                "modules.executor 为 true 时 llm_multimodal 必填（check_in_game 依赖视觉模型）"
+            )
         return self
 
     llm: LLMSection
@@ -462,6 +458,7 @@ class AppConfig(BaseModel):
     credentials: CredentialsSection = Field(default_factory=CredentialsSection)
     preprocessing: PreprocessingSection = Field(default_factory=PreprocessingSection)
     modules: ModulesSection = Field(default_factory=ModulesSection)
+    network_anomaly: NetworkAnomalySection = Field(default_factory=NetworkAnomalySection)
     agent: AgentSection = Field(default_factory=AgentSection)
     detection: DetectionSection = Field(default_factory=DetectionSection)
     logging: LoggingSection = Field(default_factory=LoggingSection)

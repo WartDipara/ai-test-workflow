@@ -13,6 +13,7 @@ from game_agent.config.paths import resolve_repo_path
 from game_agent.models.run_failure import classify_exception
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
+from game_agent.models.task_config import TaskConfig
 from game_agent.modules.executor.agent import ExecutorAgentDeps, build_executor_agent
 from game_agent.modules.run_context import AttemptContext
 from game_agent.paths import REPO_ROOT
@@ -58,11 +59,16 @@ def configure_logging(level: str) -> None:
 class ExecutorFlowController:
     """Controller：OCR + AI 主脑 + adb tap，驱动游戏登录直至进程启动。"""
 
-    def __init__(self, config_path: Path) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        *,
+        app_config: TaskConfig | AppConfig | None = None,
+    ) -> None:
         self._config_path = config_path
-        self._app_config: AppConfig | None = None
+        self._app_config: TaskConfig | AppConfig | None = app_config
 
-    def load_settings(self) -> AppConfig:
+    def load_settings(self) -> TaskConfig | AppConfig:
         raw = load_app_config(self._config_path)
         art_dir = raw.agent.artifacts_dir
         art_dir = resolve_repo_path(art_dir)
@@ -332,12 +338,16 @@ class ExecutorFlowController:
 def run_executor_flow_sync(
     config_path: Path,
     *,
+    app_config: TaskConfig | AppConfig | None = None,
     artifact_root: Path | None = None,
     audit: RunAuditLogger | None = None,
     attempt_context: AttemptContext | None = None,
 ) -> RunState:
-    ctrl = ExecutorFlowController(config_path)
-    ctrl.load_settings()
+    ctrl = ExecutorFlowController(config_path, app_config=app_config)
+    if app_config is None:
+        ctrl.load_settings()
+    else:
+        configure_logging(app_config.logging.level)
     return asyncio.run(
         ctrl.run_async(
             artifact_root=artifact_root,

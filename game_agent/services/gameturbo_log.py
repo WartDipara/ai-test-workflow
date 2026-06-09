@@ -189,6 +189,87 @@ def append_gameturbo_line(path: Path, line: str) -> None:
         f.write(stripped + "\n")
 
 
+def resolve_pipeline_artifact_root(artifact_root: Path) -> Path:
+    """执行者产物在 retry_*/executor/ 下时，GameTurbo 日志写在上一级目录。"""
+    if artifact_root.name == "executor":
+        return artifact_root.parent
+    return artifact_root
+
+
+def tail_gameturbo_log_lines(
+    artifact_root: Path,
+    adb: AdbService | None = None,
+    *,
+    limit: int = 100,
+    refresh_from_device: bool = True,
+) -> tuple[list[str], Path]:
+    """
+    返回最新 limit 条 GameTurbo 日志（文件尾部）。
+    默认先从设备 logcat 缓冲区增量追加，再读本地 gameturbo.log。
+    """
+    root = resolve_pipeline_artifact_root(artifact_root)
+    path = gameturbo_log_path(root)
+    if refresh_from_device and adb is not None:
+        seen_keys = read_gameturbo_dedup_keys(path)
+        dump_lines = fetch_device_gameturbo_lines(adb)
+        if dump_lines:
+            _append_unique_lines(path, dump_lines, seen_keys)
+
+    if not path.is_file():
+        return [], path
+
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+    if limit > 0 and len(lines) > limit:
+        lines = lines[-limit:]
+    return lines, path
+
+
+def format_latest_gameturbo_log_for_agent(
+    artifact_root: Path,
+    adb: AdbService | None = None,
+    *,
+    limit: int = 100,
+    refresh_from_device: bool = True,
+    include_health_hint: bool = True,
+) -> str:
+    """格式化最近日志，供执行者大模型工具返回。"""
+    lines, path = tail_gameturbo_log_lines(
+        artifact_root,
+        adb,
+        limit=limit,
+        refresh_from_device=refresh_from_device,
+    )
+    if not lines:
+        return (
+            f"No GameTurbo log lines yet ({path.name} missing or empty). "
+            "Parallel log monitor may still be starting."
+        )
+
+    header = (
+        f"Latest {len(lines)} GameTurbo log lines from {path.name} "
+        "(newest at bottom; top-left overlay speed is NOT download progress):\n"
+    )
+    body = "\n".join(lines)
+
+    if not include_health_hint:
+        return header + body
+
+    from game_agent.services.gameturbo_log_health import assess_gameturbo_log_health
+
+    health = assess_gameturbo_log_health("\n".join(lines))
+    if health.suspect:
+        footer = (
+            f"\n\n[automated log health hint] suspect=true reason={health.reason}"
+        )
+    else:
+        footer = "\n\n[automated log health hint] suspect=false"
+    return header + body + footer
+
+
 def finalize_gameturbo_log(adb: AdbService, artifact_root: Path) -> Path | None:
     """运行结束时：把设备缓冲区中尚未落盘的行追加到 gameturbo.log。"""
     path = gameturbo_log_path(artifact_root)

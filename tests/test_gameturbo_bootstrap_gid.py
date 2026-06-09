@@ -10,5 +10,5 @@ def test_parse_gid_from_apk_name_ok() -> None:
 
 
 def test_parse_gid_from_apk_name_error() -> None:
-    with pytest.raises(RuntimeError, match="显式配置"):
+    with pytest.raises(RuntimeError, match="gid"):
         parse_gid_from_apk_name(Path("no_gid.apk"))

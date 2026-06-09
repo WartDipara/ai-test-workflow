@@ -33,8 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--package",
-        default=None,
-        help="Override game.package_name from config",
+        required=True,
+        help="目标游戏包名（由 APK 解析，不再从 settings.yaml 读取）",
     )
     parser.add_argument(
         "-s",
@@ -72,10 +72,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     cfg = load_app_config(config_path)
-    pkg = (args.package or cfg.game.package_name or "").strip()
-    if not pkg:
-        print("game.package_name is empty; use --package", file=sys.stderr)
-        return 1
+    pkg = args.package.strip()
 
     timeout_s = (
         args.timeout

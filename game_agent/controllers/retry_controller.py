@@ -5,13 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from game_agent.models.run_failure import RunFailure
-from game_agent.models.settings import AppConfig
+from game_agent.models.task_config import TaskConfig
 from game_agent.modules.retry.cleanup import FailureCleanup
 from game_agent.modules.retry.retry_config import RetryConfigHandler
 from game_agent.services.adb_service import AdbService
 from game_agent.services.failure_report import generate_and_save_attempt_failure_report
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
+from game_agent.services.shutdown import is_shutdown_requested
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class AnomalyHandler:
     """异常处理入口：失败收尾（始终）+ 配置与重试（仅 retryable E2xxx）。"""
 
     adb: AdbService
-    app_config: AppConfig
+    app_config: TaskConfig
     config_path: Path
     artifact_root: Path | None
     task_deliverable_root: Path | None = None
@@ -37,6 +38,8 @@ class AnomalyHandler:
         will_retry: bool,
     ) -> None:
         reason = failure.format()
+        if is_shutdown_requested():
+            will_retry = False
         with trace_operation(
             "anomaly",
             "failure_cleanup",
@@ -93,7 +96,7 @@ class AnomalyHandler:
     ) -> None:
         if self.artifact_root is None:
             return
-        gid = (self.app_config.gameturbo.gid or "").strip() or "unknown"
+        gid = (self.app_config.runtime.gid or "").strip() or "unknown"
         reason = failure.format()
         try:
             with trace_operation(
@@ -110,7 +113,7 @@ class AnomalyHandler:
                     reason=reason,
                     gid=gid,
                     will_retry=will_retry,
-                    game_config_path=self.app_config.gameturbo.game_config_path,
+                    game_config_path=self.app_config.runtime.game_config_path,
                 )
                 rec.ok(path=str(self.artifact_root / "attempt_failure_report.md"))
             if self.audit is not None:

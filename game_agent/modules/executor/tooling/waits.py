@@ -19,7 +19,7 @@ from game_agent.services.polling import poll_until_async
 logger = logging.getLogger(__name__)
 
 
-def _should_abort(ctx: RunContext[ExecutorAgentDeps]) -> bool:
+def should_abort_executor(ctx: RunContext[ExecutorAgentDeps]) -> bool:
     actx = ctx.deps.attempt_context
     return actx is not None and actx.should_stop_executor()
 
@@ -43,7 +43,7 @@ async def execute_wait_for_package(
         pkg,
         timeout_s=timeout,
         poll_interval_s=interval,
-        should_abort=lambda: _should_abort(ctx),
+        should_abort=lambda: should_abort_executor(ctx),
     )
     out = result.to_tool_message()
     if result.ok:
@@ -101,7 +101,7 @@ async def execute_wait_for_game_running(
         predicate=predicate,
         timeout_s=timeout,
         interval_s=interval,
-        should_abort=lambda: _should_abort(ctx),
+        should_abort=lambda: should_abort_executor(ctx),
         log_prefix="GameProcess",
     )
 

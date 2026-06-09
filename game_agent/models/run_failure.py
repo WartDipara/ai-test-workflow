@@ -66,6 +66,7 @@ class RunFailure:
 _RETRYABLE_PREFIXES = (
     "log anomaly detected:",
     "screen anomaly detected:",
+    "network anomaly confirmed",
 )
 
 _RETRYABLE_SUBSTRINGS = (
@@ -152,13 +153,15 @@ def classify_failure(
         )
 
     for prefix in _RETRYABLE_PREFIXES:
-        if lower.startswith(prefix):
-            code = (
-                ErrorCode.NET_LOG_ANOMALY
-                if "log anomaly" in prefix
-                else ErrorCode.NET_SCREEN_ANOMALY
-            )
-            return RunFailure(code, text, retryable=True)
+        if not lower.startswith(prefix):
+            continue
+        if prefix.startswith("network anomaly confirmed"):
+            code = ErrorCode.NET_LOG_ANOMALY
+        elif "log anomaly" in prefix:
+            code = ErrorCode.NET_LOG_ANOMALY
+        else:
+            code = ErrorCode.NET_SCREEN_ANOMALY
+        return RunFailure(code, text, retryable=True)
 
     if any(s in lower for s in _NON_RETRYABLE_SUBSTRINGS):
         code = ErrorCode.EXECUTOR_FLOW
@@ -186,7 +189,9 @@ def classify_failure(
 
     if any(s in lower for s in _RETRYABLE_SUBSTRINGS):
         code = ErrorCode.NET_ROUTING
-        if "log anomaly" in lower:
+        if "network anomaly confirmed" in lower:
+            code = ErrorCode.NET_LOG_ANOMALY
+        elif "log anomaly" in lower:
             code = ErrorCode.NET_LOG_ANOMALY
         elif "screen anomaly" in lower:
             code = ErrorCode.NET_SCREEN_ANOMALY
@@ -223,6 +228,16 @@ def classify_exception(
 
     if isinstance(exc, KeyboardInterrupt):
         return RunFailure(ErrorCode.INTERNAL, "Interrupted", retryable=False, detail=msg)
+
+    from game_agent.services.shutdown import ShutdownRequested
+
+    if isinstance(exc, ShutdownRequested):
+        return RunFailure(
+            ErrorCode.INTERNAL,
+            f"Interrupted: {exc.reason}",
+            retryable=False,
+            detail=msg,
+        )
 
     from game_agent.exceptions import DeployPhaseError
 
