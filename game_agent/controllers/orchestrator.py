@@ -8,13 +8,19 @@ from datetime import datetime
 from pathlib import Path
 
 from game_agent.config.loader import load_app_config
+from game_agent.config.paths import resolve_repo_path
 from game_agent.controllers.executor_controller import run_executor_flow_sync
+from game_agent.controllers.parallel_phase_policy import (
+    should_return_parallel_timeout_failure,
+    should_signal_parallel_timeout_fatal,
+)
 from game_agent.controllers.log_monitor_controller import LogMonitor
 from game_agent.controllers.pre_controller import PreprocessingController
 from game_agent.controllers.retry_controller import AnomalyHandler
 from game_agent.controllers.session_controller import SessionCoordinator
 from game_agent.exceptions import DeployPhaseError
 from game_agent.models.pipeline_phase import PipelinePhase
+from game_agent.models.run_state import RunState
 from game_agent.models.run_failure import (
     ErrorCode,
     RunFailure,
@@ -56,7 +62,10 @@ from game_agent.services.run_deliverable import (
 )
 from game_agent.services.task_finalize import TaskRunJournal, finalize_task_deliverable
 from game_agent.services.vision_probe import probe_startup_for_llm
-from game_agent.utils.apk_util import update_settings_yaml_from_apk
+from game_agent.utils.apk_util import (
+    apply_game_launch_info_to_config,
+    update_settings_yaml_from_apk,
+)
 from game_agent.utils.gameturbo_bootstrap import (
     discover_source_apk,
     needs_initial_preprocess,
@@ -75,6 +84,61 @@ from game_agent.utils.packages_cleanup import (
 from game_agent.utils.settings_yaml import upsert_top_level_section_fields
 
 logger = logging.getLogger(__name__)
+
+_EXECUTOR_DRAIN_AFTER_IN_GAME_S = 300.0
+
+
+def _synthetic_in_game_run_state(attempt_ctx: AttemptContext) -> RunState:
+    return RunState(
+        in_game_confirmed=True,
+        success=True,
+        finished=True,
+        game_started=True,
+        note=attempt_ctx.get_in_game_note() or "In-game confirmed",
+    )
+
+
+async def _await_executor_after_in_game_signal(
+    executor_task: asyncio.Task[RunState] | None,
+    attempt_ctx: AttemptContext,
+    *,
+    timeout_s: float = _EXECUTOR_DRAIN_AFTER_IN_GAME_S,
+) -> RunState:
+    if executor_task is None:
+        return _synthetic_in_game_run_state(attempt_ctx)
+    if executor_task.done():
+        try:
+            state = executor_task.result()
+        except Exception as exc:
+            logger.warning(
+                "Executor raised after in-game signal; using success signal: %s",
+                exc,
+            )
+            return _synthetic_in_game_run_state(attempt_ctx)
+        if state.in_game_confirmed:
+            return state
+        return _synthetic_in_game_run_state(attempt_ctx)
+    try:
+        state = await asyncio.wait_for(
+            asyncio.shield(executor_task),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Executor cleanup exceeded %.0fs after in-game confirm; proceeding",
+            timeout_s,
+        )
+        executor_task.cancel()
+        return _synthetic_in_game_run_state(attempt_ctx)
+    except Exception as exc:
+        logger.warning(
+            "Executor cleanup failed after in-game signal: %s",
+            exc,
+        )
+        return _synthetic_in_game_run_state(attempt_ctx)
+    if state.in_game_confirmed:
+        return state
+    return _synthetic_in_game_run_state(attempt_ctx)
 
 
 class _FinishRun(Exception):
@@ -112,15 +176,9 @@ class GameTestOrchestrator:
 
     def _load_config(self) -> None:
         raw = load_app_config(self._config_path)
-        art_dir = raw.agent.artifacts_dir
-        if not art_dir.is_absolute():
-            art_dir = (Path.cwd() / art_dir).resolve()
-        out_dir = raw.gameturbo.run_outputs_dir
-        if not out_dir.is_absolute():
-            out_dir = (Path.cwd() / out_dir).resolve()
-        cache_dir = raw.preprocessing.apk_cache_dir
-        if not cache_dir.is_absolute():
-            cache_dir = (Path.cwd() / cache_dir).resolve()
+        art_dir = resolve_repo_path(raw.agent.artifacts_dir)
+        out_dir = resolve_repo_path(raw.gameturbo.run_outputs_dir)
+        cache_dir = resolve_repo_path(raw.preprocessing.apk_cache_dir)
         self._app_config = raw.model_copy(
             update={
                 "agent": raw.agent.model_copy(update={"artifacts_dir": art_dir}),
@@ -153,13 +211,8 @@ class GameTestOrchestrator:
             rec.ok(removed_count=len(removed))
         return removed
 
-    def _prepare_workspace_at_task_start(self, cfg: AppConfig) -> None:
-        """新任务场地准备：设备遗留卸载 → 清空 packages/。"""
-        self._device_startup_cleanup = self._prepare_device_at_task_start(cfg)
-        self._packages_startup_removed = self._prepare_packages_at_task_start()
-
-    def _sync_game_section_from_packages(self) -> None:
-        """从 packages 内 APK 同步 settings.yaml 的 game 段（deploy 产物优先，否则原包）。"""
+    def _sync_game_section_from_packages(self, *, persist_yaml: bool = True) -> None:
+        """从 packages 内 APK 同步 game 段；默认写回 settings.yaml。"""
         out_apk = output_apk_path()
         apk: Path | None = out_apk if out_apk.is_file() else None
         if apk is None:
@@ -167,7 +220,12 @@ class GameTestOrchestrator:
                 apk = discover_source_apk()
             except RuntimeError:
                 return
-        if update_settings_yaml_from_apk(self._config_path, apk):
+        cfg = self._app_config
+        if cfg is not None:
+            updated = apply_game_launch_info_to_config(cfg, apk)
+            if updated is not None:
+                self._app_config = updated
+        if persist_yaml and update_settings_yaml_from_apk(self._config_path, apk):
             self._load_config()
 
     def _log_module_flags(self, cfg: AppConfig) -> None:
@@ -189,7 +247,7 @@ class GameTestOrchestrator:
             assert cfg is not None
             assert self._adb is not None
 
-            self._prepare_workspace_at_task_start(cfg)
+            self._packages_startup_removed = self._prepare_packages_at_task_start()
 
             mods = cfg.modules
             max_retries = mods.max_retries if mods.retry_on_failure else 1
@@ -237,6 +295,7 @@ class GameTestOrchestrator:
                 self._preprocess_record = None
 
             self._sync_game_section_from_packages()
+            self._device_startup_cleanup = self._prepare_device_at_task_start(cfg)
             self._establish_task_deliverable(cfg, mods)
 
             for retry in range(1, max_retries + 1):
@@ -298,7 +357,7 @@ class GameTestOrchestrator:
                 success=False,
                 last_reason=last,
                 max_retries=max_retries,
-                error_code=parse_error_code_from_text(last) or ErrorCode.NET_ROUTING.value,
+                error_code=parse_error_code_from_text(last) or ErrorCode.INTERNAL.value,
             )
         finally:
             self._release_gameturbo_runtime_context()
@@ -397,6 +456,7 @@ class GameTestOrchestrator:
         controller = PreprocessingController(
             cache_dir=cfg.preprocessing.apk_cache_dir,
             packages_dir=PACKAGES_DIR,
+            preserved_abis=cfg.preprocessing.preserved_abis,
         )
         result = controller.run()
         if result.ok:
@@ -512,7 +572,7 @@ class GameTestOrchestrator:
         if mods.executor and target_pkg:
             if not self._adb.is_package_installed(target_pkg):
                 return (
-                    f"[E2006] Package {target_pkg} not on device before executor. "
+                    f"[E1009] Package {target_pkg} not on device before executor. "
                     "Deploy may have failed at adb install — check deploy.log."
                 )
             attempt_ctx.mark_deploy_package_verified()
@@ -617,6 +677,14 @@ class GameTestOrchestrator:
         deadline = time.monotonic() + cfg.game.timeout_s
 
         while pending and time.monotonic() < deadline and not phase_ok:
+            if attempt_ctx.is_in_game_confirmed():
+                phase_ok = True
+                logger.info(
+                    "Parallel phase: in-game confirmed via executor signal "
+                    "(pending tasks=%d)",
+                    len(pending),
+                )
+                break
             remaining = deadline - time.monotonic()
             done, pending = await asyncio.wait(
                 pending,
@@ -624,7 +692,13 @@ class GameTestOrchestrator:
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if not done:
-                timed_out = True
+                if attempt_ctx.is_in_game_confirmed():
+                    phase_ok = True
+                    logger.info(
+                        "Parallel phase deadline reached but in-game already confirmed"
+                    )
+                else:
+                    timed_out = True
                 break
 
             for task in done:
@@ -656,9 +730,16 @@ class GameTestOrchestrator:
                         continue
                     if executor_state.in_game_confirmed:
                         phase_ok = True
-                        stop_event.set()
-                        await _cancel_pending()
-                        pending.clear()
+                        if executor_task is not None:
+                            executor_task.cancel()
+                        session_task.cancel()
+                        await asyncio.gather(
+                            executor_task,
+                            session_task,
+                            return_exceptions=True,
+                        )
+                        pending.discard(executor_task)
+                        pending.discard(session_task)
                         break
                     if executor_state.finished and not executor_state.success:
                         stop_event.set()
@@ -675,24 +756,66 @@ class GameTestOrchestrator:
                         or "Executor stopped without in-game confirmation"
                     )
 
+        in_game_signaled = attempt_ctx.is_in_game_confirmed()
+        if in_game_signaled:
+            phase_ok = True
+
         if pending:
-            timed_out = True
-            attempt_ctx.signal_fatal(
-                f"Parallel game phase timeout ({cfg.game.timeout_s:.0f}s) "
-                "without in-game confirmation",
-            )
-            stop_event.set()
-            await _cancel_pending()
+            if should_signal_parallel_timeout_fatal(
+                timed_out=timed_out or time.monotonic() >= deadline,
+                phase_ok=phase_ok,
+                in_game_signaled=in_game_signaled,
+                executor_in_game_confirmed=(
+                    executor_state.in_game_confirmed if executor_state else None
+                ),
+            ):
+                timed_out = True
+                attempt_ctx.signal_fatal(
+                    f"Parallel game phase timeout ({cfg.game.timeout_s:.0f}s) "
+                    "without in-game confirmation",
+                )
+                stop_event.set()
+                await _cancel_pending()
+            elif phase_ok or in_game_signaled:
+                logger.info(
+                    "Parallel phase: draining executor after in-game success "
+                    "(pending=%d)",
+                    len(pending),
+                )
+                stop_event.set()
+                for t in monitor_tasks:
+                    t.cancel()
+                session_task.cancel()
+                if executor_state is None and executor_task is not None:
+                    executor_state = await _await_executor_after_in_game_signal(
+                        executor_task,
+                        attempt_ctx,
+                    )
+                await asyncio.gather(
+                    session_task,
+                    *monitor_tasks,
+                    *(
+                        [executor_task]
+                        if executor_task is not None and not executor_task.done()
+                        else []
+                    ),
+                    return_exceptions=True,
+                )
+                pending.clear()
 
         fatal = attempt_ctx.get_fatal_reason()
-        if fatal:
+        if fatal and not in_game_signaled:
             return fatal
 
-        if (
-            timed_out
-            and not phase_ok
-            and mods.executor
-            and (executor_state is None or not executor_state.in_game_confirmed)
+        exec_in_game = (
+            executor_state.in_game_confirmed if executor_state is not None else None
+        )
+        if should_return_parallel_timeout_failure(
+            timed_out=timed_out,
+            phase_ok=phase_ok,
+            in_game_signaled=in_game_signaled,
+            executor_in_game_confirmed=exec_in_game,
+            executor_enabled=mods.executor,
         ):
             return (
                 f"Parallel game phase timeout ({cfg.game.timeout_s:.0f}s) "
@@ -706,10 +829,24 @@ class GameTestOrchestrator:
             return None
 
         if executor_state is None:
-            return "Executor module was enabled but did not complete"
+            if in_game_signaled:
+                executor_state = _synthetic_in_game_run_state(attempt_ctx)
+            else:
+                return "Executor module was enabled but did not complete"
 
         if not executor_state.in_game_confirmed:
-            return (executor_state.note or "In-game not confirmed").strip()
+            if in_game_signaled:
+                executor_state = _synthetic_in_game_run_state(attempt_ctx)
+            else:
+                return (executor_state.note or "In-game not confirmed").strip()
+
+        fatal_before_observe = attempt_ctx.get_fatal_reason()
+        if fatal_before_observe:
+            stop_event.set()
+            for t in monitor_tasks:
+                t.cancel()
+            await asyncio.gather(*monitor_tasks, return_exceptions=True)
+            return fatal_before_observe
 
         exit_result = await confirm_in_game_normal_exit(
             adb=self._adb,
@@ -719,6 +856,22 @@ class GameTestOrchestrator:
             audit=self._audit,
             summary=(executor_state.note or "In-game confirmed")[:2000],
         )
+
+        stop_event.set()
+        for t in monitor_tasks:
+            t.cancel()
+        if monitor_tasks:
+            monitor_outcomes = await asyncio.gather(*monitor_tasks, return_exceptions=True)
+            for outcome in monitor_outcomes:
+                if isinstance(outcome, str) and outcome:
+                    attempt_ctx.signal_fatal(outcome)
+                elif outcome and not isinstance(outcome, BaseException):
+                    attempt_ctx.signal_fatal(str(outcome))
+
+        fatal_after_observe = attempt_ctx.get_fatal_reason()
+        if fatal_after_observe:
+            return fatal_after_observe
+
         if not exit_state.normal_exit_committed:
             return "In-game confirmed but normal exit was not committed"
 

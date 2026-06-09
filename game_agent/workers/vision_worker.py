@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class VisionWorker:
-    """多模态视觉职员：只负责观察、分析、汇报，不直接执行设备操作。"""
+    """多模态：只负责观察、分析、汇报，不直接执行设备操作。"""
 
     def __init__(self, llm_config: LLMSection) -> None:
         self._llm_config = llm_config

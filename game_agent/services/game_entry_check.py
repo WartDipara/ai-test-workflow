@@ -38,6 +38,7 @@ async def run_in_game_check(
     audit: RunAuditLogger | None = None,
     round_id: int = 0,
     sessions_restarted: int = 0,
+    session_index: int = 1,
 ) -> InGameCheckResult:
     """主脑工具：截图 + OCR + 多模态进游戏判定；更新 confirm streak。"""
     game_pkg = cfg.game.package_name
@@ -78,7 +79,7 @@ async def run_in_game_check(
         )
 
     try:
-        dw, dh = adb.wm_size()
+        dw, dh = adb.touch_size()
         ocr_summary = extract_text_with_bounds(shot_path, device_w=dw, device_h=dh)
     except Exception as e:
         ocr_summary = f"[OCR failed] {e}"
@@ -91,7 +92,7 @@ async def run_in_game_check(
             ocr_summary=ocr_summary,
             ocr_creation_hits=ocr_creation_hits,
             round_id=round_id,
-            session_index=1,
+            session_index=max(1, session_index),
             sessions_restarted=sessions_restarted,
         )
     except Exception as e:

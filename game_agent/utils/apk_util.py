@@ -5,6 +5,10 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from game_agent.models.settings import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -89,12 +93,6 @@ def get_apk_launch_info(apk_path: Path | str) -> ApkLaunchInfo | None:
     )
 
 
-def get_apk_package_name(apk_path: Path | str) -> str | None:
-    """兼容旧调用：仅返回包名。"""
-    info = get_apk_launch_info(apk_path)
-    return info.package_name if info else None
-
-
 def _apply_game_fields_to_yaml_lines(
     lines: list[str],
     fields: dict[str, str],
@@ -143,6 +141,23 @@ def _apply_game_fields_to_yaml_lines(
     return changed
 
 
+def apply_game_launch_info_to_config(cfg: AppConfig, apk_path: Path) -> AppConfig | None:
+    """将 APK 解析出的 package/activity 写入内存中的 AppConfig（不写 YAML）。"""
+    info = get_apk_launch_info(apk_path)
+    if not info:
+        return None
+    return cfg.model_copy(
+        update={
+            "game": cfg.game.model_copy(
+                update={
+                    "package_name": info.package_name,
+                    "launch_activity": info.launch_activity,
+                },
+            ),
+        },
+    )
+
+
 def update_settings_yaml_from_apk(settings_path: Path, apk_path: Path) -> bool:
     """
     从 APK 提取 package_name、launch_activity，覆写 settings.yaml 的 game: 段。
@@ -180,8 +195,3 @@ def update_settings_yaml_from_apk(settings_path: Path, apk_path: Path) -> bool:
     except Exception as e:
         logger.error("复写 %s 失败: %s", settings_path, e)
         return False
-
-
-def update_settings_yaml_package_name(settings_path: Path, apk_path: Path) -> bool:
-    """兼容旧函数名。"""
-    return update_settings_yaml_from_apk(settings_path, apk_path)

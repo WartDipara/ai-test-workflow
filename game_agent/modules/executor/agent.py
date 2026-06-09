@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic_ai import Agent, RunContext
 
+from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
 from game_agent.modules.executor.deps import ExecutorAgentDeps
 from game_agent.modules.executor.tooling.shell import RunRequirement, ToolKind, make_tool_registrar
@@ -22,7 +23,11 @@ from game_agent.services.accessibility_input import (
     submit_login_after_password,
     verify_credential_via_accessibility,
 )
-from game_agent.services.checkbox_locator import _STEP_PX, _TERMS_PATTERNS, locate_checkbox_via_ocr
+from game_agent.services.checkbox_locator import (
+    CheckboxLocateResult,
+    checkbox_tap_x,
+    locate_privacy_checkbox,
+)
 from game_agent.services.credentials import (
     credentials_status_message,
     load_game_credentials,
@@ -36,7 +41,6 @@ from game_agent.services.skill_catalog import read_repo_skill as load_repo_skill
 from game_agent.services.skill_catalog import read_skills_index as load_skills_index_text
 from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.utils.ocr_util import (
-    OcrBbox,
     extract_text_with_bbox,
     extract_text_with_bounds,
     format_device_ocr_for_executor,
@@ -48,6 +52,18 @@ __all__ = ["ExecutorAgentDeps", "build_executor_agent"]
 
 def _prompt_path() -> Path:
     return Path(__file__).resolve().parent / "prompts" / "executor_system.en.txt"
+
+
+def _store_checkbox_anchor_cache(
+    run_state: RunState,
+    anchor: CheckboxLocateResult,
+) -> None:
+    run_state.checkbox_bbox_cache = (
+        anchor.line_x1,
+        anchor.cy,
+        anchor.half_char_px,
+        0,
+    )
 
 
 async def _fallback_detect(
@@ -62,27 +78,15 @@ async def _fallback_detect(
     bboxes = await asyncio.to_thread(extract_text_with_bbox, shot, device_w=sw, device_h=sh)
     if not bboxes:
         return f"[Checkbox] {reason}, OCR found no text (fallback unavailable)"
-    result = locate_checkbox_via_ocr(bboxes, sw, sh)
-    if result is None:
+    located = locate_privacy_checkbox(bboxes, sw, sh, step=0)
+    if located is None:
         return f"[Checkbox] {reason}, OCR found no matching terms text (fallback unavailable)"
-    cx, cy = result
+    _store_checkbox_anchor_cache(ctx.deps.run_state, located)
     return (
-        f"[Checkbox fallback] {reason}, OCR bbox fallback activated. "
-        f"target=({cx},{cy}) screenshot={shot.resolve()}"
+        f"[Checkbox fallback] {reason}, OCR line-left estimate. "
+        f"{located.format_message(prefix='[Checkbox fallback]')} "
+        f"screenshot={shot.resolve()}"
     )
-
-
-def _find_matching_terms_bbox(bboxes: list[OcrBbox]) -> tuple[int, int, int] | None:
-    for b in bboxes:
-        if not any(p.search(b.text) for p in _TERMS_PATTERNS):
-            continue
-        ch = b.y2 - b.y1
-        if ch <= 0:
-            continue
-        base = b.x1 - ch // 2
-        cy = (b.y1 + b.y2) // 2
-        return (base, cy, ch)
-    return None
 
 
 def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]:
@@ -175,7 +179,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
             msg = msg.replace(cred.password, "***")
             if (
                 "Accessibility fill failed" not in msg
-                and "VERIFY password: PASSED" in msg
+                and ("VERIFY password: PASSED" in msg or "VERIFY password: PARTIAL" in msg)
             ):
                 cached = ctx.deps.run_state.cached_login_button_xy
                 cache_note = (
@@ -333,9 +337,11 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
                     f"'{targets.login_text[:40]}' — use before secure keyboard blocks OCR."
                 )
         else:
+            ctx.deps.adb.press_back()
+            ctx.deps.adb.wait_seconds(0.3)
             cache_line = (
-                "\n[Screencap mostly BLACK] secure keyboard / password focus — "
-                "OCR unreliable; fill via accessibility; submit uses ENTER/u2/cached Login."
+                "\n[Screencap mostly BLACK] secure keyboard detected — pressed Back to dismiss. "
+                "Call get_ocr_summary again for fresh OCR."
             )
         return f"[Live OCR from device screencap] file={path.resolve()}\n{s}{cache_line}"
 
@@ -406,37 +412,39 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         step: int = 0,
     ) -> str:
         """
-        OCR-based checkbox locator. step=0 does fresh OCR+bbox and returns the first coordinate.
-        step>0 reuses cached bbox from the last step=0 call (no new screenshot/OCR) and moves
-        further left by 30px. Returns None when left edge is reached.
+        OCR 协议文字行左推 checkbox。step=0 重新截图 OCR；step>0 复用缓存行锚点并继续左移。
+        返回坐标已是 adb touch_size 空间，直接 tap_coordinate，勿自行换算。
         """
         sw, sh = ctx.deps.adb.touch_size()
 
+        shot_path = ""
         if step == 0 or ctx.deps.run_state.checkbox_bbox_cache is None:
             ts = datetime.now().strftime("%H%M%S_%f")
             shot = ctx.deps.artifact_root / f"check_ocr_{ts}.png"
             ctx.deps.adb.screencap_png(shot)
+            shot_path = str(shot.resolve())
             bboxes = extract_text_with_bbox(shot, device_w=sw, device_h=sh)
             if not bboxes:
                 return "[OCR checkbox] OCR found no text (fallback unavailable)"
-            match = _find_matching_terms_bbox(bboxes)
-            if match is None:
+            anchor = locate_privacy_checkbox(bboxes, sw, sh, step=0)
+            if anchor is None:
                 return "[OCR checkbox] No matching terms text found. Try report_flow_done if stuck."
-            base_x, cy, ch = match
-            ctx.deps.run_state.checkbox_bbox_cache = (base_x, cy, ch)
-            cx = base_x - step * _STEP_PX
-        else:
-            base_x, cy, ch = ctx.deps.run_state.checkbox_bbox_cache
-            cx = base_x - step * _STEP_PX
+            _store_checkbox_anchor_cache(ctx.deps.run_state, anchor)
 
+        line_x1, cy, half_char, _ = ctx.deps.run_state.checkbox_bbox_cache
+        cx = checkbox_tap_x(line_x1, half_char, step)
         if cx < 0 or cx >= sw or cy < 0 or cy >= sh:
             ctx.deps.run_state.checkbox_bbox_cache = None
             return (
                 f"[OCR checkbox] step={step} out of bounds (cx={cx}, sw={sw}) "
                 "- all steps exhausted, checkbox not found."
             )
-        return f"[OCR checkbox] step={step} target=({cx},{cy})"
-        return None
+        suffix = f" screenshot={shot_path}" if shot_path else ""
+        return (
+            f"[OCR checkbox] step={step} target=({cx},{cy}) "
+            f"line_x1={line_x1} half_char={half_char}px "
+            f"offset={half_char * (1 + step)}px{suffix}"
+        )
 
     @t(kind=ToolKind.INSTANT, check_stopped=False)
     async def dismiss_overlay(
@@ -466,7 +474,7 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
     ) -> str:
         first_wait_s = max(0.05, min(float(first_wait_s), 1.0))
         interval_s = max(0.05, min(float(interval_s), 1.5))
-        observations = max(2, min(int(observations), 6))
+        observations = max(1, min(int(observations), 6))
         ts = datetime.now().strftime("%H%M%S_%f")
 
         sw, sh = ctx.deps.adb.touch_size()

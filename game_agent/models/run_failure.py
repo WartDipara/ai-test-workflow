@@ -174,9 +174,10 @@ def classify_failure(
             "timeout" in lower
             or "not installed" in lower
             or "pm path" in lower
+            or "not on device" in lower
         ):
-            code = ErrorCode.PACKAGE_INSTALL
-            return RunFailure(code, text, retryable=True)
+            # E1009：deploy/安装基础设施失败，非 E2 网络加速类，不可重试
+            return RunFailure(ErrorCode.PACKAGE_INSTALL, text, retryable=False)
         elif "parallel game phase timeout" in lower:
             code = ErrorCode.TIMEOUT_PHASE
         elif "is not defined" in lower or "nameerror" in lower:

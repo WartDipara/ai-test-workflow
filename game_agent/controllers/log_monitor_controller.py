@@ -65,7 +65,12 @@ class LogMonitor:
             if stop_event.is_set():
                 break
             if not self._restart_requested.is_set():
-                break
+                msg = (
+                    "[LogMonitor] logcat stream ended unexpectedly "
+                    "(adb disconnect or subprocess exit)"
+                )
+                logger.error(msg)
+                return f"Log anomaly detected: {msg}"
 
         return None
 
@@ -88,6 +93,7 @@ class LogMonitor:
         last_heartbeat = time.monotonic()
         heartbeat_interval_s = 30.0
         sni_count = 0
+        stream_died = False
 
         try:
             while not stop_event.is_set() and not self._restart_requested.is_set():
@@ -111,6 +117,7 @@ class LogMonitor:
                         last_heartbeat = now
                     continue
                 if not line_bytes:
+                    stream_died = True
                     break
                 line = line_bytes.decode("utf-8", errors="replace").strip()
                 if not line:
@@ -149,4 +156,11 @@ class LogMonitor:
                     await asyncio.wait_for(process.wait(), timeout=2.0)
                 except TimeoutError:
                     process.kill()
+        if stream_died and not stop_event.is_set() and not self._restart_requested.is_set():
+            msg = (
+                "[LogMonitor] logcat stream ended unexpectedly "
+                "(adb disconnect or subprocess exit)"
+            )
+            logger.error(msg)
+            return f"Log anomaly detected: {msg}"
         return None

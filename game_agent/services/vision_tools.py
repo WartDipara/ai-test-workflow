@@ -85,7 +85,7 @@ async def run_analyze_screen(
         )
 
     try:
-        dw, dh = adb.wm_size()
+        dw, dh = adb.touch_size()
         ocr_summary = extract_text_with_bounds(shot_path, device_w=dw, device_h=dh)
     except Exception as e:
         ocr_summary = f"[OCR failed] {e}"
@@ -140,6 +140,7 @@ async def run_analyze_screen(
         **state,
         "screenshot": str(shot_path),
         "ocr_preview": ocr_summary[:1500],
+        "ocr_coord_space": "adb_touch_size_tap_ready",
         "request_reason": (reason or "")[:300],
         "network_anomaly_hint": is_network_anomaly_reason(anomaly_reason),
     }

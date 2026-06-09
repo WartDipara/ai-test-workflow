@@ -25,8 +25,8 @@ graph TD
   end
 
   subgraph "PreprocessingController [阶段 0]"
-    PREPROCESSING[读取 apks.txt 下载 APK]
-    PREPROCESSING --> STRIP[ABI 剥离<br/>移除非 arm 框架]
+    PREPROCESSING[apk_resolver<br/>apks.txt 下载或 apk_cache 已有 APK]
+    PREPROCESSING --> STRIP[ABI 剥离<br/>按 preserved_abis 过滤 lib/]
     STRIP --> MOVE[移动至 packages/<br/>清理 apk_cache 残留]
   end
 
@@ -42,7 +42,9 @@ graph TD
       SC -->|重启| LM
     end
 
-    EX -->|check_in_game 连续确认| NORMAL_EXIT[正常退出 observe_s<br/>force-stop]
+    EX -->|check_in_game 连续确认| NORMAL_EXIT[正常退出 observe_s<br/>LogMonitor 仍运行至观察结束]
+    NORMAL_EXIT --> FORCE[force-stop]
+    FORCE --> SUCCESS
     PARALLEL -->|未进游戏 / 监控 fail-fast| FAILURE[失败 E1/E2]
     INIT -->|失败| FAILURE
   end
@@ -56,7 +58,7 @@ graph TD
   end
 
   subgraph "任务结束（仅 parallel 无错误且 check_in_game 已确认）"
-    NORMAL_EXIT --> SUCCESS[成功交付<br/>.gameturbo_merged.json 副本]
+    SUCCESS[成功交付<br/>.gameturbo_merged.json 副本]
     SUCCESS --> END([结束 exit 0])
     FINAL_FAIL --> END_FAIL([结束 exit 1])
   end
@@ -69,7 +71,7 @@ graph TD
 
 | 阶段           | Controller                                                                  | 说明                                                                      | 是否参与重试                   |
 | ------------ | --------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ------------------------ |
-| **0** — 预处理  | `PreprocessingController`                                                   | 从 `apks.txt` 下载 APK → ABI 剥离 → 移至 `packages/`，清理 `apk_cache/`           | **否**，仅执行一次              |
+| **0** — 预处理  | `PreprocessingController` + `apk_resolver`                                  | `apks.txt` 下载或 `apk_cache/` 已有 APK → 按 `preserved_abis` ABI 剥离 → 移至 `packages/` | **否**，仅执行一次              |
 | **1** — Init | `GameTestOrchestrator` 内部                                                   | GameTurbo 配置 → `deploy.sh` 打包安装                                         | 每轮                       |
 | **2** — 并行游戏阶段 | `ExecutorFlowController` + `LogMonitor` / `SessionCoordinator` | 执行者：登录链 + `check_in_game`；监控：从启动并行采 log 异常 fail-fast | 每轮 |
 | **3** — 失败收尾 | `AnomalyHandler` → `FailureCleanup`                                         | 导出日志、域名分析、杀进程、卸载游戏                                                      | 每轮失败                     |
@@ -93,9 +95,11 @@ graph TD
 | 包已安装 | APK 在设备上 | `wait_for_package_installed`（调一次，内部轮询） |
 | 进程已起 | 游戏进程存在 | `wait_for_game_running`（**不**结束执行者） |
 | **进入游戏内** | 主界面/可玩（含引导蒙层） | **`check_in_game`** × `main_screen_confirm_rounds` |
-| 加速观察 | 确认后观察窗 | `confirm_in_game_normal_exit` → `normal_exit_observe_s` |
+| 加速观察 | 确认后观察窗 | `confirm_in_game_normal_exit` → `normal_exit_observe_s`（此期间 **LogMonitor 仍运行**，logcat 断流或隧道异常仍会 fail-fast） |
 
-**LogMonitor** 从启动即运行；**E2xxx** 网络类异常 **fail-fast**（执行者经 `AttemptContext` 协作停止）。
+**LogMonitor** 从游戏启动即运行；执行者 `check_in_game` 确认后**不会立刻停止**日志监控，而是在正常退出观察窗结束后再取消。**E2xxx** 网络类异常 **fail-fast**（经 `AttemptContext` 协作停止执行者与 SessionCoordinator）。
+
+**并行阶段超时（`game.timeout_s`）：** 防卡死保护，**不是**成功判据。`check_in_game` 返回 `data.confirmed=true` 时，执行者经 `AttemptContext.signal_in_game_confirmed()` **立即**通知编排器，编排器不再因「executor 线程尚未返回」（例如 learned skill 生成）而报 `Parallel game phase timeout`。**E1010** 仅当截止时仍未观察到进游戏确认。
 
 ### 执行者：通用登录链（无 per-game 脚本）
 
@@ -116,7 +120,8 @@ flowchart LR
     SC[SessionCoordinator]
     SC -->|会话重启| LM
   end
-  EX[Executor check_in_game] --> NE[confirm_in_game_normal_exit]
+  EX[Executor check_in_game] --> NE[confirm_in_game_normal_exit<br/>LogMonitor 并行]
+  NE --> STOP[观察结束 → 停止 LogMonitor]
 ```
 
 
@@ -125,14 +130,28 @@ flowchart LR
 
 - 轮询 `game.session_poll_interval_s`，进程连续缺失 ≥ `game.session_absent_threshold_s` 后再现 → **会话重启**（同轮继续，默认不判失败）。
 - 可选：`pid` 变化也触发重启。
-- 重启动作：归档当前 `gameturbo.log` → `gameturbo_session_NNN.log`；`logcat -c`；清空并重新采集 **gameturbo.log**；重置进入游戏确认计数、下载卡住计数等。
+- 重启动作：归档当前 `gameturbo.log` → `gameturbo_session_NNN.log`；`logcat -c`；清空并重新采集 **gameturbo.log**；重置 `AttemptContext` 中的 in-game 确认 streak 与 `session_index`。
 - `game.max_session_restarts > 0` 时超限才中止观察者。
 - 正常退出后不再监听 crash。
 
 ### LogMonitor
 
-- **LogMonitor**：从启动即 `bootstrap` + `logcat -s GameTurbo` → **gameturbo.log**；高置信异常 **fail-fast**。
-- **进游戏**：由执行者工具 **`check_in_game`**（`check_in_game_*.png`）。
+- **LogMonitor**：从启动即 `bootstrap` + `logcat -s GameTurbo` → **gameturbo.log**；高置信隧道异常 **fail-fast**。
+- **logcat 断流**（adb 断开、子进程意外退出）同样视为异常并 fail-fast，避免监控静默失效。
+- **进游戏**：由执行者工具 **`check_in_game`**（`check_in_game_*.png`）；`session_index` 与会话重启次数会传入多模态模型。
+- **画面分析**：无独立 ScreenMonitor；执行者按需调用 **`analyze_screen`**（`vision_tools.py`）判断阶段/网络弹窗，不自动 fail-fast 整局。
+
+### deploy 设备安装监控（InstallMonitor）
+
+`deploy.sh` 执行 `adb install` 时，部分厂商会弹出安全拦截页。`deploy_runner` 在后台线程运行品牌策略：
+
+| 品牌 | 实现 | 说明 |
+|------|------|------|
+| 小米 / Redmi / POCO | `XiaomiInstallMonitor` | 优先 uiautomator2 点 Install，失败回退 OCR |
+| 三星 | `SamsungInstallMonitor` | OCR + 多语言按钮（安装 / Install / 继续安装等） |
+| vivo | `VivoInstallMonitor` | OCR + 多语言按钮 |
+
+监控结果（点击次数、轮询次数、错误列表）写入 `deploy.log`；`deploy.sh` 返回 0 后仍会 `pm path` 校验包是否真正安装（**E1009**，不可重试）。
 
 ---
 
@@ -149,13 +168,13 @@ flowchart LR
 | `*.apk`    | 下载或手动放置的原始 APK                    |
 
 
-预处理阶段工作流：
+预处理阶段工作流（`apk_resolver` + `Preprocessor`）：
 
-1. 读取 `apk_cache/apks.txt` 中的第一个有效 URL
-2. 下载 APK 到 `apk_cache/`
-3. 检查 `lib/` 目录，移除非 `arm64-v8a` / `armeabi-v7a` 的 ABI 条目（仅 ZIP 条目过滤，不解压重压）
-4. 将处理后的 APK **移动**至 `packages/`
-5. 若 ABI 剥离产生了新文件，删除 `apk_cache/` 中的**原始 APK**，保持缓存目录干净
+1. 若存在 `apk_cache/apks.txt` → 取第一个有效 URL 下载到 `apk_cache/`；下载失败则尝试使用缓存中已有 `*.apk`
+2. 若无 `apks.txt` 但 `apk_cache/` 已有 `*.apk` → 直接使用（支持手动放入 APK，跳过下载）
+3. 多个 APK 并存时取排序后第一个并打告警
+4. 按 `preprocessing.preserved_abis` 检查 `lib/`，移除非保留 ABI（仅 ZIP 条目过滤，不解压重压）
+5. 将处理后的 APK **移动**至 `packages/`；若产生剥离副本，删除 `apk_cache/` 中的原始 APK
 
 > **注意**：APK 是从 `apk_cache/` 移动到 `packages/` 的（不是复制），处理完成后 `apk_cache/` 中不应残留 APK 文件。
 
@@ -166,7 +185,7 @@ flowchart LR
 
 | 状态                 | 目录内容                             |
 | ------------------ | -------------------------------- |
-| **新任务开始（run.sh）** | 设备上卸载 `game.package_name`（若已安装）+ **清空** `packages/`，再由预处理重新放入原包 |
+| **新任务开始（run.sh）** | **先清空** `packages/` → 预处理放入原包 → 从 APK 同步 `package_name` → **再**卸载设备上该包（避免用旧配置清错包） |
 | **初始化前**           | **仅 1 个**原包 APK（文件名前缀为 `gid`）    |
 | `**deploy.sh` 之后** | 原包 + `game_gameturbo.apk` + 签名文件 |
 | **每轮尝试结束（仍重试）**    | 删除 `game_gameturbo`*，**保留原包**    |
@@ -220,10 +239,12 @@ flowchart LR
 
 **过程数据：** `artifacts/retry_{N}_{时间戳}/`（含 `executor/`、`audit/`、`gameturbo.log`）。**任务结束后删除**；删除前会将 `pipeline_trace.jsonl` 等归档到 `run_outputs/attempts/`。
 
-任务开始时编排器会（场地准备）：
+任务开始时编排器会（场地准备，顺序固定）：
 
-1. **设备**：若 `settings.yaml` 中 `game.package_name` 在手机上仍已安装（`pm path`），则 **force-stop + adb uninstall**（消化断电等未执行失败收尾的遗留）
-2. **本机**：清空 `packages/`（`prepare_packages_for_new_task`，与最终收尾对称）
+1. **本机**：清空 `packages/`（`prepare_packages_for_new_task`）
+2. **预处理**：`apk_resolver` 解析 APK → ABI 剥离 → 移入 `packages/`
+3. **同步包名**：从 `packages/` 内 APK 用 aapt 解析 `package_name` / `launch_activity`，**优先更新内存中的 `AppConfig`**，并写回 `settings.yaml`（与 deploy 后行为一致）
+4. **设备**：按同步后的 `game.package_name` 执行 **force-stop + adb uninstall**（消化断电等未执行失败收尾的遗留）
 
 任务结束时编排器会：
 
@@ -268,8 +289,8 @@ flowchart LR
 
 
 ```bash
-# 安装 Python 依赖
-pip install -e .
+# 安装 Python 依赖（含开发工具：ruff、pytest）
+pip install -e ".[dev]"
 ```
 
 ### 第二步：GameTurbo-Native 适配（仅首次）
@@ -311,9 +332,9 @@ cp config/settings.example.yaml config/settings.yaml
 
 ```yaml
 llm:
-  base_url: "https://api.deepseek.com"
-  api_key: "sk-你的key"           # ← 填写 DeepSeek API Key
-  model_name: "deepseek-v4-flash"   # 主脑可换任意 OpenAI 兼容模型
+  base_url: "https://api.deepseek.com"   # DeepSeek 官方端点须配 deepseek-* 模型
+  api_key: "${DEEPSEEK_API_KEY}"         # ← 环境变量或直填 Key
+  model_name: "deepseek-v4-flash"        # 主脑可换任意 OpenAI 兼容模型（base_url 须匹配）
 
 deepseek:                          # 仅当 model 为 DeepSeek 官方模型时生效
   thinking: true
@@ -353,7 +374,7 @@ preprocessing:
 game:
   package_name: "com.xt.alsp35.x7sy"      # 游戏包名（APK 自动覆写后可留空）
   launch_activity: "com.cbdpsyb.cs.SplashActivity"  # 启动 Activity（自动覆写）
-  timeout_s: 350.0                         # 观察者总超时
+  timeout_s: 1200.0                        # 并行游戏阶段总超时（秒）；未 check_in_game 确认时防卡死
   launch_detect_timeout_s: 90.0            # 等待游戏进程启动超时
   launch_detect_poll_interval_s: 2.0       # 进程轮询间隔
   main_screen_confirm_rounds: 2            # 连续确认轮数
@@ -386,6 +407,8 @@ modules:
   max_retries: 3               # 最大重试次数（retry_on_failure=true 时有效）
 ```
 
+> `modules.executor: true` 时 **`llm_multimodal` 必填**（`check_in_game` / `analyze_screen` 依赖视觉模型）。
+
 **detection — （可选）YOLO 视觉检测：**
 
 ```yaml
@@ -401,7 +424,7 @@ agent:
   max_rounds: 100                       # 执行者最大操作轮数
   artifacts_dir: "./artifacts"
   persist_learned_skill_on_success: true  # 成功后压成 experiences/agent_skills/
-  tap_observe_count: 1                  # tap_and_observe 连拍次数（越小越快）
+  tap_observe_count: 1                  # tap_and_observe 观测次数（最小 1，最大 6）
   repeat_compact_stage_hint_every_n_rounds: 5  # 0=仅第1轮带阶段表；不裁剪 message_history
 ```
 
@@ -428,7 +451,8 @@ executor:
   credential_fill_settle_s: 0.4   # 无障碍点击输入框后等待焦点（秒）
 ```
 
-> `game.package_name` 和 `game.launch_activity` 会在 `game_gameturbo.apk` 存在时由 aapt 自动覆写，可留空。
+> 配置里 `artifacts_dir`、`apk_cache_dir`、`run_outputs_dir` 等**相对路径以仓库根目录为基准**（非当前工作目录）。  
+> `game.package_name` / `launch_activity` 在预处理与 deploy 后由 aapt 从 `packages/` 内 APK 同步（内存 + 写回 `settings.yaml`），可留空。
 
 ### 账号凭据与无障碍填表（uiautomator2）
 
@@ -478,9 +502,23 @@ cp config/credentials.example.yaml credentials.yaml
 | 操作 | 方式 |
 |------|------|
 | 找输入框坐标、点按钮 | OCR + `tap` / `tap_and_observe` |
-| 勾选无语义元素（Checkbox/协议） | OCR 文本 bbox 推估 `locate_checkbox_near_text(step=N)` + `tap_coordinate`（YOLO `detect_checkbox` 可选备用） |
+| 勾选无语义元素（隐私协议 checkbox） | `detect_checkbox` / `locate_checkbox_near_text(step=N)`：协议文字行聚合后向左推导 + `tap_coordinate`（见下文） |
 | 写入账号/密码 | uiautomator2 `setText` + 无障碍回读 **VERIFY** |
 | 判断是否进游戏 | 主脑按需 `analyze_screen` / `check_in_game`（多模态） |
+
+#### 隐私协议 checkbox（`privacy_agree` 阶段）
+
+登录后进游戏前，界面常见「Enter Game / 开始游戏」+ 一行协议文字 + **左侧无语义方框**。OCR **无法**直接识别 checkbox，也不使用深度学习模型定位方框。
+
+框架做法（[services/checkbox_locator.py](game_agent/services/checkbox_locator.py)）：
+
+1. 用弱关键词（`同意` / `协议` / `隐私` / `许可` / `阅读` 等）匹配 OCR 片段，**不要求整句识别**。
+2. 同行聚合时排除 **适龄/CADPA** 图标，且水平间距过大（>140px）的 bbox 不并入同一行。
+3. **左锚**只取前缀说明框（`已阅读` / `同意` 等），**不用**右侧可点击链接框（`许可及服务` / `协议及`）的 `x1`；选行时优先「有前缀 + 更靠左」。
+4. 半字宽：`半字 = (x2-x1) / len(text) / 2`（取自最左前缀 bbox）；`tap_x = line_x1 - 半字 × (1 + step)`（`step=0` 左移 1 半字，每 +1 再多移 1 半字）。
+5. `detect_checkbox` 与 `locate_checkbox_near_text` 共用同一算法；`detect_checkbox` 会缓存锚点，`step>0` 沿同一 `line_x1` 左移，**不会**因重 OCR 误选链接行。返回的 `target=(x,y)` **即为** `tap_coordinate` 坐标（`adb.touch_size()` 空间），勿点协议链接文字，勿自行横竖屏换算。
+
+推荐流程：`detect_checkbox` 或 `locate_checkbox_near_text(step=0)` → `tap_coordinate` → 点「开始游戏」；未勾选则 `step=1/2/…` 递增重试。
 
 ### 第四步：准备 APK 下载链接
 
@@ -492,14 +530,10 @@ mkdir -p apk_cache
 # 写入 APK 下载直链（每行一个，支持 # 注释）
 echo "https://cdn.example.com/game_1.2.3.apk" > apk_cache/apks.txt
 
-# 也可以手动放入 APK 文件到 apk_cache/（会跳过下载，直接进行 ABI 剥离）
+# 也可以不建 apks.txt，直接把 APK 放入 apk_cache/（apk_resolver 会走缓存 fallback）
 ```
 
-预处理阶段会自动：
-
-1. 读取 `apk_cache/apks.txt` 取第一个有效 URL 下载
-2. 检查 `lib/` 目录，移除非 `arm64-v8a`/`armeabi-v7a` 的框架（仅 ZIP 过滤，不解压重压）
-3. 移动处理后的 APK 到 `packages/`，并清理 `apk_cache/` 中的原始文件
+`apk_resolver` 解析顺序：`apks.txt` 下载 → 失败则缓存已有 APK → 均无则预处理失败并给出明确提示。
 
 ### 第五步：运行
 
@@ -511,10 +545,11 @@ echo "https://cdn.example.com/game_1.2.3.apk" > apk_cache/apks.txt
 unset SSL_CERT_FILE
 python -m game_agent.main
 
-# 仅测试 LLM 连通性
-python test.py --llm-only
-python test.py --deepseek-tools
+# 运行单元测试（不依赖真机 / GameTurbo-Native）
+python -m pytest tests/ -q
 ```
+
+> 本地可选 `test.py`（已在 `.gitignore`）做 LLM 连通性探测，非仓库正式入口。
 
 #### 运行过程
 
@@ -584,10 +619,12 @@ game_agent/
 ├── __init__.py / __main__.py        # 包声明与入口
 │
 ├── config/                          # 配置加载
-│   └── loader.py                    # YAML + ${ENV} 展开 → AppConfig
+│   ├── loader.py                    # YAML + ${ENV} 展开 → AppConfig
+│   └── paths.py                     # resolve_repo_path（相对路径 → 仓库根）
 │
 ├── controllers/                     # C: 编排控制（流水线阶段）
 │   ├── orchestrator.py              # GameTestOrchestrator — 主编排 + retry 循环
+│   ├── parallel_phase_policy.py     # 并行阶段超时 vs 进游戏成功信号判定（可单测）
 │   ├── pre_controller.py            # PreprocessingController — 预处理（下载+ABI剥离）
 │   ├── executor_controller.py       # ExecutorFlowController — OCR+AI + check_in_game
 │   ├── session_controller.py        # SessionCoordinator — 进程 crash/重启监控
@@ -610,14 +647,15 @@ game_agent/
 │   │   ├── tooling/                 # wait / shell 包装、回调轮询
 │   │   └── prompts/executor_system.en.txt
 │   ├── preprocessing/
-│   │   ├── preprocessor.py          # ABI 剥离 + packages 移动
+│   │   ├── apk_resolver.py          # APK 来源：apks.txt 下载 / apk_cache fallback
+│   │   ├── preprocessor.py          # ABI 剥离（preserved_abis）+ packages 移动
 │   │   └── assets_preparer.py       # APK 下载（apks.txt → httpx）
 │   ├── retry/
 │   │   ├── analysis.py              # AnalysisAgent — AI 根因分析与配置补丁
 │   │   ├── deploy_retry.py          # deploy 失败 AI 重试
 │   │   ├── cleanup.py               # FailureCleanup — 失败收尾（日志+卸载）
 │   │   └── retry_config.py          # RetryConfigHandler — 配置修改+重新 deploy
-│   ├── run_context.py               # AttemptContext — 并行阶段共享（stop、ui_stage、retry 摘要）
+│   ├── run_context.py               # AttemptContext — 并行阶段共享（stop、in_game 成功信号、ui_stage）
 │   └── observer_session/
 │       └── state.py                 # ObserverSessionState — 共享会话状态
 │
@@ -632,7 +670,11 @@ game_agent/
 │   │   └── qwen.py                  # Qwen 多模态
 │   ├── llm_transcript.py            # LLM 消息格式化（控制台输出）
 │   ├── vision_probe.py              # 多模态启动探针
-│   ├── deploy_runner.py             # deploy.sh 调用（Git Bash）
+│   ├── deploy_runner.py             # deploy.sh + 设备安装监控线程 + pm 校验
+│   ├── install_monitor/             # 小米/三星/vivo 安装拦截 OCR/u2 策略
+│   ├── gameturbo_log_anomaly.py     # logcat 高置信故障行判定
+│   ├── checkbox_locator.py          # 隐私协议 checkbox：OCR 行聚合 + 左推坐标
+│   ├── vision_tools.py              # analyze_screen（按需画面分析）
 │   ├── game_launch.py               # 游戏进程检测（pidof/pgrep）
 │   ├── gameturbo_log.py             # logcat 采集/去重/归档
 │   ├── normal_exit.py               # 正常退出流程（confirm + force-stop）
@@ -654,7 +696,7 @@ game_agent/
 ├── agents/                          # 对外 Agent 导出（__init__.py）
 │
 ├── utils/                           # 工具函数
-│   ├── apk_util.py                  # aapt 提取包名/启动 Activity
+│   ├── apk_util.py                  # aapt 提取包名/Activity；内存同步 + 可选写回 YAML
 │   ├── gameturbo_bootstrap.py       # GameTurbo 前置（gid 解析/配置发现/deploy 准备）
 │   ├── gameturbo_config_apply.py    # 安全合并 AI 配置补丁到 games JSON
 │   ├── gameturbo_log_domain_extract.py  # 域名/区域分析
@@ -702,6 +744,8 @@ run_outputs/                         # 任务产出目录
 apk_cache/                           # APK 下载缓存
 └── apks.txt                         # APK 下载链接（每行一个 URL）
 
+tests/                               # pytest 单元测试（错误分类、预处理、checkbox 左推、安装监控等）
+
 GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 ├── .gameturbo_merged.json           # deploy 产出合并配置
 ├── games/                           # 游戏 JSON 配置
@@ -719,8 +763,10 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 
 - **OCR**：PaddleOCR（`ocr.model_profile`: mobile / server）。
 - **主脑 LLM（`llm`）**：执行者 ADB 工具、重试配置补丁、`AnalysisAgent` / 失败报告（结构化 `output_type`，走 tool_choice）。
-- **多模态 LLM（`llm_multimodal`）**：仅画面观察 — `check_in_game`、重试前 `vision_context` 把截图摘要成文字再交给主脑（不在 Qwen 上做 tool_choice）。
-- **Checkbox 定位（`detect_checkbox` / `locate_checkbox_near_text`）**：优先 OCR 文本 bbox → 从左边缘向左侧逐步偏移 30px（step=N）尝试定位无语义 checkbox。YOLO 视觉检测作为可选备用方案（当前测试阶段注释，默认走 OCR bbox fallback）。
+- **多模态 LLM（`llm_multimodal`）**：`check_in_game`、执行者按需 **`analyze_screen`**、重试前 `vision_context` 截图摘要；不在多模态端做 tool_choice。
+- **OCR 坐标空间**：执行者 `get_ocr_summary`、checkbox 工具、`analyze_screen`、`check_in_game` 的 OCR 预览均映射到 **`adb.touch_size()`**（与 `tap_coordinate` 一致）；`analyze_screen` 返回中带 `ocr_coord_space: adb_touch_size_tap_ready`，仅供阶段判断的 OCR **不可**直接用于 tap。
+- **Checkbox 定位（`detect_checkbox` / `locate_checkbox_near_text`）**：前缀说明框取最左 `line_x1`，按半字宽左推 checkbox（排除链接/适龄误入锚点）；YOLO 路径当前关闭，默认走 `checkbox_locator`。
+- **并行成功信号**：`check_in_game` 确认后 `AttemptContext` 立即通知编排器；`game.timeout_s` 截止时若已确认进游戏则走成功收尾，不因 executor 收尾慢判失败。
 - **进入游戏判定**：独立 prompt；创角 OCR 硬规则见 `character_creation_ocr.py`。
 - **技能**：遇问题先 `read_skills_index`（`skills/SKILL.md`），再 `read_repo_skill(skill_id)`；内置 `game_launch_ocr`、`gameturbo_log_baseline`。`experiences/agent_skills/` 为成功 run 自动生成的 per-game 笔记（`list_learned_skills` / `read_learned_skill`）。
 
@@ -735,7 +781,7 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 | [services/llm_adapters/](game_agent/services/llm_adapters/)   | openai / deepseek / qwen |
 
 
-**llm** 为通用 OpenAI 兼容主脑；**deepseek** 段仅在 model 为 DeepSeek 时由 `DeepSeekAdapter` 读取（[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)）。**llm_multimodal** 仅用于画面（`check_in_game`、重试截图摘要），**不要**用于 `AnalysisAgent`（避免与 `tool_choice=required` 冲突）。**observer.skip_vision_probe** 控制多模态启动探针。
+**llm** 为通用 OpenAI 兼容主脑；**deepseek** 段仅在 model 为 DeepSeek 时由 `DeepSeekAdapter` 读取（[思考模式](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode)、[Tool Calls](https://api-docs.deepseek.com/zh-cn/guides/tool_calls)）。**`llm.base_url` 与 `model_name` 须匹配**（例如 DeepSeek 官方端点 + `deepseek-*`，勿混用 OpenAI 端点）。**llm_multimodal** 仅用于画面（`check_in_game`、`analyze_screen`、重试截图摘要），**不要**用于 `AnalysisAgent`（避免与 `tool_choice=required` 冲突）。**observer.skip_vision_probe** 控制多模态启动探针。
 
 ---
 
@@ -745,21 +791,25 @@ GameTurbo-Native/                    # GameTurbo SDK（外部依赖）
 
 | 区间 | 含义 | 是否重试 |
 |------|------|----------|
-| **E1xxx** | 代码/配置/执行者崩溃/预处理/deploy 基础设施等 | **否**，立即 `finish_run` |
-| **E2xxx** | 日志/画面网络异常、加速路由、下载失败等 | **是**（`retry_on_failure` 且未用尽次数） |
+| **E1xxx** | 代码/配置/执行者崩溃/预处理/deploy 基础设施、**包未安装（E1009）** 等 | **否**，立即 `finish_run` |
+| **E2xxx** | 日志网络异常、加速路由、下载失败等 | **是**（`retry_on_failure` 且未用尽次数） |
 
 失败原因字符串格式：`[E1001] 说明…`。`result.json` 含 `error_code`、`retryable`。
 
 **FailureCleanup：** finalize **gameturbo.log** → 域名分析 → force-stop → 卸载游戏（每轮失败都会做；**仅 E2xxx 会继续 Modify**）。
 
-**retry_on_failure: true 且 E2xxx：** FailureCleanup → **恢复/备份配置**（`gameturbo_config_retry`）→ AI 最小补丁 `games/gameturbo_{gid}_*.json` → `deploy.sh` → **`return` 进入下一轮 retry**（重新 Init + 并行游戏阶段）。
+**retry_on_failure: true 且 E2xxx：** FailureCleanup → **恢复/备份配置**（`gameturbo_config_retry`）→ AI 最小补丁 `games/gameturbo_{gid}_*.json`（若缺少 `domain_region_analysis.json` 则跳过 AI 补丁但仍 **deploy**）→ `deploy.sh` → **进入下一轮 retry**（重新 Init + 并行游戏阶段）。
 
-| E2 码 | 典型场景 |
-|-------|----------|
-| E2001 | 日志异常（含误报的 shutdown 等，见基线 skill） |
-| E2002 | 画面网络弹窗 |
-| E2004 | 路由/加速 |
-| E2005 | 下载失败 |
+| 码 | 典型场景 | 可重试 |
+|----|----------|--------|
+| E1009 | deploy/adb install 后包不在设备、`pm path` 超时 | 否 |
+| E1010 | 并行阶段截止且**未**观察到 `check_in_game` 确认（已成功信号不会覆盖） | 否 |
+| E1011 | 隧道闲置关闭且零 SNI（加速未生效） | 否 |
+| E2001 | 日志异常 / logcat 断流（见基线 skill） | 是 |
+| E2002 | 历史兼容：带 `[E2002]` 的画面网络类失败；当前由 `analyze_screen` 供主脑判断，不单独 fail-fast | 是 |
+| E2004 | 路由/加速 | 是 |
+| E2005 | 下载失败 | 是 |
+| E2006 | 执行者阶段网络类失败（显式 `[E2006]`） | 是 |
 
 Modify 改 `games/*.json`；**成功交付**为 **且仅当** `check_in_game` 通过后 deploy 产出的 `.gameturbo_merged.json` 副本。
 
@@ -778,6 +828,12 @@ A：见 `run_outputs/.../config_backups/` 与 `config_retry_journal.jsonl`；上
 
 **Q：LogMonitor 报 shutdown 导致执行者全被拦截？**  
 A：属 E2001 可重试；对照 [gameturbo_log_baseline_skill.md](skills/gameturbo_log_baseline_skill.md) 区分基线噪声与真异常；必要时清 logcat 或调基线规则。
+
+**Q：进游戏后 LogMonitor 还会跑吗？**  
+A：会。`check_in_game` 确认后仅停止执行者与 SessionCoordinator；在 `normal_exit_observe_s` 观察窗内 LogMonitor 仍监听，隧道异常或 logcat 断流会 fail-fast。
+
+**Q：deploy 成功但执行者报包未安装？**  
+A：属 **E1009**（不可重试）。查看 `deploy.log` 与安装监控摘要；小米/三星/vivo 需确认 Install 弹窗已被 OCR/u2 点击。
 
 **Q：crash 后日志混在一起了怎么办？**  
 A：SessionCoordinator 会归档旧段为 `gameturbo_session_*.log`，清空 logcat 后只往 **gameturbo.log** 写新会话。
@@ -803,11 +859,30 @@ A：填账号/密码用无障碍 `setText`（`fill_credential_field`），不依
 **Q：`fill_credential_field` 报未安装 uiautomator2？**  
 A：在项目目录执行 `pip install -e .`（已声明依赖），并对设备执行 `python -m uiautomator2 init`。
 
+**Q：隐私协议 checkbox 点到了右侧「协议/隐私」彩色文字？**  
+A：旧版会按关键词分数选中链接行，或把 OCR 日志里的中心坐标当锚点。现版只用**前缀说明框**的最左 `x1`，链接/适龄框不参与；左移按**半字宽**递增。请用 `detect_checkbox` / `locate_checkbox_near_text` 返回的 `target=(x,y)`，不要手算 OCR 中心或 `analyze_screen` 里的坐标。
+
+**Q：日志里 `check_in_game confirmed` 但任务仍报 `Parallel game phase timeout`？**  
+A：旧版编排器只等 executor 线程完全返回，成功后的 learned skill 生成可能触发误报。**现版**在 `check_in_game` 确认时经 `AttemptContext` 立即标记成功，编排器优先成功信号；learned skill 失败仅 warning，不影响 `success: true`。
+
+---
+
+## 单元测试
+
+```bash
+pip install -e ".[dev]"
+python -m pytest tests/ -q
+ruff check game_agent tests
+```
+
+覆盖：错误分类（E1/E2）、`apk_resolver`、ABI 剥离、`checkbox_locator` 前缀锚点与半字左推、`parallel_phase_policy` 超时判定、`install_monitor` OCR/品牌匹配、log 异常判定、路径解析等（无需真机）。
+
 ---
 
 ## 注意（补充说明）
 
-- GameTurbo 仅支持 `arm64-v8a` 和 `armeabi-v7a` 两个框架，预处理阶段会自动清理 APK 中其他 ABI 的 so 文件
+- 默认 `preserved_abis` 为 `arm64-v8a` / `armeabi-v7a`；可在 `settings.yaml` 的 `preprocessing.preserved_abis` 调整
+- `gameturbo.gid` 须为原包文件名数字前缀（如 `12345_game.apk`），或在配置中显式填写
 - 运行脚本需要在 **git-bash** 中执行（`deploy.sh`、`extract_domain_region_from_log.sh` 等依赖 bash 环境）
 - 若使用模拟器，优先自动选中；可在配置中指定 `adb.serial`
 - 登录填表依赖 **uiautomator2**：新设备须 `python -m uiautomator2 init`（详见「账号凭据与无障碍填表」）

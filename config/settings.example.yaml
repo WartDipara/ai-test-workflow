@@ -1,7 +1,7 @@
 # 复制为 config/settings.yaml 后填写；api_key 可用 ${ENV_NAME} 从环境变量读取
 llm:
-  base_url: "https://api.openai.com/v1"
-  api_key: "${OPENAI_API_KEY}"
+  base_url: "https://api.deepseek.com"
+  api_key: "${DEEPSEEK_API_KEY}"
   model_name: "deepseek-v4-flash"
 
 # 仅当 llm / llm_multimodal 的 model 为 DeepSeek 官方模型时使用（主脑也可换成 gpt-4o 等，此时可忽略本段）
@@ -14,7 +14,7 @@ deepseek:
 observer:
   skip_vision_probe: false
 
-# 仅画面观察：ScreenMonitor、check_in_game、重试前截图摘要；不做 tool_choice / 配置补丁
+# 多模态画面：executor 内 analyze_screen / check_in_game、重试前截图摘要；不做 tool_choice / 配置补丁
 llm_multimodal:
   base_url: "https://ai.14x.cn/coding/v1"
   api_key: "${QWEN_API_KEY}"

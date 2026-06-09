@@ -67,7 +67,11 @@ def discover_source_apk(packages_dir: Path = PACKAGES_DIR) -> Path:
 def parse_gid_from_apk_name(apk_path: Path) -> str:
     match = _GID_RE.match(apk_path.name)
     if not match:
-        raise RuntimeError(f"无法从 APK 文件名解析 gid: {apk_path.name}")
+        raise RuntimeError(
+            f"无法从 APK 文件名解析 gid: {apk_path.name}。"
+            "文件名需以数字 gid 开头（如 12345_game.apk），"
+            "或在 settings.yaml 的 gameturbo.gid 中显式配置。",
+        )
     return match.group(1)
 
 

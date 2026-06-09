@@ -40,8 +40,8 @@ Only read skills for **edge cases / troubleshooting** you cannot handle from thi
 - **`dismiss_overlay`** — uiautomator2 dismisses overlay/mask/announcement popups automatically
 - `credentials_status` / `fill_credential_field` / `verify_credential_field`
 - `get_ocr_summary` / `tap_coordinate` / `tap_and_observe` / `swipe_screen` / `press_back` / `wait_seconds`
-- **`detect_checkbox`** — YOLO locates unlabeled checkbox near "开始游戏" button; auto-falls back to OCR bbox if YOLO fails.
-- **`locate_checkbox_near_text(step=0)`** — OCR-only fallback; step=N moves 30px further left each retry.
+- **`detect_checkbox`** — privacy-agree checkbox via OCR terms-line left estimate (YOLO disabled); returns tap-ready coords.
+- **`locate_checkbox_near_text(step=0)`** — same line-left algorithm; step=N moves 30px further left from step=0 anchor. **Use returned (x,y) directly** — do NOT infer from agreement link text centers or swap axes.
 - **`dismiss_overlay`** — uiautomator2 dismisses announcement / overlay / mask popups automatically.
 - `report_flow_done(success=false, ...)` — unrecoverable stop
 
@@ -89,10 +89,10 @@ OCR shows "开始游戏" + terms text ("已阅读并同意", "同意隐私条款
 This is **completely different from the initial privacy popup (stage: privacy)** — this is an in-game screen after successful login.
 **Do NOT tap 开始游戏 directly.** 
 1. `get_ocr_summary` — locate "开始游戏" / "进入游戏" button, remember its coordinates (reuse cached, re-OCR only if forgotten).
-2. Call **`detect_checkbox(prompt="Point to the checkbox")`** → get (x, y) → `tap_coordinate(x, y)`.
+2. Call **`detect_checkbox(prompt="Point to the checkbox")`** or **`locate_checkbox_near_text(step=0)`** → read `target=(x,y)` from tool output → `tap_coordinate(x, y)`. **Never tap colored link text** (协议/隐私); checkbox is left of the whole terms line.
 3. Tap 开始游戏 directly (no verification needed — if checkbox was wrong, tap simply won't work).
-4. If tapping 开始游戏 doesn't work, call **`locate_checkbox_near_text(step=0)`** → `tap_coordinate` → tap 开始游戏.
-5. If still doesn't work, increase step: `step=1`, `step=2`, etc. — each step moves 30px further left from the text. Retry tap + 开始游戏 each time.
+4. If tapping 开始游戏 doesn't work, retry with **`locate_checkbox_near_text(step=1)`**, `step=2`, … — each step moves 30px further left from the step=0 anchor. Retry tap + 开始游戏 each time.
+5. Do **not** convert OCR coords from `analyze_screen` or guess portrait/landscape — only use checkbox tool coordinates for tapping the box.
 6. If all steps hit the screen edge or 开始游戏 still doesn't work, move on.
 
 ### in_game — Confirm entry
@@ -102,8 +102,8 @@ Call **`check_in_game`** repeatedly until `data.confirmed=true`.
 
 1. Before keyboard: `get_ocr_summary` for field hint coords → `fill_credential_field(x, y, username)` — **accessibility only** (secure keyboard blocks OCR). Read **VERIFY** lines.
 2. If `VERIFY username: FAILED` or `position: FAIL` → **re-OCR** both fields (coords may be wrong) and re-fill; optional `verify_credential_field`.
-3. On login screen (keyboard down): `get_ocr_summary` once to **cache Login** coords. `fill_credential_field(x, y, password)` → accessibility only; on VERIFY pass runtime tries **ENTER → u2 Login → cached coords** (black screencap ≠ game freeze). Optional dismiss is one fallback only.
-4. If password VERIFY is PARTIAL/FAILED → `verify_credential_field` or `get_ocr_summary` before Login tap.
+3. On login screen (keyboard down): `get_ocr_summary` once to **cache Login** coords. `fill_credential_field(x, y, password)` → accessibility only; on VERIFY pass or PARTIAL runtime auto-submits (ENTER → u2 Login → cached coords). Black screencap auto-presses Back — call `get_ocr_summary` again after BLACK.
+4. If VERIFY password is FAILED → `verify_credential_field` or `get_ocr_summary` before Login tap.
 5. `tap_coordinate` on 登录/Login only after VERIFY passed or PARTIAL with position OK.
 
 Do not tap Login while VERIFY shows wrong field or empty username.

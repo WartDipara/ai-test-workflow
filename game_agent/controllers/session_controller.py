@@ -117,6 +117,7 @@ class SessionCoordinator:
         if self.attempt_context is not None:
             self.attempt_context.request_reset_in_game_streak()
             self.attempt_context.set_session_restarts(self.session_state.restarts_count)
+            self.attempt_context.set_session_index(self.session_state.session_index)
 
         logger.warning(
             "[SessionCoordinator] 会话重启 #%d | %s",

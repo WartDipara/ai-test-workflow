@@ -123,45 +123,44 @@ class RetryConfigHandler:
                     "域名区域分析缺失，已跳过 AI 补丁",
                     changed=apply_result.changed,
                 )
-            return
-
-        with trace_operation("modify", "ai_propose_config_patch", gid=gid) as rec:
-            patch = await self._run_ai_patch(
-                reason=reason,
-                local_log_path=local_log_path,
-                domain_analysis=domain_json,
-                game_config_path=game_config_path,
-                failed_attempt=retry_count,
-            )
-            rec.ok(
-                direct_patterns=len(patch.direct_patterns),
-                port_rules=len(patch.port_rules),
-            )
-        with trace_operation("modify", "apply_config_patch", path=str(game_config_path)) as rec:
-            apply_result = apply_gameturbo_config_patch(game_config_path, patch)
-            rec.ok(changed=apply_result.changed, summary=apply_result.summary)
-        logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
-        if deliverable is not None and backup_before is not None:
-            record_patch_applied(
-                deliverable,
-                failed_attempt=retry_count,
-                game_config_path=game_config_path,
-                patch=patch,
-                apply_result=apply_result,
-                restored_from=restored_from,
-                backup_before_path=backup_before,
-                artifact_root=self.artifact_root,
-                blocked_stage_hint=blocked,
-            )
-        if self.audit is not None:
-            self.audit.log_phase(
-                PipelinePhase.MODIFY.value,
-                "GameTurbo 配置补丁已处理",
-                changed=apply_result.changed,
-                patch=patch.model_dump(mode="json"),
-                summary=apply_result.summary,
-                path=str(apply_result.path),
-            )
+        else:
+            with trace_operation("modify", "ai_propose_config_patch", gid=gid) as rec:
+                patch = await self._run_ai_patch(
+                    reason=reason,
+                    local_log_path=local_log_path,
+                    domain_analysis=domain_json,
+                    game_config_path=game_config_path,
+                    failed_attempt=retry_count,
+                )
+                rec.ok(
+                    direct_patterns=len(patch.direct_patterns),
+                    port_rules=len(patch.port_rules),
+                )
+            with trace_operation("modify", "apply_config_patch", path=str(game_config_path)) as rec:
+                apply_result = apply_gameturbo_config_patch(game_config_path, patch)
+                rec.ok(changed=apply_result.changed, summary=apply_result.summary)
+            logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
+            if deliverable is not None and backup_before is not None:
+                record_patch_applied(
+                    deliverable,
+                    failed_attempt=retry_count,
+                    game_config_path=game_config_path,
+                    patch=patch,
+                    apply_result=apply_result,
+                    restored_from=restored_from,
+                    backup_before_path=backup_before,
+                    artifact_root=self.artifact_root,
+                    blocked_stage_hint=blocked,
+                )
+            if self.audit is not None:
+                self.audit.log_phase(
+                    PipelinePhase.MODIFY.value,
+                    "GameTurbo 配置补丁已处理",
+                    changed=apply_result.changed,
+                    patch=patch.model_dump(mode="json"),
+                    summary=apply_result.summary,
+                    path=str(apply_result.path),
+                )
 
         with trace_operation("modify", "deploy_after_patch", gid=gid) as rec:
             try:

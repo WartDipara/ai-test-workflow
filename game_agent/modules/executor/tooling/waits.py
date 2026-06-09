@@ -144,6 +144,7 @@ async def execute_wait_for_game_running(
 async def execute_check_in_game(ctx: RunContext[ExecutorAgentDeps]) -> str:
     actx = ctx.deps.attempt_context
     sessions_restarted = actx.session_restarts if actx is not None else 0
+    session_index = actx.get_session_index() if actx is not None else 1
     result = await run_in_game_check(
         adb=ctx.deps.adb,
         cfg=ctx.deps.app_config,
@@ -152,8 +153,11 @@ async def execute_check_in_game(ctx: RunContext[ExecutorAgentDeps]) -> str:
         audit=ctx.deps.audit,
         round_id=ctx.deps.round_id,
         sessions_restarted=sessions_restarted,
+        session_index=session_index,
     )
     actx = ctx.deps.attempt_context
     if actx is not None and result.judgment is not None:
         actx.set_ui_observation(str(result.judgment.stage), "")
+    if result.confirmed and actx is not None:
+        actx.signal_in_game_confirmed(ctx.deps.run_state.note or "In-game confirmed")
     return result.message

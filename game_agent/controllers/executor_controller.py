@@ -9,6 +9,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.usage import UsageLimits
 
 from game_agent.config.loader import load_app_config
+from game_agent.config.paths import resolve_repo_path
 from game_agent.models.run_failure import classify_exception
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
@@ -64,8 +65,7 @@ class ExecutorFlowController:
     def load_settings(self) -> AppConfig:
         raw = load_app_config(self._config_path)
         art_dir = raw.agent.artifacts_dir
-        if not art_dir.is_absolute():
-            art_dir = (Path.cwd() / art_dir).resolve()
+        art_dir = resolve_repo_path(art_dir)
 
         self._app_config = raw.model_copy(
             update={
@@ -269,6 +269,10 @@ class ExecutorFlowController:
             last_completed_round = r
 
             if run_state.in_game_confirmed:
+                if attempt_context is not None:
+                    attempt_context.signal_in_game_confirmed(
+                        run_state.note or "In-game confirmed",
+                    )
                 if audit is not None:
                     audit.log_phase("executor", f"in_game confirmed round={r}")
                 break
@@ -299,14 +303,22 @@ class ExecutorFlowController:
             and last_completed_round is not None
             and cfg.agent.persist_learned_skill_on_success
         ):
-            skill_path = await write_skill_from_success_run(
-                cfg,
-                history,
-                task_label=game_pkg,
-                final_summary=run_state.note or "",
-                rounds_used=last_completed_round + 1,
-                artifact_run_dir=artifact_root.name,
-            )
+            try:
+                skill_path = await write_skill_from_success_run(
+                    cfg,
+                    history,
+                    task_label=game_pkg,
+                    final_summary=run_state.note or "",
+                    rounds_used=last_completed_round + 1,
+                    artifact_run_dir=artifact_root.name,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Learned skill generation failed (non-fatal): %s",
+                    e,
+                    exc_info=True,
+                )
+                skill_path = None
             if skill_path:
                 try:
                     rel = skill_path.relative_to(REPO_ROOT)

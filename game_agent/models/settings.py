@@ -435,6 +435,10 @@ class AppConfig(BaseModel):
                 raise ValueError("game.package_name 不能为空（modules.executor 为 true 时）")
             if not self.game.launch_activity.strip():
                 raise ValueError("game.launch_activity 不能为空（modules.executor 为 true 时）")
+            if self.llm_multimodal is None:
+                raise ValueError(
+                    "modules.executor 为 true 时 llm_multimodal 必填（check_in_game 依赖视觉模型）"
+                )
         return self
 
     llm: LLMSection

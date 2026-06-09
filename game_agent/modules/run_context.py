@@ -23,6 +23,9 @@ class AttemptContext:
     _reset_in_game_streak: bool = field(default=False, repr=False)
     deploy_package_verified: bool = False
     session_restarts: int = 0
+    session_index: int = 1
+    _in_game_confirmed: bool = field(default=False, repr=False)
+    _in_game_note: str = field(default="", repr=False)
 
     def signal_fatal(self, reason: str) -> None:
         with self._lock:
@@ -40,6 +43,14 @@ class AttemptContext:
     def set_session_restarts(self, count: int) -> None:
         with self._lock:
             self.session_restarts = max(0, int(count))
+
+    def set_session_index(self, index: int) -> None:
+        with self._lock:
+            self.session_index = max(1, int(index))
+
+    def get_session_index(self) -> int:
+        with self._lock:
+            return self.session_index
 
     def set_ui_observation(self, stage: str, progress: str = "") -> None:
         with self._lock:
@@ -78,3 +89,18 @@ class AttemptContext:
                 return False
             self._reset_in_game_streak = False
             return True
+
+    def signal_in_game_confirmed(self, note: str = "") -> None:
+        """Executor 在 check_in_game 确认后立即通知 orchestrator，避免等待收尾阻塞判定。"""
+        with self._lock:
+            self._in_game_confirmed = True
+            if (note or "").strip():
+                self._in_game_note = note.strip()[:2000]
+
+    def is_in_game_confirmed(self) -> bool:
+        with self._lock:
+            return self._in_game_confirmed
+
+    def get_in_game_note(self) -> str:
+        with self._lock:
+            return self._in_game_note

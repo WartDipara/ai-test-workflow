@@ -12,6 +12,7 @@ from game_agent.paths import REPO_ROOT
 from game_agent.services.adb_service import AdbService
 from game_agent.services.install_monitor.base import BaseInstallMonitor
 from game_agent.services.install_monitor.factory import create_install_monitor
+from game_agent.services.install_monitor.result import InstallMonitorResult
 from game_agent.services.pipeline_trace import trace_operation
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class DeployResult:
     cwd: Path
     log_path: Path | None
     returncode: int
+    install_monitor_summary: str = ""
 
 
 def _decode_output(data: bytes) -> str:
@@ -75,6 +77,23 @@ def verify_package_on_device(
     )
 
 
+def _run_monitor_thread(
+    monitor: BaseInstallMonitor,
+    adb: AdbService,
+    stop_event: threading.Event,
+    shot_dir: Path | None,
+    result_holder: list[InstallMonitorResult],
+) -> None:
+    try:
+        monitor.monitor_install(adb, stop_event, shot_dir)
+    except Exception as e:
+        monitor.result.thread_crashed = True
+        monitor.record_error(f"thread_crash: {e}")
+        logger.exception("安装监控线程异常退出")
+    finally:
+        result_holder.append(monitor.result)
+
+
 def run_deploy(
     gid: str,
     *,
@@ -100,10 +119,15 @@ def run_deploy(
         install_monitor = create_install_monitor(AdbService(serial))
 
     stop_event = threading.Event()
+    shot_dir = (artifact_root / "install_monitor") if artifact_root else None
+    if shot_dir is not None:
+        shot_dir.mkdir(parents=True, exist_ok=True)
+    monitor_results: list[InstallMonitorResult] = []
     monitor_thread = threading.Thread(
-        target=install_monitor.monitor_install,
-        args=(AdbService(serial), stop_event),
+        target=_run_monitor_thread,
+        args=(install_monitor, AdbService(serial), stop_event, shot_dir, monitor_results),
         daemon=True,
+        name="install_monitor",
     )
 
     with trace_operation(
@@ -124,22 +148,34 @@ def run_deploy(
             )
         finally:
             stop_event.set()
-            monitor_thread.join(timeout=10)
+            monitor_thread.join(timeout=15)
+            if monitor_thread.is_alive():
+                logger.warning("安装监控线程在 15s 内未结束")
+
+        monitor_summary = ""
+        if monitor_results:
+            monitor_summary = monitor_results[0].summary()
+            logger.info("安装监控汇总: %s", monitor_summary)
+        elif install_monitor.result.polls or install_monitor.result.errors:
+            monitor_summary = install_monitor.result.summary()
+
+        log_body = [
+            "$ " + " ".join(cmd),
+            "",
+            "=== stdout ===",
+            _decode_output(result.stdout),
+            "=== stderr ===",
+            _decode_output(result.stderr),
+        ]
+        if monitor_summary:
+            log_body.extend(["", "=== install_monitor ===", monitor_summary])
+        if install_monitor.result.errors:
+            log_body.extend(
+                ["", "=== install_monitor_errors ===", *install_monitor.result.errors],
+            )
 
         if log_path is not None:
-            log_path.write_text(
-                "\n".join(
-                    [
-                        "$ " + " ".join(cmd),
-                        "",
-                        "=== stdout ===",
-                        _decode_output(result.stdout),
-                        "=== stderr ===",
-                        _decode_output(result.stderr),
-                    ],
-                ),
-                encoding="utf-8",
-            )
+            log_path.write_text("\n".join(log_body), encoding="utf-8")
 
         if result.returncode != 0:
             rec.fail(
@@ -152,7 +188,12 @@ def run_deploy(
             )
 
         if expected_package:
-            verify_package_on_device(expected_package, serial=serial)
+            try:
+                verify_package_on_device(expected_package, serial=serial)
+            except RuntimeError as e:
+                if monitor_summary:
+                    raise RuntimeError(f"{e} | install_monitor: {monitor_summary}") from e
+                raise
 
         rec.ok(returncode=0, log_path=str(log_path) if log_path else None)
     logger.info("GameTurbo deploy 完成 (gid=%s)", gid)
@@ -161,5 +202,5 @@ def run_deploy(
         cwd=ANDROID_DIR,
         log_path=log_path,
         returncode=result.returncode,
+        install_monitor_summary=monitor_summary,
     )
-

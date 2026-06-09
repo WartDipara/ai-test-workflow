@@ -4,12 +4,16 @@ import logging
 
 from game_agent.services.adb_service import AdbService
 from game_agent.services.install_monitor.base import BaseInstallMonitor, NullInstallMonitor
+from game_agent.services.install_monitor.samsung import SamsungInstallMonitor
+from game_agent.services.install_monitor.vivo import VivoInstallMonitor
 from game_agent.services.install_monitor.xiaomi import XiaomiInstallMonitor
 
 logger = logging.getLogger(__name__)
 
 _INSTALL_MONITOR_CLASSES: list[type[BaseInstallMonitor]] = [
     XiaomiInstallMonitor,
+    SamsungInstallMonitor,
+    VivoInstallMonitor,
 ]
 
 
