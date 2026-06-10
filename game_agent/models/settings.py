@@ -222,6 +222,12 @@ class GameTurboSection(BaseModel):
         le=10,
         description="单次 deploy 流程内失败时，AI 分析 deploy.log 后重试 deploy 的最大次数（含首次）。",
     )
+    modify_patch_max_llm_retries: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="Modify 阶段生成配置补丁时，LLM 请求失败后的最大重试次数（含首次）。",
+    )
     run_outputs_dir: Path = Field(
         Path("./run_outputs"),
         description="单次任务最终产出目录根路径，子目录为 {gid}_{task_id}。",

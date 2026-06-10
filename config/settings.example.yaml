@@ -65,6 +65,7 @@ gameturbo:
   # gid / game_config_path / source_apk 由 TaskRuntime 按任务维护
   deploy_timeout_s: 900.0
   deploy_max_ai_retries: 3   # deploy 失败后 AI 读 deploy.log 并重试（含首次）的次数
+  modify_patch_max_llm_retries: 3   # Modify 生成补丁时 LLM 请求失败的重试次数（含首次）
   # 单次任务最终产出：run_outputs/{gid}_{task_id}/（成功为配置文件，失败为日志包）
   run_outputs_dir: "./run_outputs"
 

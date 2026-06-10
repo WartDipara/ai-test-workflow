@@ -4,7 +4,12 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from game_agent.exceptions import DeployPhaseError
+from game_agent.exceptions import (
+    ConfigPatchGenerationError,
+    ConfigPatchLlmError,
+    ConfigPatchRejectedError,
+    DeployPhaseError,
+)
 from game_agent.models.gameturbo_config import GameTurboConfigPatch
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.task_config import TaskConfig
@@ -20,7 +25,10 @@ from game_agent.services.gameturbo_log import ensure_gameturbo_log_for_analysis
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.utils.gameturbo_bootstrap import output_apk_path
-from game_agent.utils.gameturbo_config_apply import apply_gameturbo_config_patch
+from game_agent.utils.gameturbo_config_apply import (
+    ConfigApplyResult,
+    apply_gameturbo_config_patch,
+)
 from game_agent.utils.gameturbo_log_domain_extract import (
     DEFAULT_OUTPUT_NAME,
     extract_domain_region_from_log,
@@ -28,6 +36,20 @@ from game_agent.utils.gameturbo_log_domain_extract import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _patch_has_actionable_changes(patch: GameTurboConfigPatch) -> bool:
+    return bool(patch.direct_patterns or patch.port_rules)
+
+
+def _nonempty_log_path(path: Path | None) -> Path | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    return path if text else None
 
 
 @dataclass(slots=True)
@@ -86,79 +108,51 @@ class RetryConfigHandler:
             if self.artifact_root
             else Path("gameturbo.log")
         )
-        domain_json = self._ensure_domain_analysis_json(local_log_path)
-        if domain_json is None:
-            logger.warning(
-                "[RetryConfig] 缺少 domain_region_analysis.json，跳过 AI 配置补丁",
+        domain_json = self._require_domain_analysis_json(local_log_path)
+
+        with trace_operation("modify", "ai_propose_config_patch", gid=gid) as rec:
+            patch = await self._run_ai_patch(
+                reason=reason,
+                local_log_path=local_log_path,
+                domain_analysis=domain_json,
+                game_config_path=game_config_path,
+                failed_attempt=retry_count,
             )
-            with trace_operation("modify", "skip_ai_patch_no_domain_json") as rec:
-                rec.skip(message="domain_region_analysis.json 缺失")
-            patch = GameTurboConfigPatch(
-                analysis=(
-                    "未生成 domain_region_analysis.json（extract_domain_region_from_log 未成功），"
-                    "本轮不修改 direct_patterns/port_rules。"
-                ),
+            rec.ok(
+                direct_patterns=len(patch.direct_patterns),
+                port_rules=len(patch.port_rules),
             )
-            with trace_operation("modify", "apply_config_patch", skipped=True) as rec:
-                apply_result = apply_gameturbo_config_patch(game_config_path, patch)
-                rec.ok(changed=apply_result.changed, summary=apply_result.summary)
-            logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
-            if deliverable is not None and backup_before is not None:
-                record_patch_applied(
-                    deliverable,
-                    failed_attempt=retry_count,
-                    game_config_path=game_config_path,
-                    patch=patch,
-                    apply_result=apply_result,
-                    restored_from=restored_from,
-                    backup_before_path=backup_before,
-                    artifact_root=self.artifact_root,
-                    blocked_stage_hint=blocked,
-                )
-            if self.audit is not None:
-                self.audit.log_phase(
-                    PipelinePhase.MODIFY.value,
-                    "域名区域分析缺失，已跳过 AI 补丁",
-                    changed=apply_result.changed,
-                )
-        else:
-            with trace_operation("modify", "ai_propose_config_patch", gid=gid) as rec:
-                patch = await self._run_ai_patch(
-                    reason=reason,
-                    local_log_path=local_log_path,
-                    domain_analysis=domain_json,
-                    game_config_path=game_config_path,
-                    failed_attempt=retry_count,
-                )
-                rec.ok(
-                    direct_patterns=len(patch.direct_patterns),
-                    port_rules=len(patch.port_rules),
-                )
-            with trace_operation("modify", "apply_config_patch", path=str(game_config_path)) as rec:
-                apply_result = apply_gameturbo_config_patch(game_config_path, patch)
-                rec.ok(changed=apply_result.changed, summary=apply_result.summary)
-            logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
-            if deliverable is not None and backup_before is not None:
-                record_patch_applied(
-                    deliverable,
-                    failed_attempt=retry_count,
-                    game_config_path=game_config_path,
-                    patch=patch,
-                    apply_result=apply_result,
-                    restored_from=restored_from,
-                    backup_before_path=backup_before,
-                    artifact_root=self.artifact_root,
-                    blocked_stage_hint=blocked,
-                )
-            if self.audit is not None:
-                self.audit.log_phase(
-                    PipelinePhase.MODIFY.value,
-                    "GameTurbo 配置补丁已处理",
-                    changed=apply_result.changed,
-                    patch=patch.model_dump(mode="json"),
-                    summary=apply_result.summary,
-                    path=str(apply_result.path),
-                )
+
+        self._require_actionable_patch(patch)
+
+        with trace_operation("modify", "apply_config_patch", path=str(game_config_path)) as rec:
+            apply_result = apply_gameturbo_config_patch(game_config_path, patch)
+            rec.ok(changed=apply_result.changed, summary=apply_result.summary)
+
+        logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
+        self._require_config_changed(apply_result, patch)
+
+        if deliverable is not None and backup_before is not None:
+            record_patch_applied(
+                deliverable,
+                failed_attempt=retry_count,
+                game_config_path=game_config_path,
+                patch=patch,
+                apply_result=apply_result,
+                restored_from=restored_from,
+                backup_before_path=backup_before,
+                artifact_root=self.artifact_root,
+                blocked_stage_hint=blocked,
+            )
+        if self.audit is not None:
+            self.audit.log_phase(
+                PipelinePhase.MODIFY.value,
+                "GameTurbo 配置补丁已处理",
+                changed=apply_result.changed,
+                patch=patch.model_dump(mode="json"),
+                summary=apply_result.summary,
+                path=str(apply_result.path),
+            )
 
         with trace_operation("modify", "deploy_after_patch", gid=gid) as rec:
             try:
@@ -187,18 +181,26 @@ class RetryConfigHandler:
         if self.audit is not None:
             self.audit.log_phase(PipelinePhase.MODIFY.value, "配置与重试阶段完成")
 
-    def _ensure_domain_analysis_json(self, local_log_path: Path) -> dict | None:
+    def _require_domain_analysis_json(self, local_log_path: Path) -> dict:
         if not self.artifact_root:
-            return None
+            raise ConfigPatchGenerationError(
+                "缺少 artifact_root，无法生成 domain_region_analysis.json",
+                stage="domain_analysis",
+            )
         json_path = self.artifact_root / DEFAULT_OUTPUT_NAME
         existing = load_domain_region_analysis_json(json_path)
         if existing is not None:
             return existing
-        analysis_log = ensure_gameturbo_log_for_analysis(self.artifact_root)
+        analysis_log = _nonempty_log_path(
+            ensure_gameturbo_log_for_analysis(self.artifact_root),
+        )
         if analysis_log is None:
-            analysis_log = local_log_path if local_log_path.is_file() else None
-        if analysis_log is None or not analysis_log.is_file():
-            return None
+            analysis_log = _nonempty_log_path(local_log_path)
+        if analysis_log is None:
+            raise ConfigPatchGenerationError(
+                "缺少有效 gameturbo.log，无法执行域名/区域分析",
+                stage="domain_analysis",
+            )
         try:
             with trace_operation(
                 "domain_extract",
@@ -212,15 +214,98 @@ class RetryConfigHandler:
                 rec.ok(domain_count=result.domain_count)
             return result.to_json_dict()
         except Exception as e:
-            logger.warning("域名/区域分析失败: %s", e)
-            return None
+            logger.error("域名/区域分析失败: %s", e)
+            raise ConfigPatchGenerationError(
+                f"域名/区域分析失败，无法进入 Modify: {e}",
+                stage="domain_analysis",
+            ) from e
+
+    def _require_actionable_patch(self, patch: GameTurboConfigPatch) -> None:
+        if _patch_has_actionable_changes(patch):
+            return
+        analysis = (patch.analysis or "").strip()
+        summary = analysis[:1500] if analysis else "AI 未说明原因"
+        raise ConfigPatchRejectedError(
+            "AI 分析认为当前日志/域名下无可安全追加的配置变更（direct_patterns/port_rules 均为空）",
+            analysis=summary,
+        )
+
+    def _require_config_changed(
+        self,
+        apply_result: ConfigApplyResult,
+        patch: GameTurboConfigPatch,
+    ) -> None:
+        if apply_result.changed:
+            return
+        raise ConfigPatchGenerationError(
+            "配置补丁应用后无任何变更（可能全部为重复项或无效规则），"
+            f"summary={apply_result.summary or []}",
+            stage="noop_patch",
+        )
 
     async def _run_ai_patch(
         self,
         *,
         reason: str,
         local_log_path: Path,
-        domain_analysis: dict | None,
+        domain_analysis: dict,
+        game_config_path: Path,
+        failed_attempt: int,
+    ) -> GameTurboConfigPatch:
+        max_attempts = self.app_config.gameturbo.modify_patch_max_llm_retries
+        last_llm_error: ConfigPatchLlmError | None = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                patch = await self._invoke_ai_patch_once(
+                    reason=reason,
+                    local_log_path=local_log_path,
+                    domain_analysis=domain_analysis,
+                    game_config_path=game_config_path,
+                    failed_attempt=failed_attempt,
+                )
+            except ConfigPatchLlmError as exc:
+                last_llm_error = exc
+                logger.warning(
+                    "Modify AI 请求失败 (%d/%d): %s",
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                if self.audit is not None:
+                    self.audit.log_phase(
+                        PipelinePhase.MODIFY.value,
+                        "AI 配置补丁请求失败",
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        error=str(exc)[:800],
+                    )
+                if attempt < max_attempts:
+                    continue
+                raise ConfigPatchLlmError(
+                    f"Modify 阶段 AI 请求失败，已重试 {max_attempts} 次仍无法生成配置补丁: {exc}",
+                    attempt=max_attempts,
+                    max_attempts=max_attempts,
+                ) from exc
+            else:
+                if attempt > 1:
+                    logger.info("Modify AI 请求在第 %d 次尝试后成功", attempt)
+                return patch
+
+        if last_llm_error is not None:
+            raise last_llm_error
+        raise ConfigPatchLlmError(
+            "Modify 阶段 AI 请求失败",
+            attempt=max_attempts,
+            max_attempts=max_attempts,
+        )
+
+    async def _invoke_ai_patch_once(
+        self,
+        *,
+        reason: str,
+        local_log_path: Path,
+        domain_analysis: dict,
         game_config_path: Path,
         failed_attempt: int,
     ) -> GameTurboConfigPatch:

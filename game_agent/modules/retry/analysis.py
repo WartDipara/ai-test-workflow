@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic_ai import Agent
 
+from game_agent.exceptions import ConfigPatchGenerationError, ConfigPatchLlmError
 from game_agent.models.deploy_recovery import DeployRecoveryPatch
 from game_agent.models.failure_report import AttemptRoundDiagnosis, FailureDiagnosisReport
 from game_agent.models.gameturbo_config import GameTurboConfigPatch
@@ -109,12 +110,10 @@ Do not suggest changing _platform, default_action, tunnel_patterns (invalid at d
     ) -> GameTurboConfigPatch:
         logger.info("AnalysisAgent 开始生成结构化 GameTurbo 配置补丁...")
         if not domain_analysis:
-            return GameTurboConfigPatch(
-                analysis=(
-                    "Missing domain_region_analysis.json; cannot patch from "
-                    "extract_domain_region_from_log.sh / check_target_stability.py equivalent. "
-                    "Ensure gameturbo.log was exported and domain analysis succeeded."
-                ),
+            raise ConfigPatchGenerationError(
+                "缺少 domain_region_analysis.json，无法基于域名/区域分析生成配置补丁。"
+                "请确认 gameturbo.log 已导出且 extract_domain_region_from_log 成功。",
+                stage="domain_analysis",
             )
 
         domain_block = format_domain_analysis_for_ai(domain_analysis)
@@ -202,18 +201,24 @@ GameTurbo log tail (auxiliary):
         if screen_context.strip():
             prompt += f"\n\n{screen_context.strip()}\n"
 
-        try:
-            with trace_operation("llm", "analyze_and_propose_patch") as rec:
+        with trace_operation("llm", "analyze_and_propose_patch") as rec:
+            try:
                 result = await self._patch_agent.run(prompt)
-                patch = result.output or GameTurboConfigPatch(analysis="Model returned no patch")
-                rec.ok(
-                    direct_patterns=len(patch.direct_patterns),
-                    port_rules=len(patch.port_rules),
+            except Exception as e:
+                logger.error("AnalysisAgent 生成配置补丁失败: %s", e)
+                rec.fail(error=str(e)[:500])
+                raise ConfigPatchLlmError(f"AI 配置补丁请求失败: {e}") from e
+            if result.output is None:
+                rec.fail(error="empty_model_output")
+                raise ConfigPatchLlmError(
+                    "AI 未返回结构化 GameTurboConfigPatch（model output 为空）",
                 )
-                return patch
-        except Exception as e:
-            logger.error("AnalysisAgent 生成配置补丁失败: %s", e)
-            return GameTurboConfigPatch(analysis=f"Failed to generate config patch: {e}")
+            patch = result.output
+            rec.ok(
+                direct_patterns=len(patch.direct_patterns),
+                port_rules=len(patch.port_rules),
+            )
+            return patch
 
     async def generate_attempt_round_diagnosis(
         self,

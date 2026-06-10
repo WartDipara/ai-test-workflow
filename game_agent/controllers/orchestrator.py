@@ -19,7 +19,7 @@ from game_agent.controllers.network_anomaly_coordinator import NetworkAnomalyCoo
 from game_agent.controllers.pre_controller import PreprocessingController
 from game_agent.controllers.retry_controller import AnomalyHandler
 from game_agent.controllers.session_controller import SessionCoordinator
-from game_agent.exceptions import DeployPhaseError
+from game_agent.exceptions import ConfigPatchGenerationError, DeployPhaseError
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.run_state import RunState
 from game_agent.models.run_failure import (
@@ -1201,13 +1201,37 @@ class GameTestOrchestrator:
                 failure.format()[:500],
             )
 
-        self._handle_failure_sync(
-            retry,
-            failure,
-            run_retry_config=mods.retry_on_failure,
-            max_retries=max_retries,
-            will_retry=will_retry,
-        )
+        try:
+            self._handle_failure_sync(
+                retry,
+                failure,
+                run_retry_config=mods.retry_on_failure,
+                max_retries=max_retries,
+                will_retry=will_retry,
+            )
+        except ConfigPatchGenerationError as modify_exc:
+            modify_failure = classify_failure(str(modify_exc), exc=modify_exc)
+            self._last_failure_reason = modify_failure.format()
+            logger.error(
+                "Modify 阶段核心失败，终止任务: %s",
+                modify_failure.format()[:500],
+            )
+            if self._task_journal is not None:
+                self._task_journal.log(
+                    "attempt",
+                    "modify_failed",
+                    retry=retry,
+                    code=modify_failure.code.value,
+                    reason=modify_failure.message[:800],
+                )
+            if self._audit is not None:
+                self._audit.finalize(success=False, note=modify_failure.format()[:500])
+            raise _FinishRun(
+                success=False,
+                last_reason=modify_failure.format(),
+                max_retries=max_retries,
+                error_code=modify_failure.code.value,
+            ) from modify_exc
 
         if will_retry:
             self._cleanup_packages_after_attempt(will_retry=True)

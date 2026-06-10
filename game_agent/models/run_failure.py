@@ -89,6 +89,20 @@ _RETRYABLE_SUBSTRINGS = (
     "domain_region",
 )
 
+_MODIFY_CORE_FAIL_SUBSTRINGS = (
+    "domain_region_analysis",
+    "ai 分析认为当前日志/域名下无可安全追加",
+    "modify 阶段 ai 判断无可修改配置",
+    "配置补丁应用后无任何变更",
+    "modify 阶段 ai 请求失败",
+    "ai 配置补丁请求失败",
+    "ai 未返回结构化",
+    "缺少 gameturbo.log",
+    "域名/区域分析失败",
+    "modify 阶段核心失败",
+    "config patch generation",
+)
+
 _NON_RETRYABLE_SUBSTRINGS = (
     "is not defined",
     "nameerror",
@@ -162,6 +176,14 @@ def classify_failure(
         else:
             code = ErrorCode.NET_SCREEN_ANOMALY
         return RunFailure(code, text, retryable=True)
+
+    if any(s in lower for s in _MODIFY_CORE_FAIL_SUBSTRINGS):
+        return RunFailure(
+            ErrorCode.CONFIG,
+            text,
+            retryable=False,
+            detail="Modify stage core failure (domain analysis or config patch)",
+        )
 
     if any(s in lower for s in _NON_RETRYABLE_SUBSTRINGS):
         code = ErrorCode.EXECUTOR_FLOW
@@ -239,7 +261,40 @@ def classify_exception(
             detail=msg,
         )
 
-    from game_agent.exceptions import DeployPhaseError
+    from game_agent.exceptions import (
+        ConfigPatchGenerationError,
+        ConfigPatchLlmError,
+        ConfigPatchRejectedError,
+        DeployPhaseError,
+    )
+
+    if isinstance(exc, ConfigPatchLlmError):
+        return RunFailure(
+            ErrorCode.LLM_API,
+            "Modify 阶段 AI 请求失败",
+            retryable=False,
+            detail=(
+                f"stage=llm_patch; attempts={exc.attempt}/{exc.max_attempts}; "
+                f"{msg[:400]}; {context[:200]}"
+            ),
+        )
+
+    if isinstance(exc, ConfigPatchRejectedError):
+        analysis = exc.analysis[:800] if exc.analysis else ""
+        return RunFailure(
+            ErrorCode.CONFIG,
+            "Modify 阶段 AI 判断无可修改配置",
+            retryable=False,
+            detail=f"stage={exc.stage}; {analysis or msg[:400]}",
+        )
+
+    if isinstance(exc, ConfigPatchGenerationError):
+        return RunFailure(
+            ErrorCode.CONFIG,
+            msg,
+            retryable=False,
+            detail=f"stage={exc.stage}; {context[:400]}",
+        )
 
     if isinstance(exc, DeployPhaseError):
         failure = classify_failure(msg)
