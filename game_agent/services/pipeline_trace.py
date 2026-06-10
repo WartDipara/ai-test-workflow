@@ -11,6 +11,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from game_agent.utils.stage_logging import get_pipeline_stage
+
 _pipeline_logger = logging.getLogger("game_agent.pipeline")
 
 _current_tracer: ContextVar[PipelineTracer | None] = ContextVar(
@@ -88,8 +90,10 @@ class PipelineTracer:
                 payload["detail"] = _compact_detail(detail)
 
         line = json.dumps(payload, ensure_ascii=False, default=str)
+        stage = get_pipeline_stage()
         _pipeline_logger.info(
-            "[PIPELINE] %s.%s status=%s%s%s%s",
+            "[PIPELINE][%s] %s.%s status=%s%s%s%s",
+            stage,
             component,
             operation,
             status,

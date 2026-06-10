@@ -24,11 +24,9 @@ def main(argv: list[str] | None = None) -> int:
     from game_agent.config.loader import load_app_config
 
     cfg = load_app_config(cfg_path)
-    logging.basicConfig(
-        level=getattr(logging, cfg.logging.level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,
-    )
+    from game_agent.utils.stage_logging import install_stage_aware_logging
+
+    install_stage_aware_logging(cfg.logging.level, force=True)
 
     from game_agent.controllers.orchestrator import run_orchestrator
     from game_agent.services.shutdown import (

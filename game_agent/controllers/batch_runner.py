@@ -17,6 +17,7 @@ from game_agent.controllers.task_queue import (
 from game_agent.models.task_context import TaskContext
 from game_agent.models.task_runtime import TaskRuntimeRegistry
 from game_agent.services.adb_devices import list_connected_devices
+from game_agent.services.batch_cleanup import cleanup_batch_workspace
 from game_agent.services.shutdown import ShutdownRequested, is_shutdown_requested
 
 logger = logging.getLogger(__name__)
@@ -41,9 +42,15 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
     devices = list_connected_devices()
     if not devices:
         logger.error("批跑失败：adb devices 中无 state=device 的设备")
+        cleanup_batch_workspace(
+            batch_root,
+            BatchManifest(batch_root=batch_root, devices=[], tasks=[]),
+            run_outputs_dir=out_dir,
+        )
         return 1
 
     interrupted = False
+    manifest: BatchManifest | None = None
 
     try:
         with TaskQueueLock(lock_path):
@@ -130,6 +137,17 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
             manifest.finalize(queue)
             manifest.save()
             GlobalTaskQueue.reset()
+
+        if manifest is not None:
+            archived, cleanup_failed = cleanup_batch_workspace(
+                batch_root,
+                manifest,
+                run_outputs_dir=out_dir,
+            )
+            if cleanup_failed:
+                logger.warning("批跑收尾清理部分失败: %s", cleanup_failed)
+            elif archived:
+                logger.debug("batch_manifest 归档完成: %d 处", len(archived))
 
         if interrupted:
             failed = [t for t in manifest.tasks if t.status != ApkTaskStatus.SUCCEEDED]

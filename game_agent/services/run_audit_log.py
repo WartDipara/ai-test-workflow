@@ -19,6 +19,7 @@ from game_agent.services.llm_transcript import (
     format_new_llm_messages,
     format_user_parts_for_console,
 )
+from game_agent.utils.stage_logging import attach_stage_formatter
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +75,7 @@ class RunAuditLogger:
         self.detach_process_log_handler()
         log_path = self.artifact_root / "process.log"
         handler = logging.FileHandler(log_path, encoding="utf-8")
-        handler.setLevel(getattr(logging, level.upper(), logging.INFO))
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"),
-        )
+        attach_stage_formatter(handler, level)
         logging.getLogger().addHandler(handler)
         self._process_log_handler = handler
         return handler

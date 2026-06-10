@@ -90,6 +90,60 @@ Return valid JSON only (no markdown fence):
             logger.exception("%s API 失败 | 耗时 %.2fs", prefix, elapsed)
             return '{"has_anomaly": false, "anomaly_reason": "", "stage": "unknown", "progress": ""}'
 
+    async def probe_server_connectivity(
+        self,
+        *,
+        screenshot_path: Path,
+        ocr_summary: str,
+        round_id: int | None = None,
+    ) -> str:
+        """区服槽状态一眼判断（进入游戏屏 + empty/ready/error）。"""
+        prompt = f"""
+You judge server/zone selector health on a mobile game pre-entry screen (before in-game HUD).
+Use screenshot + OCR. Ignore top-left network speed overlay (GameTurbo).
+
+OCR:
+{ocr_summary}
+
+Return JSON only (no markdown fence):
+{{
+  "on_enter_game_screen": bool,
+  "enter_button_visible": bool,
+  "server_slot_status": "empty | loading | ready | error | not_visible",
+  "server_list_likely_available": bool,
+  "has_network_error_ui": bool,
+  "confidence": 0.0-1.0,
+  "reason": "one sentence",
+  "recommendation": "tap_verify | fail_fast | wrong_stage"
+}}
+
+Rules:
+- on_enter_game_screen=true when main CTA like 踏入仙途/开始游戏/进入游戏/Enter/Start is visible WITH server pick UI above it.
+- wrong_stage when still on login, sub-account picker only, or download — NO enter-game CTA.
+- server_slot_status=empty: server area visible but no valid server name (blank, dashes ----, only click-to-select hint). empty is NOT healthy — list may be unreachable.
+- server_slot_status=error OR has_network_error_ui=true: explicit network/server fetch failure OR toast like 默认服不存在/所选服不存在/请重新选服/server does not exist/re-select server.
+- server_slot_status=ready: readable server/zone name in server slot (not dashes).
+- If ----- or Click to select Server appears WITH any server-error toast → error + has_network_error_ui=true + fail_fast.
+- fail_fast when error UI/toast is visible; tap_verify only when empty slot looks interactive and no error toast.
+"""
+        prefix = f"[VisionWorker:server_probe] 第 {round_id} 轮" if round_id is not None else "[VisionWorker:server_probe]"
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run(
+                [prompt, BinaryImage.from_path(screenshot_path)],
+            )
+            output = (result.output or "").strip()
+            logger.info(
+                "%s 完成 %.2fs | %s",
+                prefix,
+                time.perf_counter() - t0,
+                output.replace("\n", " ")[:200],
+            )
+            return output
+        except Exception:
+            logger.exception("%s API 失败", prefix)
+            return "{}"
+
     async def judge_in_game_main(
         self,
         *,

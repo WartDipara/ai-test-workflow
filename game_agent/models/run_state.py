@@ -24,3 +24,16 @@ class RunState:
     cached_login_button_text: str = ""
     # (line_x1, cy, half_char_px, _) — step>0 时复用，避免重复 OCR
     checkbox_bbox_cache: tuple[int, int, int, int] | None = None
+    # launch 流程阶段追踪（显式状态，不依赖 prompt 记忆）
+    launch_stage: str = "launch"
+    server_checked: bool = False
+    server_check_attempts: int = 0
+    last_stage_error: str = ""
+
+    def format_launch_stage_status(self) -> str:
+        return (
+            f"[LaunchStage] stage={self.launch_stage!r} "
+            f"server_checked={self.server_checked} "
+            f"server_check_attempts={self.server_check_attempts}"
+            + (f" last_error={self.last_stage_error!r}" if self.last_stage_error else "")
+        )

@@ -63,7 +63,8 @@ Chronologically, **at least** these phases should appear (may overlap/repeat).
 | `[SOCKET]` | socket created | Grows with PENDING-SNI |
 | `[PENDING-SNI]` | TLS before domain known | Followed by SNI-DIRECT or SNI-TUNNEL |
 | `[SNI-DIRECT]` | direct route | SDK/CDN/stats common |
-| `[SNI-TUNNEL]` | tunnel route | game server / key business |
+| `[SNI-TUNNEL]` | tunnel route | game server / key business; may show trailing `sni geo default` triple |
+| `[IPV6-RULE]` | IPv6 default route | often direct without SNI — may be invisible in domain JSON |
 | `stream N opened` | tunnel stream | After SNI-TUNNEL |
 | `[TUNNEL] prealloc notify` | tunnel prealloc | Matches stream |
 | `[SEND-TUNNEL]` | send via tunnel | Continuous in play |
@@ -143,6 +144,56 @@ Two healthy samples (different games) — **order of magnitude only**, not hard 
 
 ---
 
+## SNI-TUNNEL / SNI-DIRECT trailing triple (sniRoute geoRoute defaultRoute)
+
+Some lines print three integers after the fd, e.g.:
+
+`[SNI-TUNNEL] ylx10cdn.youjiayouxi.cn → 220.194.72.86:80 (fd 128) -1 -1 1`
+
+Source: `GameTurbo-Native/client/android/src/gt_intercept.c` — `sniRoute`, `geoRoute`, `defaultRoute`.
+
+| Position | Variable | Meaning | `-1` means |
+|----------|----------|---------|------------|
+| 1st | `sniRoute` | `direct_patterns` / `tunnel_patterns` / `domain_rules` | **No domain rule matched** (not failure) |
+| 2nd | `geoRoute` | GeoIP (`directForeignIP` / `tunnelChineseIP`) | **Geo did not decide** (not "domain abnormal") |
+| 3rd | `defaultRoute` | `default_action` mapped (tunnel=1, direct=0) | Current default (e.g. `tunnel` → `1`) |
+
+Tunnel is chosen when: `sniRoute==1`, or (`sniRoute==-1` and geo says tunnel), or (`sniRoute==-1` and `geoRoute==-1` and `defaultRoute==tunnel`).
+
+**Common patterns**
+
+- `-1 -1 1` + `[SNI-TUNNEL]` + `[SEND-TUNNEL]` → data plane healthy; routing is **default tunnel only** (no per-domain rule).
+- `-1 -1 1` does **not** mean acceleration failed; the tag is already `[SNI-TUNNEL]`.
+- `-1 -1 1` also does **not** prove this domain **should** stay on tunnel — only that default said tunnel.
+- `1 * *` or `0 * *` → domain rule explicitly decided; trust 1st number.
+- `[SNI-DIRECT]` lines: read 1st/2nd numbers; do not infer from 3rd alone.
+
+**Misread to avoid**: `-1` ≠ "GameTurbo ineffective" ≠ automatic reason to add `direct_patterns`.
+
+---
+
+## Config suggestion decision tree (Modify / failure report)
+
+Use with `domain_region_analysis.json` and executor failure code (E2006/E2002/etc.).
+
+| Observation | Config action |
+|-------------|----------------|
+| `-1 -1 1` + TUNNEL + SEND-TUNNEL + **game flow OK** | **No change** |
+| `-1 -1 1` + TUNNEL + SEND-TUNNEL + **E2006/E2002** + domain looks like **CDN/resource** (`cdn`, `static`, `res`, `pkg` in name) | **Trial** one `direct_patterns` entry for that CDN domain on next retry; verify server list / download / UI |
+| `direct_domains` with clear CDN/channel/SDK | Cautiously append matching `direct_patterns` |
+| `tunnel_domains` that are login/gateway/realm/sync core | **Do not** direct; check executor / PCAP for API domain |
+| `[IPV6-RULE] … → direct` with **no SNI** domain in JSON | Log `evidence_gaps`; PCAP for API hostname; **never** add bare IP to `direct_patterns` |
+| `unknown_domains` / bulk "just connect" | **No** bulk direct |
+| Trial direct on CDN still fails E2006 | Roll back direct; investigate no-SNI API (IPV6-RULE) or executor |
+
+**16914 example (gid 16914, server list E2006)**
+
+- Log: `ylx10cdn.youjiayouxi.cn … -1 -1 1` + heavy SEND-TUNNEL — tunnel works; game server slot still empty.
+- **Hypothesis A (config trial)**: CDN named domain tunneled only by default → next Modify try `direct_patterns: ["ylx10cdn.youjiayouxi.cn"]` (single variable; keep `ylx10pkg` unchanged initially).
+- **Hypothesis B (parallel)**: `[IPV6-RULE] ::ffff:139.177.246.x → direct` near failure time — possible server-list API without SNI; needs PCAP; separate from CDN direct trial.
+
+---
+
 ## Modify-stage patch hints (automation: direct_patterns / port_rules only)
 
 This project tests **tunnel acceleration**. Keep `default_action` **tunnel**; automation does **not** change `tunnel_patterns`.
@@ -150,10 +201,12 @@ This project tests **tunnel acceleration**. Keep `default_action` **tunnel**; au
 | Log/JSON | Patch direction |
 |----------------|----------|
 | channel/SDK/stats/CDN in `direct_domains` | **cautiously** append `direct_patterns` (must match JSON) |
+| CDN-like name in `tunnel_domains` + E2006/E2002 + log `-1 -1 1` on that domain | **one-domain direct trial** (see decision tree above) |
 | `unknown_domains` / login/gateway/server | **no** bulk direct to "just connect"; prefer tunnel |
 | long `unmatched_pending_ips` | investigate; direct only if confirmed resource CDN |
 | tunnel domains bad, direct OK | check AUTH/rebuild/entry, not more direct |
 | all direct, no TUNNEL | config not loaded or over-direct; **do not** widen direct_patterns |
+| `[IPV6-RULE]` direct traffic, empty `unknown_domains` | PCAP / evidence_gaps; not IP-only direct_patterns |
 
 Domain analysis: read artifact `domain_region_analysis.json` (not shell stdout).
 Generated by `game_agent.utils.gameturbo_log_domain_extract` (aligned with `extract_domain_region_from_log.sh` + `check_target_stability.py`).

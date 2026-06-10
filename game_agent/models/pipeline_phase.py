@@ -4,6 +4,8 @@ from enum import Enum
 
 
 class PipelinePhase(str, Enum):
+    ORCHESTRATOR = "orchestrator"
+    PREPROCESS = "preprocess"
     INIT = "init"
     MODIFY = "modify"
     EXECUTOR = "executor"

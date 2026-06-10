@@ -46,6 +46,9 @@ description: >-
 | 账号密码、安全键盘黑屏、填表后要点登录 | `game_launch_ocr` |
 | LogMonitor 报 E2001、`tunnel closed`、要不要改 direct_patterns | `gameturbo_log_baseline` |
 | 写 `failure_report` / 判断加速是否正常 | `gameturbo_log_baseline` |
+| `[SNI-TUNNEL]` 后面 `-1 -1 1` 什么意思、要不要改配置 | `gameturbo_log_baseline` |
+| E2006 但 SEND-TUNNEL 正常、CDN 域是否试探 direct | `gameturbo_log_baseline` |
+| `[IPV6-RULE]` 直连、domain JSON 里没有对应域名 | `gameturbo_log_baseline` |
 
 ---
 

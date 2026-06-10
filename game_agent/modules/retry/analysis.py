@@ -122,8 +122,13 @@ Do not suggest changing _platform, default_action, tunnel_patterns (invalid at d
         domain_priority_note = (
             "[Mandatory] Domain/region analysis below is from game_agent.utils.gameturbo_log_domain_extract, "
             "aligned with GameTurbo-Native/extract_domain_region_from_log.sh + check_target_stability.py. "
-            "direct_patterns: only pick from direct_domains when sure they are resource/CDN/channel/SDK; "
-            "no bulk direct for unknown_domains; never move tunnel_domains to direct."
+            "direct_patterns: prefer direct_domains when sure they are resource/CDN/channel/SDK; "
+            "no bulk direct for unknown_domains. "
+            "Exception: tunnel_domains with CDN/resource naming (cdn/static/res/pkg) when failure is "
+            "E2006/E2002 and gameturbo.log shows [SNI-TUNNEL] … -1 -1 1 on that domain — allow ONE "
+            "direct_patterns trial entry; state verification in analysis. "
+            "Never direct login/gateway/realm core domains. "
+            "See log_ipv6_rule_direct block — do not add bare IPs to direct_patterns."
         )
 
         prompt = f"""
@@ -149,8 +154,15 @@ Add to direct only when **sure** the domain is:
 **Do not** direct:
 - Combat/login/realm/gateway/sync core domains (even if unknown — keep tunnel);
 - Unknown domains bulk-directed just to connect;
-- Domains already [SNI-TUNNEL] and healthy;
-- Domains not in domain JSON and without [SNI-DIRECT] in logs.
+- Domains already [SNI-TUNNEL] and healthy **when game flow also succeeded**;
+- Domains not in domain JSON and without [SNI-DIRECT] in logs;
+- Bare IPs from [IPV6-RULE] lines (need domain from PCAP first).
+
+**CDN trial exception** (E2006/E2002 only):
+- If `tunnel_domains` entry name suggests CDN/resource (`cdn`, `pkg`, `static`, `res`, …) AND log shows
+  `[SNI-TUNNEL] <that-domain> … -1 -1 1` (default tunnel only) AND executor reports server/download/network UI failure:
+  append **one** matching `direct_patterns` entry for the next retry; explain in `analysis`.
+- Do not direct multiple CDN domains in one round; do not direct `ylx10pkg` and `ylx10cdn` together on first trial unless one already failed.
 
 Keep default_action **tunnel**; do not propose changing it in the patch.
 Do not use tunnel_patterns (not in this patch model); acceleration = default_action=tunnel + minimal direct allowlist.

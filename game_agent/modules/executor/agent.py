@@ -40,6 +40,11 @@ from game_agent.services.skill_catalog import read_login_flow_guide as load_logi
 from game_agent.services.skill_catalog import read_repo_skill as load_repo_skill_text
 from game_agent.services.skill_catalog import read_skills_index as load_skills_index_text
 from game_agent.services.gameturbo_log import format_latest_gameturbo_log_for_agent
+from game_agent.services.server_selector_pipeline import (
+    message_indicates_e2006,
+    preview_server_selector_locate,
+    run_full_server_selector_check,
+)
 from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.utils.ocr_util import (
     extract_text_with_bbox,
@@ -344,13 +349,73 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
                 "\n[Screencap mostly BLACK] secure keyboard detected — pressed Back to dismiss. "
                 "Call get_ocr_summary again for fresh OCR."
             )
-        return f"[Live OCR from device screencap] file={path.resolve()}\n{s}{cache_line}"
+        stage_line = f"\n{ctx.deps.run_state.format_launch_stage_status()}"
+        return f"[Live OCR from device screencap] file={path.resolve()}\n{s}{cache_line}{stage_line}"
 
     @t(kind=ToolKind.INSTANT)
     async def tap_coordinate(ctx: RunContext[ExecutorAgentDeps], x: int, y: int) -> str:
         sw, sh = ctx.deps.adb.touch_size()
         msg = ctx.deps.adb.tap(x, y, width=sw, height=sh)
         return f"{msg}\nHint: UI may have changed — call get_ocr_summary for fresh OCR."
+
+    @t(kind=ToolKind.INSTANT)
+    async def locate_server_selector(ctx: RunContext[ExecutorAgentDeps]) -> str:
+        """预览：进入游戏按钮锚点 + 上方区服带点击坐标（不 tap、不写 server_checked）。"""
+        preview = await asyncio.to_thread(
+            preview_server_selector_locate,
+            ctx.deps.adb,
+            ctx.deps.artifact_root,
+        )
+        return f"{preview.message}\n{ctx.deps.run_state.format_launch_stage_status()}"
+
+    @t(kind=ToolKind.INSTANT)
+    async def check_server_selector(
+        ctx: RunContext[ExecutorAgentDeps],
+        x: int = 0,
+        y: int = 0,
+        label: str = "",
+    ) -> str:
+        """
+        登录后、privacy_agree 前：多模态探针 + 进入游戏锚点定位 + 点击验证区服列表弹窗。
+        默认无坐标（x=y=0）自动定位；成功后 server_checked=true。
+        """
+        run = ctx.deps.run_state
+        if run.finished:
+            return (
+                "Executor already stopped; do not call tools. "
+                f"{run.format_launch_stage_status()}"
+            )
+        if message_indicates_e2006(run.last_stage_error):
+            run.finished = True
+            run.success = False
+            if not run.note:
+                run.note = run.last_stage_error[:2000]
+            return (
+                "[ServerCheck] BLOCKED — prior [E2006] server failure; flow stopped. "
+                f"{run.format_launch_stage_status()}"
+            )
+        run.launch_stage = "server_check"
+        result = await run_full_server_selector_check(
+            ctx.deps.adb,
+            ctx.deps.artifact_root,
+            ctx.deps.app_config,
+            round_id=ctx.deps.round_id,
+            manual_x=x,
+            manual_y=y,
+            manual_label=label,
+        )
+        run.server_check_attempts += result.taps_used
+        if result.ok and result.panel_opened:
+            run.server_checked = True
+            run.launch_stage = "privacy_agree"
+            run.last_stage_error = ""
+        else:
+            run.last_stage_error = result.message[:500]
+            if message_indicates_e2006(result.message):
+                run.finished = True
+                run.success = False
+                run.note = result.message[:2000]
+        return f"{result.message}\n{run.format_launch_stage_status()}"
 
     @t(kind=ToolKind.INSTANT)
     async def detect_checkbox(
@@ -361,6 +426,13 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         Use YOLO vision model to detect an untagged UI element and return its tap coordinates
         in device logical pixel space. Falls back to OCR bbox method if YOLO fails.
         """
+        if not ctx.deps.run_state.server_checked:
+            return (
+                "[Checkbox] BLOCKED: server_checked=false. "
+                "Complete check_server_selector before privacy_agree checkbox. "
+                f"{ctx.deps.run_state.format_launch_stage_status()}"
+            )
+        ctx.deps.run_state.launch_stage = "privacy_agree"
         # import httpx  # uncomment with YOLO block below
         # from PIL import Image
 
@@ -416,6 +488,13 @@ def build_executor_agent(app_config: AppConfig) -> Agent[ExecutorAgentDeps, str]
         OCR 协议文字行左推 checkbox。step=0 重新截图 OCR；step>0 复用缓存行锚点并继续左移。
         返回坐标已是 adb touch_size 空间，直接 tap_coordinate，勿自行换算。
         """
+        if not ctx.deps.run_state.server_checked:
+            return (
+                "[OCR checkbox] BLOCKED: server_checked=false. "
+                "Complete check_server_selector before privacy_agree checkbox. "
+                f"{ctx.deps.run_state.format_launch_stage_status()}"
+            )
+        ctx.deps.run_state.launch_stage = "privacy_agree"
         sw, sh = ctx.deps.adb.touch_size()
 
         shot_path = ""

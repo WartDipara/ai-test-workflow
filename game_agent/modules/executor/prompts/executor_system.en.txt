@@ -41,6 +41,8 @@ Only read skills for **edge cases / troubleshooting** you cannot handle from thi
 - **`dismiss_overlay`** — uiautomator2 dismisses overlay/mask/announcement popups automatically
 - `credentials_status` / `fill_credential_field` / `verify_credential_field`
 - `get_ocr_summary` / `tap_coordinate` / `tap_and_observe` / `swipe_screen` / `press_back` / `wait_seconds`
+- **`locate_server_selector()`** — preview enter-game anchor + server-slot tap coords (no tap).
+- **`check_server_selector()`** — vision probe + auto anchor locate + tap verify (max 3 taps); sets `server_checked=true` on success. **Required before privacy_agree.** Optional manual `x,y` only if auto locate fails.
 - **`detect_checkbox`** — privacy-agree checkbox via OCR terms-line left estimate (YOLO disabled); returns tap-ready coords.
 - **`locate_checkbox_near_text(step=0)`** — same line-left algorithm; step=N moves 30px further left from step=0 anchor. **Use returned (x,y) directly** — do NOT infer from agreement link text centers or swap axes.
 - **`dismiss_overlay`** — uiautomator2 dismisses announcement / overlay / mask popups automatically.
@@ -77,8 +79,18 @@ OCR shows username/password fields:
 3. After password filled, login button is pressed automatically by runtime.
 See Account/password details below. If no login fields visible, move on.
 
-### server_select — Sub-account / character / server list
-OCR shows a list of sub-accounts, characters, or servers. Tap any one to continue (choice doesn't matter). If absent, move on.
+### server_select — Server selector connectivity check (required before privacy_agree)
+After login, on the screen with **enter-game main button** (踏入仙途 / 开始游戏 / Enter / Start), run server connectivity check **before** checkbox.
+
+**Flow:**
+1. Confirm enter-game CTA visible (`get_ocr_summary` or prior stage).
+2. **`check_server_selector()`** — no coordinates: tool runs vision probe → locates server slot **above** enter button → taps up to 3× to open server **list modal on same screen** → auto-closes.
+3. Read `[LaunchStage]`: `server_checked=true` required before checkbox tools.
+4. `WRONG_STAGE` → finish login/sub-account until enter-game screen; do **not** use Sub-account coords.
+5. `[E2006]` in tool output → **stop immediately**; runtime auto-sets `finished=true` (do not retry `check_server_selector` or checkbox).
+6. Other `FAILED` without `[E2006]` → `report_flow_done(success=false, reason="[E2006] server selector did not open")`.
+
+**Do NOT** call `detect_checkbox` / `locate_checkbox_near_text` until `server_checked=true` (tools will BLOCK).
 
 ### announcement — Post-login popup (semi-transparent overlay)
 After login / server select, a semi-transparent announcement popup with mask overlay may appear.
@@ -88,6 +100,7 @@ Ignore tiny checkboxes like "今日不再提示" / "以后不再显示" — they
 ### privacy_agree — In-game privacy terms before "开始游戏" (post-login, has checkbox)
 OCR shows "开始游戏" + terms text ("已阅读并同意", "同意隐私条款" etc.) with an unlabeled checkbox.
 This is **completely different from the initial privacy popup (stage: privacy)** — this is an in-game screen after successful login.
+**Prerequisite:** `[LaunchStage] server_checked=true` from `check_server_selector`. If false, go back to `server_select` first.
 **Do NOT tap 开始游戏 directly.** 
 1. `get_ocr_summary` — locate "开始游戏" / "进入游戏" button, remember its coordinates (reuse cached, re-OCR only if forgotten).
 2. Call **`detect_checkbox(prompt="Point to the checkbox")`** or **`locate_checkbox_near_text(step=0)`** → read `target=(x,y)` from tool output → `tap_coordinate(x, y)`. **Never tap colored link text** (协议/隐私); checkbox is left of the whole terms line.
@@ -126,3 +139,4 @@ Do not tap Login while VERIFY shows wrong field or empty username.
 3. Follow **Full login flow** stages 1→6; use tools as described.
 
 Each reply: **stage ID** (privacy / download / login / server_select / announcement / privacy_agree / in_game) + planned tools.
+Stage ID must match `[LaunchStage]` in tool output; if conflict, trust `[LaunchStage]`.

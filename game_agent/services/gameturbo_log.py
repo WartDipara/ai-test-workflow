@@ -189,6 +189,28 @@ def append_gameturbo_line(path: Path, line: str) -> None:
         f.write(stripped + "\n")
 
 
+def append_gameturbo_stage_marker(
+    artifact_root: Path,
+    phase: str,
+    note: str = "",
+) -> None:
+    """
+    Write a meta line into gameturbo.log marking a pipeline phase transition.
+    Lines start with '#' so domain extractors ignore them.
+    """
+    root = resolve_pipeline_artifact_root(artifact_root)
+    path = gameturbo_log_path(root)
+    phase = (phase or "-").strip()
+    text = f"# [STAGE:{phase}]"
+    if note.strip():
+        text = f"{text} {note.strip()}"
+    marker_key = gameturbo_log_dedup_key(text)
+    seen = read_gameturbo_dedup_keys(path)
+    if marker_key in seen:
+        return
+    append_gameturbo_line(path, text)
+
+
 def resolve_pipeline_artifact_root(artifact_root: Path) -> Path:
     """执行者产物在 retry_*/executor/ 下时，GameTurbo 日志写在上一级目录。"""
     if artifact_root.name == "executor":

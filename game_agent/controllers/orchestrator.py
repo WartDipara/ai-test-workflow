@@ -54,7 +54,11 @@ from game_agent.services.shutdown import (
     is_shutdown_requested,
 )
 from game_agent.services.gameturbo_config_retry import infer_blocked_stage
-from game_agent.services.gameturbo_log import bootstrap_gameturbo_log, finalize_gameturbo_log
+from game_agent.services.gameturbo_log import (
+    append_gameturbo_stage_marker,
+    bootstrap_gameturbo_log,
+    finalize_gameturbo_log,
+)
 from game_agent.services.normal_exit import NormalExitState, confirm_in_game_normal_exit
 from game_agent.services.pipeline_trace import (
     activate_pipeline_trace,
@@ -85,6 +89,7 @@ from game_agent.utils.gameturbo_bootstrap import (
     run_bootstrap_from_source,
 )
 from game_agent.utils.packages_cleanup import cleanup_deploy_artifacts, cleanup_task_packages
+from game_agent.utils.stage_logging import pipeline_stage
 
 logger = logging.getLogger(__name__)
 
@@ -292,34 +297,35 @@ class GameTestOrchestrator:
         # preprocessing before run_outputs: need packages/ to resolve gid
         self._preprocessing_enabled = cfg.preprocessing.enabled
         if cfg.preprocessing.enabled:
-            with trace_operation("preprocessing", "run") as rec:
-                preprocess_result = self._run_preprocessing(cfg)
-                self._preprocess_record = preprocess_result
-                if not preprocess_result.ok:
-                    rec.fail(error=preprocess_result.message)
-                    logger.error(
-                        "预处理失败，终止任务: %s", preprocess_result.message
-                    )
-                    self._establish_task_deliverable(cfg, mods)
-                    if self._task_journal is not None:
-                        self._task_journal.log(
-                            "preprocessing",
-                            "failed",
-                            message=preprocess_result.message,
+            with pipeline_stage(PipelinePhase.PREPROCESS.value):
+                with trace_operation("preprocessing", "run") as rec:
+                    preprocess_result = self._run_preprocessing(cfg)
+                    self._preprocess_record = preprocess_result
+                    if not preprocess_result.ok:
+                        rec.fail(error=preprocess_result.message)
+                        logger.error(
+                            "预处理失败，终止任务: %s", preprocess_result.message
                         )
-                    pf = classify_failure(preprocess_result.message)
-                    return self._finish_run(
-                        success=False,
-                        last_reason=pf.format(),
-                        max_retries=1,
-                        error_code=pf.code.value,
+                        self._establish_task_deliverable(cfg, mods)
+                        if self._task_journal is not None:
+                            self._task_journal.log(
+                                "preprocessing",
+                                "failed",
+                                message=preprocess_result.message,
+                            )
+                        pf = classify_failure(preprocess_result.message)
+                        return self._finish_run(
+                            success=False,
+                            last_reason=pf.format(),
+                            max_retries=1,
+                            error_code=pf.code.value,
+                        )
+                    rec.ok(
+                        source_apk=str(preprocess_result.source_apk),
+                        processed_apk=str(preprocess_result.processed_apk),
+                        abis_kept=preprocess_result.abis_kept,
+                        abis_removed=preprocess_result.abis_removed,
                     )
-                rec.ok(
-                    source_apk=str(preprocess_result.source_apk),
-                    processed_apk=str(preprocess_result.processed_apk),
-                    abis_kept=preprocess_result.abis_kept,
-                    abis_removed=preprocess_result.abis_removed,
-                )
         else:
             self._preprocess_record = None
 
@@ -379,7 +385,12 @@ class GameTestOrchestrator:
                 verbose=cfg.logging.pipeline_trace_verbose,
             )
             try:
-                self._run_one_attempt(cfg, retry, max_retries, mods)
+                with pipeline_stage(
+                    PipelinePhase.ORCHESTRATOR.value,
+                    gameturbo_root=self._artifact_root,
+                    note=f"attempt {retry}/{max_retries}",
+                ):
+                    self._run_one_attempt(cfg, retry, max_retries, mods)
             except _FinishRun as stop:
                 return self._finish_run(**stop.finish_kwargs)
             finally:
@@ -489,7 +500,7 @@ class GameTestOrchestrator:
         """执行预处理阶段：APK 下载/ABI 剥离。返回 PreprocessResult。"""
         from game_agent.utils.gameturbo_bootstrap import PACKAGES_DIR
 
-        logger.info("阶段 0 [预处理]: APK 下载/ABI 剥离")
+        logger.info("APK 下载/ABI 剥离")
         apk_url = self._task_context.apk_url or None
         controller = PreprocessingController(
             cache_dir=cfg.preprocessing.apk_cache_dir,
@@ -605,6 +616,11 @@ class GameTestOrchestrator:
                 executor=mods.executor,
                 log_monitor=mods.log_monitor,
             )
+        append_gameturbo_stage_marker(
+            self._artifact_root,
+            PipelinePhase.OBSERVER.value,
+            "parallel game phase start",
+        )
 
         target_pkg = cfg.game.package_name.strip()
         if mods.executor and target_pkg:
@@ -641,10 +657,13 @@ class GameTestOrchestrator:
             )
 
             async def _log_task() -> str | None:
-                result = await log_mon.run_until_anomaly(
-                    stop_event,
-                    skip_initial_bootstrap=True,
-                )
+                from game_agent.utils.stage_logging import pipeline_stage
+
+                with pipeline_stage(PipelinePhase.OBSERVER.value):
+                    result = await log_mon.run_until_anomaly(
+                        stop_event,
+                        skip_initial_bootstrap=True,
+                    )
                 if result:
                     attempt_ctx.signal_fatal(result)
                 return result
@@ -661,7 +680,10 @@ class GameTestOrchestrator:
                 )
 
                 async def _network_anomaly_task() -> str | None:
-                    return await net_watch.run_until_confirmed(stop_event)
+                    from game_agent.utils.stage_logging import pipeline_stage
+
+                    with pipeline_stage(PipelinePhase.OBSERVER.value):
+                        return await net_watch.run_until_confirmed(stop_event)
 
                 monitor_tasks.append(
                     asyncio.create_task(_network_anomaly_task(), name="network_anomaly"),
@@ -676,8 +698,14 @@ class GameTestOrchestrator:
             log_monitor=log_mon,
             attempt_context=attempt_ctx,
         )
+        async def _session_task() -> str | None:
+            from game_agent.utils.stage_logging import pipeline_stage
+
+            with pipeline_stage(PipelinePhase.OBSERVER.value):
+                return await session_coordinator.watch(stop_event)
+
         session_task = asyncio.create_task(
-            session_coordinator.watch(stop_event),
+            _session_task(),
             name="session_coordinator",
         )
 
@@ -1431,6 +1459,16 @@ class GameTestOrchestrator:
             )
 
     def _prepare_gameturbo_context(self, cfg: TaskConfig) -> None:
+        assert self._artifact_root is not None
+        assert self._adb is not None
+        with pipeline_stage(
+            PipelinePhase.INIT.value,
+            gameturbo_root=self._artifact_root,
+            note="prepare gameturbo context",
+        ):
+            self._prepare_gameturbo_context_impl(cfg)
+
+    def _prepare_gameturbo_context_impl(self, cfg: TaskConfig) -> None:
         assert self._artifact_root is not None
         assert self._adb is not None
         deploy_gid = self._deploy_gid()

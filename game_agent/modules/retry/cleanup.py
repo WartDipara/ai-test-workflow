@@ -18,6 +18,7 @@ from game_agent.utils.gameturbo_log_domain_extract import (
     DEFAULT_OUTPUT_NAME,
     extract_domain_region_from_log,
 )
+from game_agent.utils.stage_logging import pipeline_stage
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,14 @@ class FailureCleanup:
     audit: RunAuditLogger | None = None
 
     async def run(self, reason: str) -> None:
+        with pipeline_stage(
+            PipelinePhase.CLEANUP.value,
+            gameturbo_root=self.artifact_root,
+            note="failure cleanup start",
+        ):
+            await self._run_impl(reason)
+
+    async def _run_impl(self, reason: str) -> None:
         cfg = self.app_config
         logger.error("[FailureCleanup] 失败收尾: %s", reason)
         if self.audit is not None:

@@ -34,6 +34,7 @@ from game_agent.utils.gameturbo_log_domain_extract import (
     extract_domain_region_from_log,
     load_domain_region_analysis_json,
 )
+from game_agent.utils.stage_logging import pipeline_stage
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,14 @@ class RetryConfigHandler:
     audit: RunAuditLogger | None = None
 
     async def run(self, retry_count: int, reason: str) -> None:
+        with pipeline_stage(
+            PipelinePhase.MODIFY.value,
+            gameturbo_root=self.artifact_root,
+            note=f"modify retry after attempt {retry_count}",
+        ):
+            await self._run_impl(retry_count, reason)
+
+    async def _run_impl(self, retry_count: int, reason: str) -> None:
         logger.info("[RetryConfig] 配置与重试 (第 %d 次): %s", retry_count, reason[:200])
         runtime = self.app_config.runtime
         if self.audit is not None:

@@ -33,6 +33,19 @@ pip install -e ".[dev]"
 3. 向管理员获取 `GameTurbo-Native/check_target_stability.py`（需 Windows 适配）。
 4. 复制配置：`cp config/settings.example.yaml config/settings.yaml`，填写 `llm`、`llm_multimodal` API Key。
 5. 新设备执行一次：`python -m uiautomator2 init`。
+6. 去GameTurbo-Native/games下面新建一个`template.json`文件，具体如下：
+```json
+{
+    "_platform": "平台",
+    "game_id": "填写游戏id",
+    "config_version": 1,
+
+    "default_action": "tunnel",
+    "port_rules": [],
+    "direct_patterns": [
+    ]
+}
+```
 
 完整配置项见 `config/settings.example.yaml`。`modules.executor: true` 时 `llm_multimodal` 必填。
 
@@ -64,13 +77,17 @@ graph LR
   C -->|E1 失败| F[终止]
 ```
 
-| 阶段 | 说明 | 重试 |
-| --- | --- | --- |
-| 0 预处理 | `apks.txt` 下载 / ABI 剥离 → `packages/` | 否 |
-| 1 Init | GameTurbo 配置 + `deploy.sh` | 每轮 |
-| 2 并行 | OCR 登录 + `check_in_game`；LogMonitor 采 log | 每轮 |
-| 3 失败收尾 | 导出日志、域名分析、卸载 | 失败时 |
-| 4 Modify | AI 补丁配置 → deploy → 下一轮 | E2 且开启重试 |
+| 阶段 | 日志前缀 `[阶段]` | 说明 | 重试 |
+| --- | --- | --- | --- |
+| preprocess | `[preprocess]` | `apks.txt` 下载 / ABI 剥离 → `packages/` | 否 |
+| init | `[init]` | GameTurbo 配置 + `deploy.sh` | 每轮 |
+| orchestrator | `[orchestrator]` | 单次 attempt 编排外壳 | 每轮 |
+| executor | `[executor]` | OCR 登录 + `check_in_game`（与 observer 并行） | 每轮 |
+| observer | `[observer]` | LogMonitor / 网络异常 / 会话重启 | 每轮 |
+| cleanup | `[cleanup]` | 失败收尾：导出日志、域名分析、卸载 | 失败时 |
+| modify | `[modify]` | AI 补丁配置 → deploy → 下一轮 | E2 且开启重试 |
+
+阶段名与 `game_agent/models/pipeline_phase.py` 中 `PipelinePhase` 一致；`process.log` 与控制台每行自动带 `[阶段]` 前缀（由 `game_agent/utils/stage_logging.py` 注入）。
 
 **成功条件：** 并行阶段无错误，且 `check_in_game` 连续确认（`deploy` 完成或 Modify 完成均不算成功）。
 
@@ -101,6 +118,26 @@ graph LR
 
 重试审计：`config_backups/`、`config_retry_journal.jsonl`、`attempts/retry_*/`。过程数据在 `artifacts/retry_*/`，任务结束后删除。
 
+### 日志与阶段标记
+
+每轮 attempt 在 `artifacts/retry_{n}_{时间戳}/` 写入过程日志（任务结束后归档到 `run_outputs/.../logs/`）：
+
+| 文件 | 内容 |
+| --- | --- |
+| `process.log` | Python 框架全量日志；格式 `时间 [阶段] LEVEL logger: 消息` |
+| `gameturbo.log` | 设备 GameTurbo logcat；阶段切换时插入 `# [STAGE:阶段] 说明` 分隔行 |
+| `pipeline_trace.jsonl` | 结构化调用追踪；`process.log` 中对应 `[PIPELINE][阶段]` 行 |
+| `audit/events.jsonl` | AI 思考 / 工具 / 阶段事件（非全量日志） |
+
+`final_logs.log` 按 attempt 内联 `process.log`、`gameturbo.log` 等，可直接按阶段检索：
+
+```bash
+grep '\[modify\]' run_outputs/*/final_logs.log
+grep '\[STAGE:executor\]' run_outputs/*/logs/*/gameturbo.log
+```
+
+配置项（`config/settings.yaml` → `logging`）：`enable_process_log_file`、`enable_pipeline_trace`、`enable_run_audit`。
+
 ## 失败与重试
 
 错误码定义见 `game_agent/models/run_failure.py`。
@@ -121,8 +158,11 @@ Modify 硬终止（E1003 LLM 耗尽 / E1006 无可改或无变更）：不 deplo
 | E2001 | 日志异常 / logcat 断流 |
 | E2004 | 路由/加速 |
 | E2005 | 下载失败 |
+| E2006 | 区服列表/选服异常（OCR 或画面确认） |
 
-GameTurbo 日志基线判定见 `skills/gameturbo_log_baseline_skill.md`。执行者 OCR 流程见 `skills/game_launch_ocr_skill.md`。
+Modify 阶段 AI 会参考 `domain_region_analysis.json` 与 `gameturbo.log`；隧道健康但区服失败时，对 CDN 命名域可试探 `direct_patterns`（见 skill）。
+
+运行时 Skill 目录：`skills/SKILL.md`（症状索引）→ `gameturbo_log_baseline_skill.md`（日志基线、SNI 三数字 `-1 -1 1`、Modify 决策树）、`game_launch_ocr_skill.md`（执行者 OCR 流程）。
 
 ## 项目结构
 
@@ -133,7 +173,7 @@ game_agent/
 ├── models/                 # 配置、错误码、任务上下文
 ├── modules/                # executor agent, preprocessing, retry
 ├── services/               # adb, llm, deploy, ocr, install_monitor
-└── utils/                  # apk, gameturbo 配置, ocr
+└── utils/                  # apk, gameturbo 配置, ocr, stage_logging
 
 config/                     # settings.yaml, credentials.yaml
 apk_cache/                  # APK 来源

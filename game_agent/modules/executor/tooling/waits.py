@@ -158,6 +158,11 @@ async def execute_check_in_game(ctx: RunContext[ExecutorAgentDeps]) -> str:
     actx = ctx.deps.attempt_context
     if actx is not None and result.judgment is not None:
         actx.set_ui_observation(str(result.judgment.stage), "")
-    if result.confirmed and actx is not None:
-        actx.signal_in_game_confirmed(ctx.deps.run_state.note or "In-game confirmed")
+    if result.confirmed:
+        ctx.deps.run_state.launch_stage = "in_game"
+        if actx is not None:
+            actx.signal_in_game_confirmed(ctx.deps.run_state.note or "In-game confirmed")
+    elif result.judgment is not None and str(result.judgment.stage) == "server_select":
+        ctx.deps.run_state.server_checked = False
+        ctx.deps.run_state.launch_stage = "server_check"
     return result.message

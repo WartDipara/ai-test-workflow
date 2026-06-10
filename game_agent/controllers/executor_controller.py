@@ -10,6 +10,7 @@ from pydantic_ai.usage import UsageLimits
 
 from game_agent.config.loader import load_app_config
 from game_agent.config.paths import resolve_repo_path
+from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.run_failure import classify_exception
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
@@ -44,16 +45,18 @@ from game_agent.utils.ocr_util import (
     format_device_ocr_for_executor,
     warmup_ocr,
 )
+from game_agent.utils.stage_logging import (
+    bind_pipeline_stage,
+    install_stage_aware_logging,
+    reset_pipeline_stage,
+)
 from game_agent.views.console_view import ConsoleView
 
 logger = logging.getLogger(__name__)
 
 
 def configure_logging(level: str) -> None:
-    logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    install_stage_aware_logging(level)
 
 
 class ExecutorFlowController:
@@ -343,15 +346,27 @@ def run_executor_flow_sync(
     audit: RunAuditLogger | None = None,
     attempt_context: AttemptContext | None = None,
 ) -> RunState:
-    ctrl = ExecutorFlowController(config_path, app_config=app_config)
-    if app_config is None:
-        ctrl.load_settings()
-    else:
-        configure_logging(app_config.logging.level)
-    return asyncio.run(
-        ctrl.run_async(
-            artifact_root=artifact_root,
-            audit=audit,
-            attempt_context=attempt_context,
-        ),
-    )
+    token = bind_pipeline_stage(PipelinePhase.EXECUTOR.value)
+    if artifact_root is not None:
+        from game_agent.services.gameturbo_log import append_gameturbo_stage_marker
+
+        append_gameturbo_stage_marker(
+            artifact_root,
+            PipelinePhase.EXECUTOR.value,
+            "executor thread start",
+        )
+    try:
+        ctrl = ExecutorFlowController(config_path, app_config=app_config)
+        if app_config is None:
+            ctrl.load_settings()
+        else:
+            configure_logging(app_config.logging.level)
+        return asyncio.run(
+            ctrl.run_async(
+                artifact_root=artifact_root,
+                audit=audit,
+                attempt_context=attempt_context,
+            ),
+        )
+    finally:
+        reset_pipeline_stage(token)

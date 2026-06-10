@@ -32,6 +32,10 @@ _DOMAIN_PATTERN = re.compile(
 _PENDING_SNI_IP_PATTERN = re.compile(
     r"\[PENDING-SNI\]\s+(?:\[\:\:ffff\:)?(\d{1,3}(?:\.\d{1,3}){3})(?:\])?:\d+",
 )
+_CDN_RESOURCE_DOMAIN_RE = re.compile(
+    r"cdn|static|res|patch|asset|download|pkg|bundle",
+    re.IGNORECASE,
+)
 
 _ALLOWED_TLDS = frozenset({
     "com", "net", "org", "io", "cn", "co", "me", "ai", "app", "cloud",
@@ -333,6 +337,43 @@ def _build_console_equivalent_lines(
     return lines
 
 
+def _cdn_resource_domain_hint(domain: str) -> bool:
+    return bool(_CDN_RESOURCE_DOMAIN_RE.search(domain or ""))
+
+
+def _extract_ipv6_rule_direct_lines(log_text: str, *, limit: int = 8) -> list[str]:
+    if not log_text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for line in log_text.splitlines():
+        if "[IPV6-RULE]" not in line or "direct" not in line.lower():
+            continue
+        key = line.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _read_source_log_text(domain_analysis: dict[str, Any]) -> str:
+    source = str(domain_analysis.get("source_log") or "").strip()
+    if not source:
+        return ""
+    path = Path(source)
+    if not path.is_file():
+        return ""
+    try:
+        return normalize_gameturbo_log_text(
+            path.read_text(encoding="utf-8", errors="replace"),
+        )
+    except OSError:
+        return ""
+
+
 def format_domain_analysis_for_ai(domain_analysis: dict[str, Any] | None) -> str:
     """
     将 domain_region_analysis.json 格式化为 AI Modify/报告 必读块。
@@ -359,9 +400,16 @@ def format_domain_analysis_for_ai(domain_analysis: dict[str, Any] | None) -> str
         if not isinstance(row, dict):
             continue
         pending = ", ".join(row.get("matched_pending_ips") or []) or "none"
+        domain = str(row.get("domain") or "")
+        cdn_note = (
+            " [CDN/resource candidate: if E2006/E2002 and log shows -1 -1 1 on this domain, "
+            "trial one direct_patterns entry on next retry]"
+            if _cdn_resource_domain_hint(domain)
+            else ""
+        )
         lines.append(
-            f"- {row.get('domain')}: geo={row.get('geo_summary')}, "
-            f"is_china={row.get('is_china')}, pending_ip={pending}",
+            f"- {domain}: geo={row.get('geo_summary')}, "
+            f"is_china={row.get('is_china')}, pending_ip={pending}{cdn_note}",
         )
 
     lines.extend(["", "## direct_domains ([SNI-DIRECT]; resource/channel only for direct_patterns)"])
@@ -395,6 +443,22 @@ def format_domain_analysis_for_ai(domain_analysis: dict[str, Any] | None) -> str
         lines.extend(console_eq[:80])
         if len(console_eq) > 80:
             lines.append(f"... {len(console_eq)} lines total; see JSON file")
+
+    log_text = _read_source_log_text(domain_analysis)
+    ipv6_lines = _extract_ipv6_rule_direct_lines(log_text)
+    if ipv6_lines:
+        lines.extend(
+            [
+                "",
+                "## log_ipv6_rule_direct (no SNI — invisible in domain list; PCAP if E2006/E2002)",
+            ],
+        )
+        lines.extend(f"- {line}" for line in ipv6_lines)
+        if not domain_analysis.get("unknown_domains"):
+            lines.append(
+                "- Note: unknown_domains empty but IPV6-RULE direct traffic exists — "
+                "possible server-list/API path bypassing domain extractor."
+            )
 
     lines.extend(
         [
