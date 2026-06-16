@@ -84,16 +84,18 @@ async def observe_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Laun
         state["finished"] = True
         state["terminal_error"] = f"launch graph iteration limit ({MAX_GRAPH_ITERATIONS})"
         return state  # type: ignore[return-value]
-    sw, sh = deps.adb.touch_size()
-    deps.screen_width, deps.screen_height = sw, sh
-    ts = datetime.now().strftime("%H%M%S_%f")
-    shot = deps.artifact_root / f"graph_observe_{ts}.png"
-    deps.adb.screencap_png(shot)
-    worker_key = deps.adb.device_serial
     actx = deps.attempt_context
     if actx is not None:
         actx.set_ocr_busy(True)
     try:
+        sw, sh = deps.screen_width, deps.screen_height
+        if not sw or not sh:
+            sw, sh = deps.adb.touch_size()
+            deps.screen_width, deps.screen_height = sw, sh
+        ts = datetime.now().strftime("%H%M%S_%f")
+        shot = deps.artifact_root / f"graph_observe_{ts}.png"
+        deps.adb.screencap_png(shot)
+        worker_key = deps.adb.device_serial
         ocr_summary, bboxes = await asyncio.to_thread(
             run_ocr_frame,
             shot,

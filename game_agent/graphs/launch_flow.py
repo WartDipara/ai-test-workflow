@@ -188,6 +188,8 @@ async def run_launch_graph_async(
     settings_path: Path,
     audit: RunAuditLogger | None = None,
     attempt_context: AttemptContext | None = None,
+    screen_width: int = 0,
+    screen_height: int = 0,
 ) -> RunState:
     executor_art = artifact_root / "executor"
     executor_art.mkdir(parents=True, exist_ok=True)
@@ -204,6 +206,8 @@ async def run_launch_graph_async(
         audit=audit,
         attempt_context=attempt_context,
         vision_queue=vision_queue,
+        screen_width=screen_width,
+        screen_height=screen_height,
     )
     bootstrap_err = await _bootstrap_game(deps)
     if bootstrap_err:

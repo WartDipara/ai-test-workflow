@@ -109,6 +109,8 @@ class ExecutorFlowController:
             settings_path=self._config_path.resolve(),
             audit=audit,
             attempt_context=attempt_context,
+            screen_width=w,
+            screen_height=h,
         )
         view.banner(
             f"LangGraph 结束 success={graph_state.success} "

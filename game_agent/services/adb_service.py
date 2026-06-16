@@ -3,11 +3,27 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_SERIAL_LOCKS: dict[str, threading.Lock] = {}
+_SERIAL_LOCKS_GUARD = threading.Lock()
+_TOUCH_SIZE_CACHE_TTL_S = 60.0
+_ADB_TIMEOUT_RETRIES = 2
+
+
+def _lock_for_serial(serial: str | None) -> threading.Lock:
+    key = (serial or "").strip() or "__default__"
+    with _SERIAL_LOCKS_GUARD:
+        lock = _SERIAL_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SERIAL_LOCKS[key] = lock
+        return lock
 
 _PACKAGE_RE = re.compile(r"^[a-zA-Z][\w]*(?:\.[a-zA-Z][\w]*)+$")
 
@@ -17,6 +33,8 @@ class AdbService:
 
     def __init__(self, serial: str | None) -> None:
         self._serial = serial.strip() if serial else None
+        self._touch_size_cache: tuple[int, int] | None = None
+        self._touch_size_cache_ts: float = 0.0
 
     @property
     def device_serial(self) -> str | None:
@@ -49,6 +67,9 @@ class AdbService:
             return f"Uninstalled: {pkg}"
         return f"Uninstall exit {r.returncode}: {(r.stderr or r.stdout or '').strip()}"
 
+    def _device_lock(self) -> threading.Lock:
+        return _lock_for_serial(self._serial)
+
     def _run(
         self,
         args: list[str],
@@ -58,15 +79,31 @@ class AdbService:
     ) -> subprocess.CompletedProcess[str]:
         cmd = self._base() + args
         logger.debug("adb %s", " ".join(cmd))
-        return subprocess.run(
-            cmd,
-            capture_output=True,
-            text=text,
-            encoding="utf-8" if text else None,
-            errors="replace" if text else None,
-            timeout=timeout,
-            check=False,
-        )
+        attempts = _ADB_TIMEOUT_RETRIES + 1
+        for attempt in range(attempts):
+            try:
+                with self._device_lock():
+                    return subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=text,
+                        encoding="utf-8" if text else None,
+                        errors="replace" if text else None,
+                        timeout=timeout,
+                        check=False,
+                    )
+            except subprocess.TimeoutExpired:
+                if attempt + 1 >= attempts:
+                    raise
+                logger.warning(
+                    "adb 超时，重试 %d/%d serial=%s cmd=%s",
+                    attempt + 1,
+                    attempts,
+                    self._serial or "-",
+                    " ".join(cmd),
+                )
+                time.sleep(0.35 * (attempt + 1))
+        raise RuntimeError(f"adb 命令失败: {' '.join(cmd)}")
 
     def verify_connection(self) -> str:
         r = self._run(["get-state"], timeout=15.0)
@@ -225,7 +262,22 @@ class AdbService:
         return f"{tap_msg}\n{clear_msg}\n{type_msg}"
 
     def wm_size(self) -> tuple[int, int]:
-        out = self.shell("wm size", timeout=10.0)
+        try:
+            out = self.shell("wm size", timeout=10.0)
+        except subprocess.TimeoutExpired:
+            if self._touch_size_cache is not None:
+                logger.warning(
+                    "wm size 超时，使用缓存 %dx%d serial=%s",
+                    self._touch_size_cache[0],
+                    self._touch_size_cache[1],
+                    self._serial or "-",
+                )
+                return self._touch_size_cache
+            logger.warning(
+                "wm size 超时，回退默认 1080x1920 serial=%s",
+                self._serial or "-",
+            )
+            return 1080, 1920
         # Physical size: 1080x2400
         for part in out.replace("\n", " ").split():
             if "x" in part and part[0].isdigit():
@@ -248,12 +300,27 @@ class AdbService:
                             pass
         return 0
 
-    def touch_size(self) -> tuple[int, int]:
+    def touch_size(self, *, max_age_s: float = _TOUCH_SIZE_CACHE_TTL_S) -> tuple[int, int]:
         """返回当前方向下 adb input tap 的有效触控空间（含旋转补偿）。"""
+        now = time.monotonic()
+        if (
+            self._touch_size_cache is not None
+            and (now - self._touch_size_cache_ts) < max(1.0, max_age_s)
+        ):
+            return self._touch_size_cache
         w, h = self.wm_size()
-        rot = self.get_screen_rotation()
+        try:
+            rot = self.get_screen_rotation()
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "get_screen_rotation 超时，假定竖屏 serial=%s",
+                self._serial or "-",
+            )
+            rot = 0
         if rot in (90, 270):
             w, h = h, w
+        self._touch_size_cache = (w, h)
+        self._touch_size_cache_ts = now
         return w, h
 
     def current_foreground_app(self) -> tuple[str | None, str | None]:
