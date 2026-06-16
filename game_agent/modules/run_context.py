@@ -26,6 +26,7 @@ class AttemptContext:
     session_index: int = 1
     _in_game_confirmed: bool = field(default=False, repr=False)
     _in_game_note: str = field(default="", repr=False)
+    _ocr_busy: bool = field(default=False, repr=False)
 
     def signal_fatal(self, reason: str) -> None:
         with self._lock:
@@ -111,3 +112,11 @@ class AttemptContext:
     def get_in_game_note(self) -> str:
         with self._lock:
             return self._in_game_note
+
+    def set_ocr_busy(self, busy: bool) -> None:
+        with self._lock:
+            self._ocr_busy = bool(busy)
+
+    def is_ocr_busy(self) -> bool:
+        with self._lock:
+            return self._ocr_busy

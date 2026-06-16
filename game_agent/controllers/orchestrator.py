@@ -37,7 +37,8 @@ from game_agent.modules.preprocessing.preprocessor import PreprocessResult
 from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
 from game_agent.modules.run_context import AttemptContext
 from game_agent.controllers.batch_urls import resolve_batch_urls
-from game_agent.paths import GAMETURBO_MERGED_CONFIG_PATH
+from game_agent.utils.ocr_util import configure_ocr
+from game_agent.utils.ocr_worker import set_active_ocr_worker_key
 from game_agent.services.adb_service import AdbService
 from game_agent.services.device_workspace_cleanup import (
     DevicePackageCleanupResult,
@@ -622,6 +623,9 @@ class GameTestOrchestrator:
             "parallel game phase start",
         )
 
+        configure_ocr(cfg.ocr, worker_key=self._adb.device_serial)
+        set_active_ocr_worker_key(self._adb.device_serial)
+
         target_pkg = cfg.game.package_name.strip()
         if mods.executor and target_pkg:
             if not self._adb.is_package_installed(target_pkg):
@@ -670,24 +674,27 @@ class GameTestOrchestrator:
 
             monitor_tasks.append(asyncio.create_task(_log_task(), name="log_monitor"))
 
-            if cfg.network_anomaly.enabled:
-                net_watch = NetworkAnomalyCoordinator(
-                    adb=self._adb,
-                    app_config=cfg,
-                    artifact_root=self._artifact_root,
-                    attempt_context=attempt_ctx,
-                    audit=self._audit,
-                )
+        if cfg.network_anomaly.enabled:
+            net_watch = NetworkAnomalyCoordinator(
+                adb=self._adb,
+                app_config=cfg,
+                artifact_root=self._artifact_root,
+                attempt_context=attempt_ctx,
+                audit=self._audit,
+            )
 
-                async def _network_anomaly_task() -> str | None:
-                    from game_agent.utils.stage_logging import pipeline_stage
+            async def _network_anomaly_task() -> str | None:
+                from game_agent.utils.stage_logging import pipeline_stage
 
-                    with pipeline_stage(PipelinePhase.OBSERVER.value):
-                        return await net_watch.run_until_confirmed(stop_event)
+                with pipeline_stage(PipelinePhase.OBSERVER.value):
+                    result = await net_watch.run_until_confirmed(stop_event)
+                if result:
+                    attempt_ctx.signal_fatal(result)
+                return result
 
-                monitor_tasks.append(
-                    asyncio.create_task(_network_anomaly_task(), name="network_anomaly"),
-                )
+            monitor_tasks.append(
+                asyncio.create_task(_network_anomaly_task(), name="network_anomaly"),
+            )
 
         session_coordinator = SessionCoordinator(
             adb=self._adb,

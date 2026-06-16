@@ -186,17 +186,25 @@ def format_last_patch_for_executor(deliverable_root: Path) -> str:
 
 
 def infer_blocked_stage(*, reason: str, ui_stage: str = "", ui_progress: str = "") -> str:
-    blob = f"{reason} {ui_stage} {ui_progress}".lower()
-    if "resource_download" in blob or ui_stage == "resource_download":
-        return "resource_download"
-    if any(k in blob for k in ("下载", "download", "更新", "update", "资源", "解压")):
+    stage = (ui_stage or "").strip()
+    if stage and stage not in ("unknown", ""):
+        if stage in ("resource_download", "loading"):
+            return "resource_download"
+        if stage in ("login", "login_form"):
+            return "login"
+        if stage == "sub_account_select":
+            return "server_select"
+        return stage
+
+    blob = f"{reason} {ui_progress}".lower()
+    if "stage=resource_download" in blob:
         return "resource_download"
     if "server_select" in blob or "选服" in blob:
         return "server_select"
-    if "login" in blob or "登录" in blob:
+    if "stage=login" in blob or "login_form" in blob:
         return "login"
-    if ui_stage and ui_stage not in ("unknown", ""):
-        return ui_stage
+    if any(k in blob for k in ("登录", "login password", "credential")):
+        return "login"
     return "unknown"
 
 

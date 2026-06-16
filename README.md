@@ -47,7 +47,7 @@ pip install -e ".[dev]"
 }
 ```
 
-完整配置项见 `config/settings.example.yaml`。`modules.executor: true` 时 `llm_multimodal` 必填。
+完整配置项见 `config/settings.example.yaml`。`modules.executor: true` 或开启 `network_anomaly` 时 `llm_multimodal` 必填。
 
 ## 快速运行
 
@@ -70,7 +70,7 @@ echo "https://example.com/game.apk" > apk_cache/apks.txt   # 或直接放入 *.a
 ```mermaid
 graph LR
   A[预处理] --> B[Init deploy]
-  B --> C[并行: Executor + LogMonitor]
+  B --> C[并行: Executor + LogMonitor + AnomalyMonitor]
   C -->|成功| D[交付]
   C -->|E2 失败| E[Cleanup + Modify]
   E --> B
@@ -82,14 +82,16 @@ graph LR
 | preprocess | `[preprocess]` | `apks.txt` 下载 / ABI 剥离 → `packages/` | 否 |
 | init | `[init]` | GameTurbo 配置 + `deploy.sh` | 每轮 |
 | orchestrator | `[orchestrator]` | 单次 attempt 编排外壳 | 每轮 |
-| executor | `[executor]` | OCR 登录 + `check_in_game`（与 observer 并行） | 每轮 |
-| observer | `[observer]` | LogMonitor / 网络异常 / 会话重启 | 每轮 |
-| cleanup | `[cleanup]` | 失败收尾：导出日志、域名分析、卸载 | 失败时 |
+| executor | `[executor]` | DFS 状态树登录 + `check_in_game`（与 observer 并行） | 每轮 |
+| observer | `[observer]` | LogMonitor 仅采集；AnomalyMonitor OCR+多模态判网络异常 | 每轮 |
+| cleanup | `[cleanup]` | 失败收尾：停游戏、导出日志、Python 域名分析、卸载 | 失败时 |
 | modify | `[modify]` | AI 补丁配置 → deploy → 下一轮 | E2 且开启重试 |
 
 阶段名与 `game_agent/models/pipeline_phase.py` 中 `PipelinePhase` 一致；`process.log` 与控制台每行自动带 `[阶段]` 前缀（由 `game_agent/utils/stage_logging.py` 注入）。
 
 **成功条件：** 并行阶段无错误，且 `check_in_game` 连续确认（`deploy` 完成或 Modify 完成均不算成功）。
+
+**运行期观测：** LogMonitor 只写入 `gameturbo.log`，不按日志规则判死。网络类异常由 AnomalyMonitor 轮询截图 OCR（网络弹窗、下载停滞等），再经多模态确认后 `signal_fatal`；登录/UI 失败在图内 recover，不走 region 重试。
 
 **超时：** `game.timeout_s` 为防卡死保护；已确认进游戏后不会因 executor 收尾慢而判超时。
 
@@ -127,6 +129,7 @@ graph LR
 | `process.log` | Python 框架全量日志；格式 `时间 [阶段] LEVEL logger: 消息` |
 | `gameturbo.log` | 设备 GameTurbo logcat；阶段切换时插入 `# [STAGE:阶段] 说明` 分隔行 |
 | `pipeline_trace.jsonl` | 结构化调用追踪；`process.log` 中对应 `[PIPELINE][阶段]` 行 |
+| `anomaly_evidence.json` | 网络异常确认时的 OCR/多模态摘要与截图路径（供 Modify 引用） |
 | `audit/events.jsonl` | AI 思考 / 工具 / 阶段事件（非全量日志） |
 
 `final_logs.log` 按 attempt 内联 `process.log`、`gameturbo.log` 等，可直接按阶段检索：
@@ -144,10 +147,10 @@ grep '\[STAGE:executor\]' run_outputs/*/logs/*/gameturbo.log
 
 | 区间 | 含义 | 可重试 |
 | --- | --- | --- |
-| E1xxx | 配置/预处理/deploy/Modify 硬失败 | 否 |
-| E2xxx | 网络/加速类观测失败 | 是（`retry_on_failure`） |
+| E1xxx | 配置/预处理/deploy/登录/UI/Modify 硬失败 | 否 |
+| E2xxx | OCR+多模态确认的网络/加速类异常 | 是（`retry_on_failure`） |
 
-E2 失败路径：Cleanup → 恢复上轮配置 → AI 最小补丁 → deploy → 下一轮游戏。
+E2 失败路径：停游戏 → Cleanup（日志归档 + Python `domain_region_analysis.json`）→ AI 最小补丁 → deploy → 下一轮。
 
 Modify 硬终止（E1003 LLM 耗尽 / E1006 无可改或无变更）：不 deploy，不进入下一轮。
 
@@ -155,14 +158,17 @@ Modify 硬终止（E1003 LLM 耗尽 / E1006 无可改或无变更）：不 deplo
 | --- | --- |
 | E1009 | deploy 后包未安装 |
 | E1010 | 超时且未进游戏 |
-| E2001 | 日志异常 / logcat 断流 |
+| E2001 | logcat 断流等基础设施问题 |
+| E2002 | OCR+多模态确认的网络画面异常 |
 | E2004 | 路由/加速 |
 | E2005 | 下载失败 |
-| E2006 | 区服列表/选服异常（OCR 或画面确认） |
+| E2006 | 区服列表/选服异常 |
 
-Modify 阶段 AI 会参考 `domain_region_analysis.json` 与 `gameturbo.log`；隧道健康但区服失败时，对 CDN 命名域可试探 `direct_patterns`（见 skill）。
+Modify 阶段 AI 参考 `domain_region_analysis.json`、`anomaly_evidence.json` 与 `gameturbo.log`（事后分析，运行期不读日志判死）。
 
-运行时 Skill 目录：`skills/SKILL.md`（症状索引）→ `gameturbo_log_baseline_skill.md`（日志基线、SNI 三数字 `-1 -1 1`、Modify 决策树）、`game_launch_ocr_skill.md`（执行者 OCR 流程）。
+`network_anomaly` 配置（见 `settings.example.yaml`）：`enabled`、`poll_interval_s`、`require_multimodal_confirm`（OCR suspect 后是否必须多模态确认）、`download_progress_stall_s`。
+
+运行时 Skill：`skills/SKILL.md` → `game_launch_ocr_skill.md`（LangGraph 进游戏排障）、`gameturbo_log_baseline_skill.md`（Modify 决策树）。
 
 ## 项目结构
 
@@ -171,7 +177,7 @@ game_agent/
 ├── main.py                 # 入口
 ├── controllers/            # 编排：orchestrator, batch_runner, executor, log_monitor, retry
 ├── models/                 # 配置、错误码、任务上下文
-├── modules/                # executor agent, preprocessing, retry
+├── modules/                # preprocessing, retry（Modify）
 ├── services/               # adb, llm, deploy, ocr, install_monitor
 └── utils/                  # apk, gameturbo 配置, ocr, stage_logging
 
@@ -193,13 +199,24 @@ tests/                      # pytest 单元测试
 
 **Ctrl+C？** 第一次优雅停止，第二次强制退出（130）。
 
-**凭据填表？** 复制 `config/credentials.example.yaml` 为 `credentials.yaml`；账号密码通过 uiautomator2 无障碍写入，不依赖 OCR 读字。
+**凭据填表？** 复制 `config/credentials.example.yaml` 为 `credentials.yaml`；登录由 `atomic_login` 节点一次完成：OCR 取坐标 → u2 填账号密码 → Enter，验收仅 OCR（黑屏则收键盘后再 OCR）。
 
 ## 测试
 
 ```bash
-python -m pytest tests/ -q
+# 全量
+python -m pytest tests/ -v
+
+# 单个文件
+python -m pytest tests/test_privacy_checkbox.py -v
+
+# 单个用例
+python -m pytest tests/test_privacy_checkbox.py::test_roi_mean_abs_diff_detects_checked_on_fixture -v
+
+# 静态检查
 ruff check game_agent tests
 ```
 
-无需真机。覆盖错误分类、预处理、checkbox 定位、并行超时策略、安装监控、批跑停止等。
+说明：
+- 用 `python -m pytest` 即可，不依赖 PATH 里的 `pytest` 命令；`-v` 显示每个用例的通过/失败。
+- 多数用例无需真机；checkbox 相关测试使用 `tests/img/before.png`、`after.png`、`after_2.png`，首次会加载 PaddleOCR，可能较慢。

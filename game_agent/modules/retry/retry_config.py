@@ -328,8 +328,15 @@ class RetryConfigHandler:
             except Exception:
                 pass
 
-        screen_context = ""
-        if self.artifact_root and cfg.llm_multimodal is not None:
+        from game_agent.services.anomaly_evidence import (
+            format_anomaly_evidence_for_ai,
+            load_anomaly_evidence,
+        )
+
+        screen_context = format_anomaly_evidence_for_ai(
+            load_anomaly_evidence(self.artifact_root),
+        )
+        if self.artifact_root and cfg.llm_multimodal is not None and not screen_context:
             from game_agent.services.vision_context import summarize_monitor_screenshots
 
             shots = sorted(self.artifact_root.glob("monitor_screen_*.png"))

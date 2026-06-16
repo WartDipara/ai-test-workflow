@@ -1,4 +1,5 @@
 from game_agent.models.server_connectivity_probe import ServerConnectivityProbe
+from game_agent.services.login_stage_probe import login_stage_gate_message
 from game_agent.services.server_selector_check import ServerSelectorCheckResult
 from game_agent.services.server_selector_pipeline import (
     _ocr_indicates_empty_slot,
@@ -38,6 +39,20 @@ def _failed_tap() -> ServerSelectorCheckResult:
         taps_used=3,
         panel_opened=False,
     )
+
+
+def test_login_gate_blocks_sub_account_overlay() -> None:
+    enter = _bbox("踏入仙途", 1100, 770, 1300, 820)
+    bboxes = [
+        enter,
+        _bbox("Sub-account1 (Last login)", 1500, 250, 2100, 300),
+        _bbox("Create Sub-account", 1500, 900, 1900, 940),
+    ]
+    msg = login_stage_gate_message(bboxes, screen_w=2400, screen_h=1080)
+    assert msg is not None
+    assert "WRONG_STAGE" in msg
+    assert "sub-account" in msg.lower()
+    assert "[E2006]" not in msg
 
 
 def test_message_indicates_e2006() -> None:

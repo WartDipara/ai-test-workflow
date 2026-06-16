@@ -14,7 +14,7 @@ deepseek:
 observer:
   skip_vision_probe: false
 
-# 多模态画面：executor 内 analyze_screen / check_in_game、重试前截图摘要；不做 tool_choice / 配置补丁
+# 多模态画面：ScreenInterpreter / check_in_game、失败恢复 analyze_screen
 llm_multimodal:
   base_url: "https://ai.14x.cn/coding/v1"
   api_key: "${QWEN_API_KEY}"
@@ -25,21 +25,30 @@ adb:
   serial: null
 
 ocr:
-  # mobile 显著快于 server；识别前会将截图缩到 max_image_width
-  model_profile: mobile
+  model_profile: v6_tiny
   max_image_width: 720
+  device_policy: auto
+  gpu_id: 0
+  allow_gpu_fallback_to_cpu: true
   warmup_on_start: false
 
+# MolmoPoint 深度学习 checkbox 定位（留空 base_url 则仅用 OCR 左推）
+molmopoint:
+  base_url: ""   # 例: "http://192.168.1.10:8000"
+  enabled: true
+  timeout_s: 60
+  prompt: "point the checkbox"
+  max_vertical_offset_ratio: 0.55
+  min_left_of_text_px: 4
+  max_left_of_text_px: 400
+
 executor:
-  ad_initial_wait_s: 3.0
   post_launch_wait_s: 2.0
-  max_foreground_retries: 4
   credential_fill_settle_s: 0.4
   dismiss_keyboard_after_password: true   # 作为提交策略之一，非唯一手段
   dismiss_keyboard_press_back: false
-  login_submit_press_enter: true          # 密码框 ENTER 提交（不依赖收键盘）
-  login_submit_use_cached_ocr_coords: true # 用填表前 get_ocr_summary 缓存的 Login 坐标
-  login_submit_ocr_after_dismiss: false   # 收键盘后再 OCR（安全键盘下常黑屏，默认关）
+  login_submit_press_enter: true
+  use_cached_login_button_xy: true
   credential_verify_after_fill: true      # 填表后无障碍回读校验位置与内容
   credential_fill_max_distance_px: 150    # 节点中心与 OCR 点击点最大允许距离
   credential_fill_retry_on_verify_fail: true
@@ -47,8 +56,6 @@ executor:
 game:
   # 包名/启动 Activity 由 TaskRuntime 从 APK 解析，勿写入本文件
   timeout_s: 1200.0
-  launch_detect_timeout_s: 90.0
-  launch_detect_poll_interval_s: 2.0
   package_install_wait_timeout_s: 120.0
   package_install_poll_interval_s: 2.0
   # AI 判定「已进入游戏内」（进程已起之后）
@@ -73,25 +80,24 @@ gameturbo:
 credentials:
   file_path: "./credentials.yaml"   # 亦可 ./config/credentials.yaml
 
+# 并行阶段网络异常：OCR+多模态（运行期不分析日志规则）
+network_anomaly:
+  enabled: true
+  poll_interval_s: 5.0
+  require_multimodal_confirm: true
+  download_progress_stall_s: 90.0
+  use_ocr_poll: true
+  exclude_top_ratio: 0.15
+
 # 流水线模块开关（便于单独测试）
 modules:
-  executor: true           # Driver：登录链 + check_in_game（与 monitors 并行）
-  log_monitor: true        # GameTurbo logcat，异常 fail-fast
-  retry_on_failure: true   # true：失败收尾后再做 AI 分析/deploy 并多轮重试；false：仅失败收尾
+  executor: true           # Driver：LangGraph 进游戏流程（与 monitors 并行）
+  log_monitor: true        # GameTurbo logcat 仅采集写入 gameturbo.log
+  retry_on_failure: true   # true：网络类 E2xxx 失败后 Modify+deploy 重试；false：仅失败收尾
   max_retries: 3           # retry_on_failure 为 true 时生效
 
-# YOLO 视觉检测服务（detect_checkbox 工具使用）
-detection:
-  api_url: "http://192.168.1.117:8000/predict"
-  timeout_s: 30.0
-
 agent:
-  max_rounds: 100
-  llm_request_limit: 80
   artifacts_dir: "./artifacts"
-  persist_learned_skill_on_success: true
-  tap_observe_count: 1
-  repeat_compact_stage_hint_every_n_rounds: 5
 
 logging:
   level: "INFO"

@@ -9,6 +9,7 @@ description: >-
 
 ## When to read this file
 
+- **Runtime:** the executor does **not** rule-judge `gameturbo.log` for fail-fast; logs are collected only. Network-like failures use OCR + multimodal during the run; **Modify** stage combines archived log + `domain_region_analysis.json`.
 - Analyzing `gameturbo.log` or `domain_region_analysis.json` for acceleration health;
 - Writing `attempt_failure_report.md` / `failure_report.md` or `GameTurboConfigPatch`;
 - User supplied failure logs — distinguish real faults vs normal reconnect/buffering;

@@ -36,9 +36,11 @@ _ACCOUNT_RE = re.compile(
 _PASSWORD_LABEL_RE = re.compile(r"^(password|密码)\s*$", re.IGNORECASE)
 
 _PASSWORD_HINT_RE = re.compile(
-    r"(enter.*password|输入.*密码|please.*password)",
+    r"(enter.*password|输入.*密码|please.*password|login\s*password)",
     re.IGNORECASE,
 )
+
+_EMAIL_VALUE_RE = re.compile(r"@[\w.-]+\.\w+")
 
 
 @dataclass(frozen=True)
@@ -98,8 +100,11 @@ def resolve_login_form_targets(
 
         if _PASSWORD_LABEL_RE.match(text):
             password_line = line
-        elif _PASSWORD_HINT_RE.search(text):
+        elif _PASSWORD_HINT_RE.search(text) or lower.strip() == "login password":
             password_hint_lines.append(line)
+
+        if account_line is None and _EMAIL_VALUE_RE.search(text):
+            account_line = line
 
         if is_standalone_login_label(text) and not is_compound_login_label(text):
             login_lines.append(line)

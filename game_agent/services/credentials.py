@@ -90,7 +90,6 @@ def credentials_status_message(
     else:
         masked_user = "***"
     return (
-        f"Credentials loaded: username={masked_user} (full value only via fill_credential_field). "
-        "Login: get_ocr_summary on login screen (caches Login xy) → fill_credential_field "
-        "(accessibility only). After password: ENTER / u2 Login / cached coords — not post-dismiss OCR."
+        f"Credentials loaded: username={masked_user}. "
+        "Login: LangGraph atomic_login reads credentials.yaml → OCR coords → u2 fill → ENTER/submit → OCR verify."
     )

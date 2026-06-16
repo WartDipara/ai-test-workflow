@@ -11,7 +11,11 @@ from game_agent.models.settings import AppConfig
 from game_agent.modules.observer_session.state import ObserverSessionState
 from game_agent.modules.run_context import AttemptContext
 from game_agent.services.adb_service import AdbService
-from game_agent.services.game_launch import get_package_pids
+from game_agent.services.game_launch import (
+    get_package_pids,
+    package_primary_pid_changed,
+    primary_package_pid,
+)
 from game_agent.services.gameturbo_log import (
     bootstrap_gameturbo_log,
     clear_device_logcat,
@@ -78,9 +82,18 @@ class SessionCoordinator:
                             return fail
                     absent_since = None
 
-                if had_running and last_pids and pids != last_pids and absent_since is None:
+                if (
+                    had_running
+                    and last_pids
+                    and absent_since is None
+                    and package_primary_pid_changed(last_pids, pids)
+                ):
                     fail = await self._on_session_restart(
-                        reason=f"游戏进程 pid 变化 {sorted(last_pids)} -> {sorted(pids)}",
+                        reason=(
+                            f"游戏主进程 pid 变化 "
+                            f"{primary_package_pid(last_pids)} -> {primary_package_pid(pids)} "
+                            f"(all_pids {sorted(last_pids)} -> {sorted(pids)})"
+                        ),
                     )
                     if fail is not None:
                         return fail

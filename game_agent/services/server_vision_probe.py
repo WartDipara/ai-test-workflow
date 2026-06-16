@@ -15,7 +15,7 @@ from game_agent.workers.vision_worker import VisionWorker
 logger = logging.getLogger(__name__)
 
 _VALID_SLOT = frozenset({"empty", "loading", "ready", "error", "not_visible"})
-_VALID_REC = frozenset({"tap_verify", "fail_fast", "wrong_stage"})
+_VALID_REC = frozenset({"tap_verify", "fail_fast", "wrong_stage", "dismiss_overlay"})
 
 
 def _strip_json_fence(text: str) -> str:
@@ -53,12 +53,22 @@ def parse_server_connectivity_probe(raw: str) -> ServerConnectivityProbe:
     except (TypeError, ValueError):
         conf = 0.0
 
+    blocking_overlay = bool(data.get("blocking_overlay", False))
+    try:
+        dismiss_x = int(data.get("dismiss_tap_x", 0) or 0)
+        dismiss_y = int(data.get("dismiss_tap_y", 0) or 0)
+    except (TypeError, ValueError):
+        dismiss_x, dismiss_y = 0, 0
+
     return ServerConnectivityProbe(
         on_enter_game_screen=bool(data.get("on_enter_game_screen", False)),
         enter_button_visible=bool(data.get("enter_button_visible", False)),
         server_slot_status=slot,  # type: ignore[arg-type]
         server_list_likely_available=bool(data.get("server_list_likely_available", False)),
         has_network_error_ui=bool(data.get("has_network_error_ui", False)),
+        blocking_overlay=blocking_overlay,
+        dismiss_tap_x=dismiss_x,
+        dismiss_tap_y=dismiss_y,
         confidence=max(0.0, min(1.0, conf)),
         reason=str(data.get("reason", "") or "")[:500],
         recommendation=rec,  # type: ignore[arg-type]
@@ -66,6 +76,8 @@ def parse_server_connectivity_probe(raw: str) -> ServerConnectivityProbe:
 
 
 def _derive_recommendation(data: dict, slot: str) -> str:
+    if data.get("blocking_overlay"):
+        return "dismiss_overlay"
     if not data.get("on_enter_game_screen") and not data.get("enter_button_visible"):
         return "wrong_stage"
     if data.get("has_network_error_ui") or slot == "error":
@@ -85,12 +97,19 @@ def merge_ocr_server_error(
 
 
 def format_probe_summary(probe: ServerConnectivityProbe) -> str:
+    overlay_part = ""
+    if probe.blocking_overlay or probe.recommendation == "dismiss_overlay":
+        overlay_part = (
+            f" blocking_overlay={probe.blocking_overlay}"
+            f" dismiss_tap=({probe.dismiss_tap_x},{probe.dismiss_tap_y})"
+        )
     return (
         f"[ServerProbe] on_enter_game_screen={probe.on_enter_game_screen} "
         f"enter_button_visible={probe.enter_button_visible} "
         f"server_slot_status={probe.server_slot_status} "
         f"has_network_error_ui={probe.has_network_error_ui} "
-        f"recommendation={probe.recommendation} conf={probe.confidence:.2f} "
+        f"recommendation={probe.recommendation} conf={probe.confidence:.2f}"
+        f"{overlay_part} "
         f"reason={probe.reason!r}"
     )
 

@@ -30,6 +30,7 @@ ANALYSIS_FILE_NAMES: tuple[str, ...] = (
     "attempt_failure_report.json",
     "ai_analysis_report.txt",
     "domain_region_analysis.json",
+    "anomaly_evidence.json",
 )
 
 # 默认单文件内联上限（超出则只在 final_logs 中引用 logs/ 路径）
@@ -142,6 +143,11 @@ def archive_attempt_logs(
             n = _copy_if_exists(artifact_root / fname, logs_dir / fname)
             if n:
                 sizes[fname] = n
+
+        for session_log in sorted(artifact_root.glob("gameturbo_session_*.log")):
+            n = _copy_if_exists(session_log, logs_dir / session_log.name)
+            if n:
+                sizes[session_log.name] = n
 
         audit_src = artifact_root / "audit" / "events.jsonl"
         n = _copy_if_exists(audit_src, logs_dir / "audit_events.jsonl")

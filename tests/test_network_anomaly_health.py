@@ -9,8 +9,14 @@ from game_agent.services.gameturbo_log import (
     tail_gameturbo_log_lines,
 )
 from game_agent.services.gameturbo_log_health import assess_gameturbo_log_health
+from game_agent.controllers.network_anomaly_coordinator import (
+    format_confirmed_network_anomaly,
+    format_confirmed_vision_ocr_anomaly,
+)
+from game_agent.services.gameturbo_config_retry import infer_blocked_stage
 from game_agent.services.screen_download_health import (
     ScreenProgressTracker,
+    is_download_stall_watch_stage,
     parse_download_percent_from_ocr,
     parse_percent_from_progress_text,
 )
@@ -50,6 +56,70 @@ def test_screen_progress_stall() -> None:
         stall_s=90.0,
     )
     assert v2.suspect
+    assert "stage=resource_download progress unchanged" in v2.reason
+
+
+def test_unknown_stage_static_not_stall() -> None:
+    tracker = ScreenProgressTracker()
+    tracker.last_change_monotonic = time.monotonic() - 120.0
+    v = tracker.observe(stage="unknown", progress="", percent=None, stall_s=90.0)
+    assert not v.suspect
+
+
+def test_login_stage_static_not_stall() -> None:
+    tracker = ScreenProgressTracker()
+    tracker.last_change_monotonic = time.monotonic() - 120.0
+    v = tracker.observe(stage="login", progress="", percent=None, stall_s=90.0)
+    assert not v.suspect
+    assert is_download_stall_watch_stage("login") is False
+
+
+def test_log_soft_rules_skipped_during_privacy_stage() -> None:
+    lines = ["line"] * 20
+    text = "\n".join(lines)
+    assert assess_gameturbo_log_health(text, min_lines=15, ui_stage="privacy").suspect is False
+
+
+def test_log_soft_rules_skipped_during_login_form_stage() -> None:
+    lines = ["line"] * 20
+    text = "\n".join(lines)
+    assert assess_gameturbo_log_health(text, min_lines=15, ui_stage="login_form").suspect is False
+
+
+def test_log_no_send_tunnel_requires_download_stage() -> None:
+    lines = [
+        "06-11 12:00:00.000 I GameTurbo: E2E RTT: 42ms",
+        "06-11 12:00:00.100 I GameTurbo: [BHOOK] OK",
+        *["line"] * 28,
+        "[SNI-TUNNEL] example.com -1 -1 1",
+    ]
+    text = "\n".join(lines)
+    assert not assess_gameturbo_log_health(text, min_lines=15, ui_stage="unknown").suspect
+    assert not assess_gameturbo_log_health(text, min_lines=15, ui_stage="login").suspect
+    v = assess_gameturbo_log_health(text, min_lines=15, ui_stage="resource_download")
+    assert v.suspect
+    assert "no_send_tunnel" in v.markers
+
+
+def test_infer_blocked_stage_ignores_old_download_wording() -> None:
+    reason = "Observer network anomaly confirmed: screen=stage=unknown progress unchanged for 92s (unknown)"
+    assert infer_blocked_stage(reason=reason, ui_stage="login") == "login"
+    assert infer_blocked_stage(reason=reason, ui_stage="") == "unknown"
+
+
+def test_infer_blocked_stage_resource_download_from_ui_stage() -> None:
+    reason = "stage=resource_download progress unchanged for 95s (12%)"
+    assert infer_blocked_stage(reason=reason, ui_stage="resource_download") == "resource_download"
+
+
+def test_observer_fatal_message_includes_ui_stage() -> None:
+    msg = format_confirmed_network_anomaly(
+        log_reason="log hit",
+        screen_reason="screen hit",
+        ui_stage="login",
+    )
+    assert "Observer network anomaly confirmed" in msg
+    assert "ui_stage=login" in msg
 
 
 def test_ocr_ignores_top_region_percent() -> None:
@@ -57,14 +127,25 @@ def test_ocr_ignores_top_region_percent() -> None:
     assert parse_download_percent_from_ocr(ocr, screen_h=2400, min_y_ratio=0.15) == 45
 
 
-def test_confirmed_anomaly_is_retryable() -> None:
-    reason = (
-        "Network anomaly confirmed (log + screen): "
-        "log=fatal | screen=download stuck"
+def test_confirmed_vision_ocr_anomaly_is_retryable() -> None:
+    reason = format_confirmed_vision_ocr_anomaly(
+        ocr_reason="network dialog on screen: 网络连接失败",
+        vision_reason="connection timeout",
+        ui_stage="resource_download",
     )
     f = classify_failure(reason)
     assert f.retryable
-    assert f.code.value == "E2001"
+    assert f.code.value == "E2002"
+
+
+def test_legacy_observer_message_still_retryable() -> None:
+    reason = (
+        "Observer network anomaly confirmed (log + screen): "
+        "log=fatal | screen=stage=resource_download progress unchanged"
+    )
+    f = classify_failure(reason)
+    assert f.retryable
+    assert f.code.value == "E2002"
 
 
 def test_parse_percent_from_progress_text() -> None:

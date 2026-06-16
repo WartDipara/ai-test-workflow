@@ -64,9 +64,9 @@ class RunFailure:
 
 
 _RETRYABLE_PREFIXES = (
-    "log anomaly detected:",
+    "vision/ocr network anomaly confirmed",
+    "observer network anomaly confirmed",
     "screen anomaly detected:",
-    "network anomaly confirmed",
 )
 
 _RETRYABLE_SUBSTRINGS = (
@@ -166,13 +166,27 @@ def classify_failure(
             retryable=False,
         )
 
+    if lower.startswith("log anomaly detected:"):
+        return RunFailure(
+            ErrorCode.INTERNAL,
+            text,
+            retryable=False,
+            detail="Runtime log rule analysis disabled; logs are collect-only during play",
+        )
+
+    if "vision/ocr network anomaly confirmed" in lower:
+        return RunFailure(ErrorCode.NET_SCREEN_ANOMALY, text, retryable=True)
+
+    if "observer network anomaly confirmed" in lower:
+        return RunFailure(ErrorCode.NET_SCREEN_ANOMALY, text, retryable=True)
+
     for prefix in _RETRYABLE_PREFIXES:
         if not lower.startswith(prefix):
             continue
-        if prefix.startswith("network anomaly confirmed"):
-            code = ErrorCode.NET_LOG_ANOMALY
-        elif "log anomaly" in prefix:
-            code = ErrorCode.NET_LOG_ANOMALY
+        if prefix.startswith("observer network anomaly confirmed"):
+            code = ErrorCode.NET_SCREEN_ANOMALY
+        elif prefix.startswith("vision/ocr network anomaly confirmed"):
+            code = ErrorCode.NET_SCREEN_ANOMALY
         else:
             code = ErrorCode.NET_SCREEN_ANOMALY
         return RunFailure(code, text, retryable=True)
@@ -211,10 +225,10 @@ def classify_failure(
 
     if any(s in lower for s in _RETRYABLE_SUBSTRINGS):
         code = ErrorCode.NET_ROUTING
-        if "network anomaly confirmed" in lower:
-            code = ErrorCode.NET_LOG_ANOMALY
-        elif "log anomaly" in lower:
-            code = ErrorCode.NET_LOG_ANOMALY
+        if "vision/ocr network anomaly confirmed" in lower:
+            code = ErrorCode.NET_SCREEN_ANOMALY
+        elif "network anomaly confirmed" in lower:
+            code = ErrorCode.NET_SCREEN_ANOMALY
         elif "screen anomaly" in lower:
             code = ErrorCode.NET_SCREEN_ANOMALY
         elif "session restart" in lower:

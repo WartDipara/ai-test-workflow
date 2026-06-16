@@ -4,8 +4,9 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 from game_agent.models.settings import OcrSection
 
@@ -17,62 +18,31 @@ def _configure_paddle_runtime() -> None:
     os.environ.setdefault("FLAGS_use_mkldnn", "0")
     os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")
 
-_OCR_INSTANCE = None
-_PADDLEOCR_V3 = False
 _OCR_CONFIG: OcrSection = OcrSection()
+_FRAME_CACHE: dict[tuple, tuple[str, list[OcrBbox]]] = {}
+_FRAME_CACHE_MAX = 16
 
 
-def configure_ocr(cfg: OcrSection) -> None:
+def configure_ocr(cfg: OcrSection, *, worker_key: str | None = None) -> None:
     """由 Controller 在 run 开始时注入；切换 profile 会重置已加载模型。"""
-    global _OCR_CONFIG, _OCR_INSTANCE
-    if cfg.model_profile != _OCR_CONFIG.model_profile or cfg.max_image_width != _OCR_CONFIG.max_image_width:
-        _OCR_INSTANCE = None
+    global _OCR_CONFIG
+    from game_agent.utils.ocr_worker import configure_ocr_worker
+
     _OCR_CONFIG = cfg
+    configure_ocr_worker(cfg, worker_key=worker_key)
+    clear_ocr_frame_cache()
 
 
-def _paddle_major_version() -> int:
-    try:
-        import paddleocr
-
-        ver = getattr(paddleocr, "__version__", "0")
-        return int(str(ver).split(".", maxsplit=1)[0])
-    except Exception:
-        return 2
+def clear_ocr_frame_cache() -> None:
+    _FRAME_CACHE.clear()
 
 
-def get_ocr_instance():
-    """懒加载 PaddleOCR；自动区分 2.x / 3.x 构造参数。"""
-    global _OCR_INSTANCE, _PADDLEOCR_V3
-    if _OCR_INSTANCE is not None:
-        return _OCR_INSTANCE
+def get_ocr_instance(*, worker_key: str | None = None):
+    """懒加载 PaddleOCR；经 OcrWorker 串行化。"""
+    from game_agent.utils.ocr_worker import get_ocr_worker
 
-    _configure_paddle_runtime()
-    from paddleocr import PaddleOCR
-
-    major = _paddle_major_version()
-    _PADDLEOCR_V3 = major >= 3
-    profile = _OCR_CONFIG.model_profile
-    logger.info("Initializing PaddleOCR (major=%s, profile=%s)...", major, profile)
-
-    if _PADDLEOCR_V3:
-        kwargs: dict = {
-            "lang": "ch",
-            "use_doc_orientation_classify": False,
-            "use_doc_unwarping": False,
-            "use_textline_orientation": False,
-            "enable_mkldnn": False,
-        }
-        if profile == "mobile":
-            kwargs["text_detection_model_name"] = "PP-OCRv5_mobile_det"
-            kwargs["text_recognition_model_name"] = "PP-OCRv5_mobile_rec"
-        else:
-            kwargs["text_detection_model_name"] = "PP-OCRv5_server_det"
-            kwargs["text_recognition_model_name"] = "PP-OCRv5_server_rec"
-        _OCR_INSTANCE = PaddleOCR(**kwargs)
-    else:
-        _OCR_INSTANCE = PaddleOCR(use_angle_cls=False, lang="ch", show_log=False)
-
-    return _OCR_INSTANCE
+    worker = get_ocr_worker(worker_key=worker_key)
+    return worker.submit(worker.get_ocr_instance)
 
 
 @dataclass(frozen=True)
@@ -88,24 +58,16 @@ def _prepare_image_for_ocr(
     *,
     device_w: int | None = None,
     device_h: int | None = None,
+    max_image_width: int | None = None,
 ) -> _PreparedImage:
-    """必要时缩小截图以加速 OCR；返回用于推理的路径与坐标缩放比。
-
-    当提供 device_w/device_h 时，坐标映射到设备逻辑像素（adb input tap 坐标空间）；
-    否则映射到截图像素空间（向后兼容）。
-
-    自动处理横竖屏方向不匹配：截图尺寸可能反映物理像素（含密度倍率），
-    或方向与 wm_size 不一致（横屏游戏截图宽高与设备逻辑像素宽高交换）。
-    """
     from PIL import Image
 
-    max_w = _OCR_CONFIG.max_image_width
+    max_w = max_image_width if max_image_width is not None else _OCR_CONFIG.max_image_width
     src = image_path.resolve()
     with Image.open(src) as im:
         im = im.convert("RGB")
         ow, oh = im.size
 
-        # touch_size() 已经包含旋转补偿，直接使用
         if device_w and device_h:
             logger.info("OCR dims: src=%dx%d device=%dx%d", ow, oh, device_w, device_h)
 
@@ -176,48 +138,81 @@ def _format_v2_result(result, *, scale_x: float, scale_y: float) -> list[str]:
     return lines
 
 
-def warmup_ocr() -> None:
+def warmup_ocr(*, worker_key: str | None = None) -> None:
     """可选预热：加载模型。不跑完整屏推理以免拖慢开局。"""
-    get_ocr_instance()
+    get_ocr_instance(worker_key=worker_key)
     logger.info("PaddleOCR 模型已加载（warmup）")
 
 
-def extract_text_with_bounds(
+def _frame_cache_key(
+    image_path: Path,
+    *,
+    device_w: int | None,
+    device_h: int | None,
+    worker_key: str | None,
+) -> tuple:
+    from game_agent.utils.ocr_worker import resolve_ocr_worker_key
+
+    try:
+        mtime = image_path.stat().st_mtime_ns
+    except OSError:
+        mtime = 0
+    return (
+        resolve_ocr_worker_key(worker_key),
+        str(image_path.resolve()),
+        mtime,
+        device_w,
+        device_h,
+        _OCR_CONFIG.model_profile,
+        _OCR_CONFIG.max_image_width,
+        _OCR_CONFIG.device_policy,
+        _OCR_CONFIG.gpu_id,
+    )
+
+
+def _infer_ocr_frame(
     image_path: Path | str,
     *,
     device_w: int | None = None,
     device_h: int | None = None,
-) -> str:
-    """
-    对指定图片进行 OCR，返回带中心坐标的文本摘要。
-    当 device_w/device_h 提供时，坐标映射到设备逻辑像素（adb input tap 坐标空间）。
-    """
+    worker_key: str | None = None,
+) -> tuple[str, list[OcrBbox]]:
+    """单次 predict，同时返回 summary 与 bboxes（仅在 OcrWorker 线程调用）。"""
+    from game_agent.utils.ocr_worker import get_ocr_worker
+
     src = Path(image_path)
     logger.debug("OCR 开始: %s", src.name)
-    ocr = get_ocr_instance()
+    worker = get_ocr_worker(worker_key=worker_key)
+    ocr = worker.get_ocr_instance()
     prepared = _prepare_image_for_ocr(src, device_w=device_w, device_h=device_h)
     infer_path = str(prepared.path)
     sx, sy = prepared.scale_x, prepared.scale_y
+    paddle_v3 = worker.paddle_v3
 
     t0 = time.perf_counter()
     try:
-        if _PADDLEOCR_V3:
-            results = ocr.predict(infer_path)
+        if paddle_v3:
+            results = _predict_with_device_fallback(worker, ocr, infer_path)
             lines: list[str] = []
+            bboxes: list[OcrBbox] = []
             for item in results or []:
                 lines.extend(_format_v3_result(item, scale_x=sx, scale_y=sy))
+                bboxes.extend(_v3_to_bboxes(item, scale_x=sx, scale_y=sy))
         else:
-            lines = _format_v2_result(ocr.ocr(infer_path, cls=False), scale_x=sx, scale_y=sy)
+            raw = ocr.ocr(infer_path, cls=False)
+            lines = _format_v2_result(raw, scale_x=sx, scale_y=sy)
+            bboxes = _v2_to_bboxes(raw, scale_x=sx, scale_y=sy)
     except NotImplementedError as e:
         logger.exception("PaddleOCR 识别失败（多为 Windows oneDNN/PIR 兼容问题）: %s", src)
-        return (
+        err = (
             "[OCR 识别失败] Paddle CPU 推理与 oneDNN 不兼容。"
             "已在代码中设置 enable_mkldnn=False；若仍失败可尝试降级 paddlepaddle 至 3.2.x。"
             f" 详情: {e}"
         )
+        return err, []
     except Exception as e:
         logger.exception("PaddleOCR 识别失败: %s", src)
-        return f"[OCR 识别失败] {e}"
+        return f"[OCR 识别失败] {e}", []
     finally:
         if prepared.temp_path is not None and prepared.temp_path.is_file():
             try:
@@ -226,9 +221,11 @@ def extract_text_with_bounds(
                 pass
 
     elapsed = time.perf_counter() - t0
+    device_label = worker.effective_device
     logger.info(
-        "OCR 完成 %.2fs profile=%s src=%s infer=%sx%s",
+        "OCR 完成 %.2fs device=%s profile=%s src=%s infer=%sx%s",
         elapsed,
+        device_label,
         _OCR_CONFIG.model_profile,
         src.name,
         prepared.path.name,
@@ -236,8 +233,73 @@ def extract_text_with_bounds(
     )
 
     if not lines:
-        return "[OCR] 未识别到任何文字"
-    return "\n".join(lines)
+        return "[OCR] 未识别到任何文字", bboxes
+    return "\n".join(lines), bboxes
+
+
+def _predict_with_device_fallback(worker, ocr, infer_path: str):
+    """GPU 推理失败且允许降级时，切换 CPU 后重试一次。"""
+    try:
+        return ocr.predict(infer_path)
+    except Exception as exc:
+        cfg = worker.cfg
+        if (
+            worker.effective_device.startswith("gpu")
+            and cfg.allow_gpu_fallback_to_cpu
+        ):
+            worker.force_cpu_fallback(str(exc))
+            ocr = worker.get_ocr_instance()
+            return ocr.predict(infer_path)
+        raise
+
+
+def run_ocr_frame(
+    image_path: Path | str,
+    *,
+    device_w: int | None = None,
+    device_h: int | None = None,
+    worker_key: str | None = None,
+) -> tuple[str, list[OcrBbox]]:
+    """
+    对指定图片进行一次 OCR 推理，返回 (summary, bboxes)。
+    同帧重复调用经帧缓存与 OcrWorker 串行化，不会重复 predict。
+    """
+    src = Path(image_path)
+    cache_key = _frame_cache_key(src, device_w=device_w, device_h=device_h, worker_key=worker_key)
+    cached = _FRAME_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    from game_agent.utils.ocr_worker import get_ocr_worker
+
+    worker = get_ocr_worker(worker_key=worker_key)
+    result = worker.submit(
+        _infer_ocr_frame,
+        src,
+        device_w=device_w,
+        device_h=device_h,
+        worker_key=worker_key,
+    )
+    if len(_FRAME_CACHE) >= _FRAME_CACHE_MAX:
+        _FRAME_CACHE.clear()
+    _FRAME_CACHE[cache_key] = result
+    return result
+
+
+def extract_text_with_bounds(
+    image_path: Path | str,
+    *,
+    device_w: int | None = None,
+    device_h: int | None = None,
+    worker_key: str | None = None,
+) -> str:
+    summary, _ = run_ocr_frame(
+        image_path,
+        device_w=device_w,
+        device_h=device_h,
+        worker_key=worker_key,
+    )
+    return summary
 
 
 _OCR_LINE_RE = re.compile(
@@ -261,6 +323,16 @@ class OcrBbox:
     y1: int
     x2: int
     y2: int
+
+
+def serialize_bboxes(bboxes: list[OcrBbox]) -> list[dict[str, int | str]]:
+    return [asdict(b) for b in bboxes]
+
+
+def deserialize_bboxes(raw: list[dict[str, int | str]] | None) -> list[OcrBbox]:
+    if not raw:
+        return []
+    return [OcrBbox(**item) for item in raw]
 
 
 def _v3_to_bboxes(data, *, scale_x: float, scale_y: float) -> list[OcrBbox]:
@@ -304,29 +376,15 @@ def extract_text_with_bbox(
     *,
     device_w: int | None = None,
     device_h: int | None = None,
+    worker_key: str | None = None,
 ) -> list[OcrBbox]:
-    src = Path(image_path)
-    ocr = get_ocr_instance()
-    prepared = _prepare_image_for_ocr(src, device_w=device_w, device_h=device_h)
-    infer_path = str(prepared.path)
-    sx, sy = prepared.scale_x, prepared.scale_y
-    try:
-        if _PADDLEOCR_V3:
-            results = ocr.predict(infer_path)
-            bboxes: list[OcrBbox] = []
-            for item in results or []:
-                bboxes.extend(_v3_to_bboxes(item, scale_x=sx, scale_y=sy))
-        else:
-            bboxes = _v2_to_bboxes(ocr.ocr(infer_path, cls=False), scale_x=sx, scale_y=sy)
-        return bboxes
-    except Exception:
-        return []
-    finally:
-        if prepared.temp_path is not None and prepared.temp_path.is_file():
-            try:
-                prepared.temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+    _, bboxes = run_ocr_frame(
+        image_path,
+        device_w=device_w,
+        device_h=device_h,
+        worker_key=worker_key,
+    )
+    return bboxes
 
 
 def is_screencap_mostly_black(
@@ -336,10 +394,6 @@ def is_screencap_mostly_black(
     dark_ratio: float = 0.88,
     sample_max: int = 96_000,
 ) -> bool:
-    """
-    判断截屏是否主要为黑屏（安全键盘 / 密码框焦点时常见）。
-    用于避免把黑屏 OCR 误判为「游戏卡死」。
-    """
     from PIL import Image
 
     path = Path(image_path)
@@ -378,9 +432,6 @@ def format_device_ocr_for_executor(
     screen_height: int,
     keyboard_min_y_ratio: float = 0.58,
 ) -> str:
-    """
-    标注 OCR 来自设备截屏，并将 y >= 阈值 的行标为输入法/安全键盘区（勿当登录按钮）。
-    """
     h = max(1, int(screen_height))
     cutoff = int(h * float(keyboard_min_y_ratio))
     ui_lines: list[str] = []
@@ -404,7 +455,6 @@ def format_device_ocr_for_executor(
             continue
         y = int(m.group(2))
         text = m.group(3)
-        # 主 Login/登录 可落在 cutoff 以下；复合入口与 IME 键仍归 keyboard 区
         is_primary_login = bool(_dialog_btn.search(text.strip()))
         is_compound = bool(_compound_login.search(text))
         if y >= cutoff and not is_primary_login:
@@ -416,12 +466,16 @@ def format_device_ocr_for_executor(
 
     parts = [
         f"[Device live screencap OCR] screen_height={h}px; "
-        f"UI region y<{cutoff} | keyboard/IME y>={cutoff} (do NOT tap IME keys for Login)",
+        f"UI region y<{cutoff} | lower-screen/IME-risk y>={cutoff} "
+        "(may include background game CTA — check LoginStageProbe)",
     ]
     parts.append(f"=== Game UI (y < {cutoff}) ===")
     parts.append("\n".join(ui_lines) if ui_lines else "(no text)")
     if ime_lines:
-        parts.append(f"=== Keyboard / IME only (y >= {cutoff}) — ignore for Login ===")
+        parts.append(
+            f"=== Lower-screen / IME-risk (y >= {cutoff}) — "
+            "not always keyboard; may be background enter-game CTA ===",
+        )
         parts.append("\n".join(ime_lines))
     if other:
         parts.append("=== Other ===")

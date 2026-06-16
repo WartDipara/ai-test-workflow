@@ -32,6 +32,28 @@ def get_package_pids(adb: AdbService, game_package: str) -> list[str]:
     return []
 
 
+def primary_package_pid(pids: frozenset[str] | set[str] | list[str]) -> str | None:
+    """多进程时取最小 pid 作为主进程；子进程 spawn/exit 不改变该值。"""
+    numeric = [p for p in pids if str(p).strip().isdigit()]
+    if not numeric:
+        return None
+    return min(numeric, key=int)
+
+
+def package_primary_pid_changed(
+    last_pids: frozenset[str],
+    current_pids: frozenset[str],
+) -> bool:
+    """仅主进程 pid 变化时返回 True（忽略 WebView 等子进程增减）。"""
+    if not last_pids or not current_pids:
+        return False
+    last_primary = primary_package_pid(last_pids)
+    current_primary = primary_package_pid(current_pids)
+    if last_primary is None or current_primary is None:
+        return False
+    return last_primary != current_primary
+
+
 def mark_game_process_detected(
     run_state: RunState,
     *,

@@ -16,7 +16,6 @@ from game_agent.services.gameturbo_log import (
     gameturbo_log_path,
     read_gameturbo_dedup_keys,
 )
-from game_agent.services.gameturbo_log_anomaly import is_fatal_gameturbo_log_line
 from game_agent.services.run_audit_log import RunAuditLogger
 
 logger = logging.getLogger(__name__)
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class LogMonitor:
-    """GameTurbo logcat 实时监控模块。"""
+    """GameTurbo logcat 采集：运行期只写入 gameturbo.log，不做规则判死。"""
 
     adb: AdbService
     app_config: AppConfig
@@ -43,7 +42,8 @@ class LogMonitor:
         *,
         skip_initial_bootstrap: bool = False,
     ) -> str | None:
-        logger.info("[LogMonitor] 开始监控 GameTurbo 日志...")
+        """兼容旧接口名：仅采集至 stop；流异常断开时返回基础设施错误（非日志判死）。"""
+        logger.info("[LogMonitor] 开始采集 GameTurbo 日志（运行期不分析）...")
         log_path = gameturbo_log_path(self.artifact_root)
         if not skip_initial_bootstrap:
             bootstrap_gameturbo_log(self.adb, self.artifact_root)
@@ -55,13 +55,13 @@ class LogMonitor:
                 seen_keys = read_gameturbo_dedup_keys(log_path)
                 logger.info("[LogMonitor] 会话重启后恢复 logcat 流")
 
-            anomaly = await self._run_one_stream(
+            stream_err = await self._run_one_stream(
                 stop_event,
                 log_path=log_path,
                 seen_keys=seen_keys,
             )
-            if anomaly is not None:
-                return anomaly
+            if stream_err is not None:
+                return stream_err
             if stop_event.is_set():
                 break
             if not self._restart_requested.is_set():
@@ -70,7 +70,7 @@ class LogMonitor:
                     "(adb disconnect or subprocess exit)"
                 )
                 logger.error(msg)
-                return f"Log anomaly detected: {msg}"
+                return msg
 
         return None
 
@@ -92,7 +92,6 @@ class LogMonitor:
         line_count = 0
         last_heartbeat = time.monotonic()
         heartbeat_interval_s = 30.0
-        sni_count = 0
         stream_died = False
 
         try:
@@ -108,7 +107,7 @@ class LogMonitor:
                     now = time.monotonic()
                     if now - last_heartbeat >= heartbeat_interval_s:
                         logger.info(
-                            "[LogMonitor] 仍在监听 GameTurbo | 已收 %d 条 | session=%d",
+                            "[LogMonitor] 仍在采集 GameTurbo | 已收 %d 条 | session=%d",
                             line_count,
                             self.session_state.session_index
                             if self.session_state
@@ -127,53 +126,8 @@ class LogMonitor:
                 if key not in seen_keys:
                     append_gameturbo_line(log_path, line)
                     seen_keys.add(key)
-                if "[SNI-" in line:
-                    sni_count += 1
                 if line_count <= 3 or line_count % 20 == 0:
-                    logger.info("[LogMonitor] logcat #%d: %s", line_count, line[:200])
-                if is_fatal_gameturbo_log_line(line):
-                    dual_channel = getattr(
-                        self.app_config,
-                        "network_anomaly",
-                        None,
-                    )
-                    defer = bool(
-                        dual_channel is not None and getattr(dual_channel, "enabled", False),
-                    )
-                    if not defer:
-                        if "idle shutdown" in line.lower() and sni_count == 0:
-                            logger.warning(
-                                "[LogMonitor] 闲置关闭 + 零 SNI (GameTurbo 未生效): %s",
-                                line,
-                            )
-                            if self.audit is not None:
-                                self.audit.log_observer(
-                                    kind="log_anomaly",
-                                    message=line,
-                                    extra={"marker": "no_sni", "sni_count": 0},
-                                )
-                            return (
-                                "Log anomaly detected (no SNI traffic): "
-                                f"idle shutdown, {line[:200]}"
-                            )
-                        logger.warning("[LogMonitor] 检测到异常日志: %s", line)
-                        if self.audit is not None:
-                            self.audit.log_observer(
-                                kind="log_anomaly",
-                                message=line,
-                                extra={"marker": "matched"},
-                            )
-                        return f"Log anomaly detected: {line}"
-                    logger.warning(
-                        "[LogMonitor] 高置信日志标记（由双通道协调器佐证）: %s",
-                        line[:200],
-                    )
-                    if self.audit is not None:
-                        self.audit.log_observer(
-                            kind="log_line_marker",
-                            message=line[:500],
-                            extra={"marker": "fatal_deferred"},
-                        )
+                    logger.debug("[LogMonitor] logcat #%d: %s", line_count, line[:200])
         finally:
             if process.returncode is None:
                 process.terminate()
@@ -187,5 +141,5 @@ class LogMonitor:
                 "(adb disconnect or subprocess exit)"
             )
             logger.error(msg)
-            return f"Log anomaly detected: {msg}"
+            return msg
         return None

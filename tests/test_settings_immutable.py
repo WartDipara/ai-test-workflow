@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from game_agent.config.loader import load_app_config
-from game_agent.models.settings import GameSection, GameTurboSection
+from game_agent.models.settings import AgentSection, ExecutorSection, GameSection, GameTurboSection
 from game_agent.models.task_config import TaskConfig
 from game_agent.models.task_runtime import TaskRuntime
 
@@ -18,6 +18,8 @@ llm:
 game:
   package_name: "legacy.pkg"
   launch_activity: "legacy.pkg/.Main"
+  launch_detect_timeout_s: 90.0
+  launch_detect_poll_interval_s: 2.0
   timeout_s: 100
 gameturbo:
   gid: "99999"
@@ -25,6 +27,14 @@ gameturbo:
   source_apk: "/tmp/old.apk"
   deploy_timeout_s: 60
   run_outputs_dir: "./run_outputs"
+executor:
+  ad_initial_wait_s: 3.0
+  max_foreground_retries: 4
+detection:
+  api_url: "http://legacy/predict"
+agent:
+  max_rounds: 100
+  persist_learned_skill_on_success: true
 modules:
   executor: false
 """
@@ -36,7 +46,10 @@ def test_load_strips_legacy_runtime_fields_from_yaml(tmp_path: Path) -> None:
     cfg = load_app_config(path)
     assert cfg.game.timeout_s == 100.0
     assert "package_name" not in GameSection.model_fields
+    assert "launch_detect_timeout_s" not in GameSection.model_fields
     assert "gid" not in GameTurboSection.model_fields
+    assert "ad_initial_wait_s" not in ExecutorSection.model_fields
+    assert "max_rounds" not in AgentSection.model_fields
 
 
 def test_task_lifecycle_does_not_modify_settings_file(tmp_path: Path) -> None:

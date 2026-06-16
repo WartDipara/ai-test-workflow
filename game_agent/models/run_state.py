@@ -19,21 +19,24 @@ class RunState:
     package_install_confirmed: bool = False
     failure_code: str = ""
     last_declared_stage: str = ""
-    # 键盘弹出前 get_ocr_summary 缓存的主 Login 坐标（安全键盘下截屏常黑屏）
+    # atomic_login OCR 阶段缓存的登录按钮坐标（安全键盘黑屏时仍可点击）
     cached_login_button_xy: tuple[int, int] | None = None
     cached_login_button_text: str = ""
-    # (line_x1, cy, half_char_px, _) — step>0 时复用，避免重复 OCR
+    # (line_x1, cy, base_offset_px, char_width_px) — step>0 时复用，避免重复 OCR
     checkbox_bbox_cache: tuple[int, int, int, int] | None = None
     # launch 流程阶段追踪（显式状态，不依赖 prompt 记忆）
     launch_stage: str = "launch"
     server_checked: bool = False
     server_check_attempts: int = 0
+    privacy_checkbox_tapped: bool = False
     last_stage_error: str = ""
+    graph_state_snapshot: dict = field(default_factory=dict)
 
     def format_launch_stage_status(self) -> str:
         return (
             f"[LaunchStage] stage={self.launch_stage!r} "
             f"server_checked={self.server_checked} "
+            f"privacy_checkbox_tapped={self.privacy_checkbox_tapped} "
             f"server_check_attempts={self.server_check_attempts}"
             + (f" last_error={self.last_stage_error!r}" if self.last_stage_error else "")
         )

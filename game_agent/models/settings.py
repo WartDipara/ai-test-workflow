@@ -60,11 +60,11 @@ class AdbSection(BaseModel):
 
 
 class OcrSection(BaseModel):
-    """PaddleOCR 性能与模型配置。"""
+    """PaddleOCR 性能与模型配置（PP-OCRv6 tiny + GPU/CPU 自动分流）。"""
 
-    model_profile: Literal["mobile", "server"] = Field(
-        "mobile",
-        description="mobile 使用 PP-OCRv5_mobile_*，显著快于 server；server 精度更高但更慢。",
+    model_profile: Literal["v6_tiny"] = Field(
+        "v6_tiny",
+        description="固定使用 PP-OCRv6_tiny_det/rec（需 paddleocr>=3.7）。",
     )
     max_image_width: int = Field(
         720,
@@ -72,32 +72,78 @@ class OcrSection(BaseModel):
         le=1920,
         description="识别前将截图等比缩放到不超过该宽度，坐标会映射回原分辨率。",
     )
+    device_policy: Literal["auto", "gpu", "cpu"] = Field(
+        "auto",
+        description="auto：有 CUDA GPU 则用 GPU，否则 CPU；gpu/cpu 强制指定。",
+    )
+    gpu_id: int = Field(
+        0,
+        ge=0,
+        le=7,
+        description="device_policy 为 auto/gpu 时使用的 GPU 编号。",
+    )
+    allow_gpu_fallback_to_cpu: bool = Field(
+        True,
+        description="GPU 初始化或推理失败时是否自动降级 CPU。",
+    )
     warmup_on_start: bool = Field(
         False,
         description="进程启动后是否预热 OCR（首次推理仍较慢，默认关以免拖慢开局 am start）。",
     )
 
 
-class ExecutorSection(BaseModel):
-    """执行者阶段（OCR + AI tap）配置。"""
+class MolmopointSection(BaseModel):
+    """MolmoPoint 深度学习 checkbox 定位服务（FastAPI /predict）。"""
 
-    ad_initial_wait_s: float = Field(
-        3.0,
-        ge=0.5,
-        le=15.0,
-        description="首次疑似广告页时优先等待的秒数。",
+    base_url: str = Field(
+        "",
+        description="MolmoPoint API 根地址，如 http://192.168.1.10:8000；留空则仅用 OCR 左推。",
     )
+    enabled: bool = Field(
+        True,
+        description="为 false 时不请求 MolmoPoint，即使配置了 base_url。",
+    )
+    timeout_s: float = Field(
+        60.0,
+        ge=5.0,
+        le=300.0,
+        description="predict 请求超时（秒）。",
+    )
+    prompt: str = Field(
+        "point the checkbox",
+        description="传给 MolmoPoint 的文本提示。",
+    )
+    max_vertical_offset_ratio: float = Field(
+        0.55,
+        ge=0.1,
+        le=1.5,
+        description="预测点纵坐标与 OCR 协议行中心允许的最大偏差（相对行高）。",
+    )
+    min_left_of_text_px: int = Field(
+        4,
+        ge=0,
+        le=80,
+        description="预测点须位于 OCR 锚点左缘以左至少该像素。",
+    )
+    max_left_of_text_px: int = Field(
+        400,
+        ge=40,
+        le=800,
+        description="预测点距 OCR 锚点左缘向左不超过该像素（过远视为无效）。",
+    )
+
+    def is_active(self) -> bool:
+        return self.enabled and bool((self.base_url or "").strip())
+
+
+class ExecutorSection(BaseModel):
+    """LangGraph 进游戏流程：开局等待与登录填表参数。"""
+
     post_launch_wait_s: float = Field(
         2.0,
         ge=0.5,
         le=10.0,
         description="开局或 open_game_app 后等待界面稳定的秒数。",
-    )
-    max_foreground_retries: int = Field(
-        4,
-        ge=1,
-        le=10,
-        description="连续非游戏前台轮数的提示阈值，供主脑判断是否需要重新打开游戏。",
     )
     credential_fill_settle_s: float = Field(
         0.4,
@@ -129,31 +175,27 @@ class ExecutorSection(BaseModel):
     )
     login_submit_press_enter: bool = Field(
         True,
-        description="密码填完后先对焦点发送 ENTER（部分游戏可直接提交，无需收键盘）。",
+        description="密码填完后对焦点发送 ENTER（部分游戏可直接提交）。",
     )
-    login_submit_use_cached_ocr_coords: bool = Field(
+    use_cached_login_button_xy: bool = Field(
         True,
-        description="使用填表前 get_ocr_summary 缓存的 Login 坐标点击（不依赖收键盘后 OCR）。",
+        description="atomic_login 使用 OCR 阶段缓存的登录按钮坐标（安全键盘黑屏时仍可点击）。",
     )
-    login_submit_ocr_after_dismiss: bool = Field(
-        False,
-        description="仅在收键盘且截屏非黑屏时再 OCR 找 Login；默认关（安全键盘下常失败）。",
+    server_panel_fusion_enabled: bool = Field(
+        True,
+        description="区服 tap 后 OCR+多模态双路并行融合判定弹窗是否打开。",
     )
+    server_panel_vision_min_conf: float = Field(
+        0.75,
+        ge=0.5,
+        le=1.0,
+        description="Vision 单独救场（OCR 未命中）时的最低置信度。",
+    )
+
+
 class GameSection(BaseModel):
     """游戏流程超时与判定参数；包名/Activity 由 TaskRuntime 管理。"""
     timeout_s: float = Field(300.0, description="并行监控的最大允许时间（秒），超时算作异常。")
-    launch_detect_timeout_s: float = Field(
-        90.0,
-        ge=15.0,
-        le=600.0,
-        description="执行者 wait_for_game_running 最长等待游戏进程秒数。",
-    )
-    launch_detect_poll_interval_s: float = Field(
-        2.0,
-        ge=0.5,
-        le=15.0,
-        description="等待游戏进程时的 pidof 轮询间隔（秒）。",
-    )
     package_install_wait_timeout_s: float = Field(
         120.0,
         ge=10.0,
@@ -263,33 +305,31 @@ class PreprocessingSection(BaseModel):
 
 
 class NetworkAnomalySection(BaseModel):
-    """并行阶段日志/画面双通道网络异常监视（50-50 交叉佐证）。"""
+    """并行阶段 OCR+多模态网络异常监视（运行期不分析日志）。"""
 
     enabled: bool = Field(
         True,
-        description="为 true 时在并行阶段运行 NetworkAnomalyCoordinator。",
+        description="为 true 时在并行阶段运行 NetworkAnomalyCoordinator（OCR+多模态）。",
     )
     poll_interval_s: float = Field(
         5.0,
         ge=2.0,
         le=30.0,
-        description="双通道轮询间隔（秒）。",
+        description="OCR/多模态轮询间隔（秒）。",
     )
-    min_log_lines: int = Field(
-        15,
-        ge=5,
-        le=100,
-        description="日志软异常规则生效前至少需要的 GameTurbo 行数。",
+    require_multimodal_confirm: bool = Field(
+        True,
+        description="为 true 时 OCR suspect 后须多模态 has_anomaly 确认才 fatal（无多模态时高置信 OCR 弹窗可例外）。",
     )
     download_progress_stall_s: float = Field(
         90.0,
         ge=30.0,
         le=600.0,
-        description="资源下载进度/阶段不变多久视为画面通道 suspect。",
+        description="资源下载进度/阶段不变多久视为 OCR suspect。",
     )
     use_ocr_poll: bool = Field(
         True,
-        description="画面通道是否独立 OCR 轮询（不依赖执行者 analyze_screen）。",
+        description="是否独立 OCR 轮询（不依赖执行者 analyze_screen）。",
     )
     exclude_top_ratio: float = Field(
         0.15,
@@ -325,49 +365,8 @@ class ModulesSection(BaseModel):
     )
 
 
-class DetectionSection(BaseModel):
-    """YOLO 视觉检测模型配置（detect_checkbox 等工具使用）。"""
-
-    api_url: str = Field(
-        "http://192.168.1.117:8000/predict",
-        description="YOLO 检测服务 API 端点。",
-    )
-    timeout_s: float = Field(
-        30.0,
-        ge=5.0,
-        le=120.0,
-        description="API 请求超时时间（秒）。",
-    )
-
-
 class AgentSection(BaseModel):
-    max_rounds: int = Field(30, ge=1, le=200)
-    llm_request_limit: int = Field(
-        80,
-        ge=20,
-        le=300,
-        description="单轮 agent.run 内 LLM 请求上限（含 tool 往返）；避免登录链耗尽默认 50。",
-    )
     artifacts_dir: Path = Field(Path("./artifacts"))
-    persist_learned_skill_on_success: bool = Field(
-        True,
-        description="success=true 结束时调用主 LLM 将本轮对话压成短 Markdown 写入 experiences/agent_skills/。",
-    )
-    tap_observe_count: int = Field(
-        2,
-        ge=1,
-        le=6,
-        description="tap_and_observe 默认连拍 OCR 次数（执行者阶段；越少越快）。",
-    )
-    repeat_compact_stage_hint_every_n_rounds: int = Field(
-        5,
-        ge=0,
-        le=50,
-        description=(
-            "COMPACT_STAGE_HINT 插入 user 消息的间隔：0=仅第 1 轮；5=第 1 轮及每 5 轮。"
-            "不裁剪 message_history（优先级：分析正确 > 速度 > 上下文）。"
-        ),
-    )
 
 
 class LoggingSection(BaseModel):
@@ -399,10 +398,26 @@ class AppConfig(BaseModel):
         """迁移 YAML：剥离运行态字段，修正 llm 段历史嵌套。"""
         if not isinstance(data, dict):
             return data
+        data.pop("detection", None)
+        agent = data.get("agent")
+        if isinstance(agent, dict):
+            for key in (
+                "max_rounds",
+                "persist_learned_skill_on_success",
+                "tap_observe_count",
+                "repeat_compact_stage_hint_every_n_rounds",
+            ):
+                agent.pop(key, None)
+        executor = data.get("executor")
+        if isinstance(executor, dict):
+            for key in ("ad_initial_wait_s", "max_foreground_retries"):
+                executor.pop(key, None)
         game = data.get("game")
         if isinstance(game, dict):
             game.pop("package_name", None)
             game.pop("launch_activity", None)
+            for key in ("launch_detect_timeout_s", "launch_detect_poll_interval_s"):
+                game.pop(key, None)
         gameturbo = data.get("gameturbo")
         if isinstance(gameturbo, dict):
             gameturbo.pop("gid", None)
@@ -458,6 +473,7 @@ class AppConfig(BaseModel):
     observer: ObserverSection = Field(default_factory=ObserverSection)
     adb: AdbSection = Field(default_factory=AdbSection)
     ocr: OcrSection = Field(default_factory=OcrSection)
+    molmopoint: MolmopointSection = Field(default_factory=MolmopointSection)
     executor: ExecutorSection = Field(default_factory=ExecutorSection)
     game: GameSection
     gameturbo: GameTurboSection = Field(default_factory=GameTurboSection)
@@ -466,5 +482,4 @@ class AppConfig(BaseModel):
     modules: ModulesSection = Field(default_factory=ModulesSection)
     network_anomaly: NetworkAnomalySection = Field(default_factory=NetworkAnomalySection)
     agent: AgentSection = Field(default_factory=AgentSection)
-    detection: DetectionSection = Field(default_factory=DetectionSection)
     logging: LoggingSection = Field(default_factory=LoggingSection)

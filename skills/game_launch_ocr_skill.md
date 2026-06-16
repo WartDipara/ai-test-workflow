@@ -2,148 +2,122 @@
 name: game_launch_ocr
 skill_id: game_launch_ocr
 description: >-
-  Executor: launch → login → in-game via OCR + tap. Index: skills/SKILL.md → read_repo_skill("game_launch_ocr").
+  LangGraph 进游戏流程：observe → classify → DFS 节点。Index: skills/SKILL.md → read_repo_skill("game_launch_ocr").
 ---
 
-# Generic game login flow (OCR + adb tap)
+# LangGraph 进游戏流程（Executor）
 
-**Goal:** full chain **launch → login → in-game** via OCR + tap; confirm with `check_in_game` (multimodal). GameTurbo logs run in parallel from launch.
+**目标：** deploy 后由 **LangGraph + DFS 状态树** 自动完成 启动 → 隐私/弹窗 → 登录 → 小号 → 选服 → 进游戏；成功须 `check_in_game` 多模态确认。
 
-Classify **current stage** from **live OCR**, then act. Prefer `tap_and_observe` on dialog buttons.
-
----
-
-## Golden rules (popups & consent)
-
-1. **When in doubt on a dialog, tap the positive / continue side** — not exit, not “later”, not “reject”, unless OCR clearly shows no Agree path.
-2. **First cold start often shows privacy / terms** (`privacy` stage) **before** login — do not skip; find **Agree / Accept / 同意 / 接受 / 我知道了 / 进入游戏** and tap it (`tap_and_observe`).
-3. **Checkbox first** if OCR shows unchecked protocol text — tap **left of** the agreement line (checkbox has no OCR text), then Agree/Login; use `tap_and_observe` to verify.
-4. **Download / update popups** may appear **during** `download` stage (“需要下载 XX MB”, “资源更新”, “确认下载”) — tap **确认 / 下载 / 继续 / OK / Agree**, then **`wait_seconds` 3–8s** and re-OCR; **do not** treat the dialog as failure.
-5. After any consent tap, **always** `get_ocr_summary` or `tap_and_observe` — do not assume the screen advanced.
-6. **Parallel monitors** only fail-fast on **network** errors — a download consent popup is **not** a network failure; keep progressing.
-
-### Positive vs negative controls (OCR keywords)
-
-| Prefer tap (continue) | Avoid unless no alternative |
-|----------------------|-----------------------------|
-| 同意, 接受, 确认, 继续, 确定, OK, Agree, Accept, Allow, Got it, 知道了, 进入, 开始, 下载, Download, Update now | 拒绝, 不同意, 取消, Cancel, 稍后, Later, 退出, Exit, 关闭 (only if clearly dismisses **announcement**, not privacy) |
-| 游客, 一键, Guest, Quick start | Reject, Deny (permissions) |
-
-If **both** Agree and Reject visible → **only Agree**.
+**不是** 主脑 Agent 逐轮调 `tap_and_observe` / `fill_credential_field` 工具。排障请看 `artifacts/.../executor/process.log` 中 `[LaunchGraph:route]`、`tree_trace`、`classify_reason`。
 
 ---
 
-## OCR format
+## 主循环
 
-`- (x, y) 'text' (confidence)` → tap **(x, y)**. After every tap use `get_ocr_summary` or `tap_and_observe`; do not reuse round-opening OCR.
+```text
+observe_screen (截图 + OCR)
+  → classify_screen (L0 正则 facts + 必要时 L2 ScreenInterpreter)
+  → plan_route (DFS 选下一节点)
+  → 动作节点
+  → observe_screen ...
+```
 
----
-
-## Stage model (typical order; may skip/loop)
-
-| Stage ID | Typical OCR / screen | Actions |
-|----------|----------------------|---------|
-| `splash` | logo, health advisory, loading, % | `wait_seconds` 1–3s; re-OCR |
-| `system_permission` | Allow, Deny, 允许, 存储, 电话 | tap **Allow / 允许** (`tap_and_observe`) |
-| `privacy` | 隐私, 用户协议, terms, checkbox, **同意** | checkbox if needed → **Agree/Accept/进入**; scroll terms = tap **bottom** primary button |
-| `announcement` | 公告, 活动, Close, ×, 跳过 | **Close / 知道了 / 跳过** — corner or bottom CTA |
-| `login` | 登录, 游客, 一键, 手机, 微信/QQ | **guest/one-tap** first; else credentials + Login |
-| `server_select` | 选服, 服务器, 进入游戏, 开始冒险 | tap recommended row then **进入/开始/确定** |
-| `download` | 下载, 更新, MB, GB, %, 解压, 资源包 | see **Download stage** below |
-| `unknown` | unclassified dialog | `get_ocr_summary`; if modal with Agree → tap Agree |
-
-Order varies (privacy before or after announcement); **trust OCR**, not a fixed script.
+`atomic_login` 成功后跳过 observe，直接 `classify_screen`。
 
 ---
 
-## Standard loop
+## 状态树节点（DFS 顺序）
 
-1. **`wait_for_package_installed` once** after deploy (do not recheck install).
-2. **`open_game_app`**, then `wait_seconds` ~2s.
-3. `get_ocr_summary` → **stage ID** → act (usually `tap_and_observe` on primary CTA).
-4. Repeat through login / server / download.
-5. **`wait_for_game_running`** once if process may still be absent (milestone only).
-6. After server select, long download, or likely HUD: **`check_in_game`** until consecutive confirmations.
-7. On `check_in_game` confirmed → stop tapping. Blocker only: `report_flow_done(success=false, ...)`.
+| 节点 action | 触发条件（guard） | 行为 |
+|-------------|-------------------|------|
+| `handle_initial_privacy_dialog` | 冷启动全屏隐私弹窗 | tap 同意按钮 |
+| `atomic_login` | 登录页 blocking | OCR → u2 填账号密码 → 提交 → OCR 验收 |
+| `select_sub_account` | 小号面板 blocking | tap 已有小号；无坐标时 Interpreter 补 `tap_target`；OCR 差分验证 |
+| `handle_download` | 下载文案可见 | tap 继续/确定或等待 |
+| `ensure_privacy_checkbox` | 登录页协议 checkbox | 多模态 + MolmoPoint 勾选 |
+| `check_server_selector` | 选服槽可见 | 完整选服 pipeline |
+| `tap_enter_game` | 踏入仙途等 CTA | tap 进游戏按钮 |
+| `check_in_game` | 已点进游戏且无 CTA | 多模态连续确认 |
+| `recover_from_failure` | 无可用节点 / 节点失败 | 盲重试登录、analyze_screen、关公告 |
 
----
-
-## Stage notes (detailed)
-
-### First launch — privacy / terms (`privacy`)
-
-- **Very common** on first open after install: full-screen or bottom-sheet terms.
-- Steps: `get_ocr_summary` → if 隐私/协议/用户协议 → stage `privacy`.
-- If checkbox OCR visible and unchecked → tap checkbox center, then tap **同意/接受/Agree**.
-- Long scrollable text: swipe up if needed, then tap **bottom** colored button (not paragraph text).
-- After tap: `tap_and_observe` or `wait_seconds` 2s + `get_ocr_summary` before assuming login screen.
-
-### Permissions (`system_permission`)
-
-- Android dialogs: **Allow / 允许** only.
-
-### Announcements (`announcement`)
-
-- Marketing / patch notes: **Close / × / 跳过 / 知道了** — not the same as privacy Agree, but still dismiss to continue.
-
-### Login (`login`)
-
-- Prefer **游客登录 / 一键登录 / guest / quick start**.
-- Account/password: OCR centers → `fill_credential_field` (auto **VERIFY** position + text; one retry on fail). Read `VERIFY` in tool output — `FAILED` → re-OCR coords, re-fill, or `verify_credential_field`. After password, keyboard dismisses → `get_ocr_summary` → Login only if VERIFY OK/PARTIAL with position OK.
-- Protocol checkbox on login page: tap checkbox before Login if OCR shows it.
-
-### Server select (`server_select`)
-
-- Tap **推荐 / 新服** row or first row, then **进入游戏 / 开始冒险 / 确定**.
-
-### Download / update (`download`) — important
-
-This stage is **mostly waiting**, but games often show **extra consent popups**:
-
-| Popup pattern (OCR) | What to do |
-|---------------------|------------|
-| “需要下载 XXX MB” / “资源大小” / “确认下载” / “更新包” | Tap **确认 / 下载 / 继续 / OK** → `wait_seconds` 5–15s → `get_ocr_summary` |
-| Progress % / 正在下载 / 解压中 | **Do not spam tap** — `wait_seconds` 3–8s, re-OCR until gone or HUD appears |
-| “WLAN only” / 移动网络提示 | Tap **继续下载 / 仍要下载 / 确定** (agree to download) |
-| No progress for many rounds | `wait_seconds` longer; optional `check_in_game`; do not `report_flow_done` for slow CDN alone |
-
-- Downloading ≠ test failure; game process may appear late.
-- After large download, call **`check_in_game`** when HUD / main UI likely.
+里程碑写入 `LaunchStateStore`（`login_done`、`sub_account_selected` 等），节点记录用 tree node id（如 `login.select_sub_account`）。
 
 ---
 
-## Tools
+## 感知分层
 
-| Tool | Use |
-|------|-----|
-| `wait_for_package_installed` | once after deploy |
-| `open_game_app` | after package ready |
-| `get_ocr_summary` / `tap_and_observe` | every decision; prefer observe after taps |
-| `tap_coordinate` | when observe not needed |
-| `swipe_screen` | long terms, server list |
-| `press_back` | wrong sub-page only — may exit game |
-| `wait_seconds` | animations, download progress (not a substitute for `wait_for_game_running`) |
-| `wait_for_game_running` | process milestone |
-| `check_in_game` | required to finish |
-| `read_skills_index` / `read_repo_skill("game_launch_ocr")` | re-read this skill |
-| `credentials_status` / `fill_credential_field` / `verify_credential_field` | account login + self-check |
-| `report_flow_done(success=false)` | unrecoverable blocker only |
+| 层级 | 机制 | 何时 |
+|------|------|------|
+| L0 | OCR + 正则 `classify_screen_facts` | 每轮 classify |
+| L2 | 同步 `ScreenInterpreter`（多模态 JSON） | 小号无坐标、公告无 dismiss 坐标、创角 hint 等 |
+| L1 | `NodeVerifier` OCR 文本差分 | 动作后验证（如小号页离开） |
+| 异步 | `VisionEnrichmentQueue` + `analyze_game_state` | 下载/歧义画面后台 enrich |
+
+OCR 坐标优先于模型坐标（`merge_interpretation_into_facts`）。
 
 ---
 
-## Common mistakes
+## 阶段与 facts 字段
 
-- Tap **拒绝 / Cancel / 不同意** on privacy or download consent → stuck or app exits.
-- Ignore privacy on first launch → login buttons blocked behind terms.
-- Close download-size dialog with back → download never starts.
-- Spam tap during % progress → mis-clicks.
-- Stale OCR → wrong stage; always refresh after each action.
-- Stop after `wait_for_game_running` → still need login/server/download/`check_in_game`.
+| current_stage | 主要 facts | 说明 |
+|---------------|------------|------|
+| `privacy` | `initial_privacy_dialog` | 全屏协议，先于登录 |
+| `login_form` | `login_blocking` | `atomic_login` |
+| `sub_account_select` | `sub_account_blocking`, `sub_account_action_xy` | 勿点背景踏入仙途 |
+| `server_select` | `server_slot_visible`, `enter_cta_visible` | 先 `check_server_selector` |
+| `download` | `download_visible` | 等待为主，Anomaly 监视停滞 |
+| 创角（未专节点） | `character_creation_blocking` | 阻塞 tap/check_in_game，走 recover |
+
+凭据：`config/credentials.yaml`，由 `atomic_login` 读取，不经过 LLM。
 
 ---
 
-## Reporting
+## 登录与安全键盘
 
-Each round: **stage ID** + next tools (e.g. `privacy` → `tap_and_observe` on 同意 at (x,y)).
+- 填表：u2 `setText` + 可选无障碍校验（`executor.credential_*`）
+- 提交：ENTER → u2 Login → **OCR 阶段缓存的按钮坐标**（`use_cached_login_button_xy`）
+- 黑屏：observe 检测 secure keyboard → 点空白收起 → 勿在收键盘后再 OCR 找 Login
+- 验收：`verify_login_with_ocr` / `probe_login_stage`
 
-`wait_for_game_running` summary must describe last meaningful action (e.g. "tapped 确认下载 on 120MB update dialog").
+---
+
+## 并行监视（Observer）
+
+- **LogMonitor**：只采集 `gameturbo.log`，运行期不按日志判死
+- **AnomalyMonitor**：独立 OCR 轮询 + 多模态确认网络异常 → `signal_fatal`
+- 登录/UI 失败在图内 `recover_from_failure`，不走 region 重试
+
+---
+
+## 排障清单
+
+| 症状 | 查什么 |
+|------|--------|
+| 小号页一直 OCR 不点 | `sub_account_action_xy` 是否空；`sync interpret` 日志；`failed_nodes.login.select_sub_account` |
+| 登录循环 | `atomic_login` failed reason；安全键盘黑屏；`login_done` flag |
+| 误点进游戏 | 是否仍在 `sub_account_blocking` / `login_blocking` |
+| 创角卡住 | `character_creation_blocking`；尚无专用节点，依赖 recover + Interpreter |
+| 路由不对 | `tree_trace`、`planned_next_route`、`classify_reason` |
+
+---
+
+## 相关配置（settings.yaml）
+
+```yaml
+executor:
+  post_launch_wait_s: 2.0
+  use_cached_login_button_xy: true
+  login_submit_press_enter: true
+  credential_verify_after_fill: true
+
+llm_multimodal:  # classify L2、check_in_game、recover 必需
+  ...
+```
+
+---
+
+## 与 gameturbo_log_baseline 分工
+
+- **本 skill**：Executor UI / LangGraph 阶段
+- **gameturbo_log_baseline**：日志健康、Modify 补丁、E2 重试（运行期不读日志判死）

@@ -6,10 +6,21 @@ from dataclasses import dataclass, field
 
 from game_agent.services.vision_tools import is_network_anomaly_reason
 
-_DOWNLOAD_STAGES = frozenset({
+_DOWNLOAD_STALL_STAGES = frozenset({
     "resource_download",
     "loading",
-    "unknown",
+})
+
+_NON_STALL_STAGES = frozenset({
+    "login",
+    "login_form",
+    "sub_account_select",
+    "privacy",
+    "privacy_agree",
+    "server_select",
+    "server_check",
+    "in_game",
+    "clear",
 })
 _DOWNLOAD_PCT_RE = re.compile(r"(\d{1,3})%")
 _OCR_LINE_RE = re.compile(
@@ -33,9 +44,17 @@ class ScreenHealthVerdict:
     progress: str = ""
 
 
+def is_download_stall_watch_stage(stage: str) -> bool:
+    """仅 resource_download/loading 参与下载停滞监视；login/unknown 等不参与。"""
+    normalized = (stage or "unknown").strip()
+    if normalized in _NON_STALL_STAGES:
+        return False
+    return normalized in _DOWNLOAD_STALL_STAGES
+
+
 @dataclass
 class ScreenProgressTracker:
-    """跟踪下载进度是否停滞（忽略仅角标加速速率变化）。"""
+    """跟踪资源下载进度是否停滞（忽略仅角标加速速率变化）。"""
 
     last_key: str = ""
     last_change_monotonic: float = field(default_factory=time.monotonic)
@@ -60,9 +79,7 @@ class ScreenProgressTracker:
             self.last_stage = stage
 
         elapsed = now - self.last_change_monotonic
-        in_download_like = stage in _DOWNLOAD_STAGES or percent is not None
-
-        if not in_download_like:
+        if not is_download_stall_watch_stage(stage):
             return ScreenHealthVerdict(False, "", stage, progress)
 
         if elapsed < stall_s:
@@ -71,7 +88,7 @@ class ScreenProgressTracker:
         detail = progress or (f"{percent}%" if percent is not None else stage)
         return ScreenHealthVerdict(
             True,
-            f"download UI unchanged for {elapsed:.0f}s ({detail})",
+            f"stage={stage} progress unchanged for {elapsed:.0f}s ({detail})",
             stage,
             progress,
         )

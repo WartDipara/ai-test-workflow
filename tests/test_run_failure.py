@@ -15,9 +15,16 @@ def test_e2006_explicit_code_is_retryable() -> None:
     assert failure.retryable is True
 
 
-def test_log_anomaly_retryable() -> None:
+def test_log_anomaly_no_longer_retryable_at_runtime() -> None:
     failure = classify_failure("Log anomaly detected: tunnel closed")
-    assert failure.code == ErrorCode.NET_LOG_ANOMALY
+    assert failure.retryable is False
+
+
+def test_vision_ocr_anomaly_retryable() -> None:
+    failure = classify_failure(
+        "Vision/OCR network anomaly confirmed: ui_stage=download ocr=network dialog"
+    )
+    assert failure.code == ErrorCode.NET_SCREEN_ANOMALY
     assert failure.retryable is True
 
 

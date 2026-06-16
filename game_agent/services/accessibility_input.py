@@ -265,7 +265,7 @@ def verify_credential_node(
         elif is_pwd_field and not actual:
             lines.append(
                 "VERIFY password: PARTIAL — password field but text hidden in accessibility; "
-                "after keyboard dismiss use get_ocr_summary or verify_credential_field again"
+                "after keyboard dismiss re-run atomic_login OCR verify"
             )
             text_ok = position_ok
         elif not actual:
@@ -281,7 +281,7 @@ def verify_credential_node(
         lines.append(f"VERIFY {field_label}: PASSED")
     elif not position_ok:
         lines.append(
-            f"VERIFY {field_label}: FAILED — fix coordinates with get_ocr_summary, then re-fill"
+            f"VERIFY {field_label}: FAILED — fix coordinates with OCR, then re-fill"
         )
     elif field_label == "password" and "PARTIAL" in "\n".join(lines):
         lines.append(f"VERIFY {field_label}: PARTIAL — proceed with caution")
@@ -315,7 +315,7 @@ def verify_credential_via_accessibility(
     if target is None:
         return (
             f"VERIFY FAIL: no suitable EditText for {field_label} near ({x},{y}). "
-            "Fill username first; re-run get_ocr_summary for field centers."
+            "Fill username first; re-run OCR for field centers."
         )
     passed, block = verify_credential_node(
         target,
@@ -550,10 +550,78 @@ def fill_credential_via_accessibility(
 
     if not passed and "FAILED" in parts[-1]:
         parts.append(
-            "Action: get_ocr_summary → confirm field centers → fill_credential_field again "
+            "Action: re-OCR login screen → confirm field centers → fill again "
             "or verify_credential_field."
         )
 
+    return "\n".join(parts)
+
+
+def fill_password_via_accessibility(
+    serial: str | None,
+    password: str,
+    *,
+    width: int,
+    height: int,
+    settle_s: float = 0.25,
+    verify_after_fill: bool = False,
+    max_center_distance_px: float = 150.0,
+) -> str:
+    """无密码 OCR 坐标时：用 u2 选账号框下方第二个 EditText 填密码。"""
+    device = _connect_u2(serial)
+    key = serial or "__default__"
+    username_center = _last_username_center.get(key)
+    hint_x = width // 2
+    hint_y = height // 3
+    if username_center is not None:
+        hint_x, hint_y = username_center[0], username_center[1] + _MIN_PASSWORD_BELOW_USERNAME_PX
+
+    target, pick, click_x, click_y = _pick_credential_edit(
+        device,
+        hint_x,
+        hint_y,
+        "password",
+        username_center=username_center,
+    )
+    if target is None:
+        return (
+            "Accessibility fill failed: no password EditText below username. "
+            "Fill username first or run: python -m uiautomator2 init"
+        )
+
+    try:
+        target.click()
+    except Exception:
+        device.click(click_x, click_y)
+    time.sleep(max(0.12, min(float(settle_s), 1.0)))
+
+    pick, err = _apply_set_text(target, device, password, pick)
+    if err:
+        return err
+
+    parts = [
+        f"Filled password via accessibility (uiautomator2, {pick}) "
+        f"click=({click_x},{click_y}). Secure keyboard OK.",
+    ]
+    if verify_after_fill:
+        passed, verify_block = verify_credential_node(
+            target,
+            password,
+            field_label="password",
+            tap_x=click_x,
+            tap_y=click_y,
+            max_center_distance_px=max_center_distance_px,
+            pick=pick,
+            username_center=username_center,
+        )
+        parts.append(verify_block)
+        if not passed:
+            return "\n".join(parts)
+    try:
+        pcx, pcy, _ = _node_center_distance(target, click_x, click_y)
+        _last_password_center[key] = (pcx, pcy)
+    except Exception:
+        pass
     return "\n".join(parts)
 
 
@@ -713,13 +781,12 @@ def submit_login_after_password(
     use_cached_coords: bool = True,
     try_dismiss: bool = True,
     press_back_on_dismiss: bool = False,
-    ocr_after_dismiss: bool = False,
 ) -> str:
     """
-    密码已填入后的登录提交（不依赖「收键盘 → OCR」单一路径）。
+    密码已填入后的登录提交（atomic_login 内部使用）。
 
-    顺序：ENTER → 无障碍点 Login → 键盘前缓存的 Login 坐标 → 收键盘/藏 IME 后再试
-    →（可选）非黑屏时才 OCR。安全键盘下截屏发黑属正常，不代表游戏卡死。
+    顺序：ENTER → 无障碍点 Login → 键盘前缓存的 Login 坐标 → 收键盘/藏 IME 后再试。
+    安全键盘下截屏发黑属正常，不在收键盘后再 OCR。
     """
     device = _connect_u2(serial)
     wait = max(0.15, min(float(settle_s), 1.5))
@@ -750,7 +817,7 @@ def submit_login_after_password(
             steps.append(f"[3b] {u2_after}")
         steps.append(
             "[3] Submitted via cached coords (no post-dismiss OCR). "
-            "Wait / check_in_game / get_ocr_summary if UI unchanged."
+            "Wait for atomic_login OCR verify or check_in_game if UI unchanged."
         )
         return "\n".join(steps)
 
@@ -766,31 +833,9 @@ def submit_login_after_password(
             steps.append(f"[4c] {u2_second}")
             return "\n".join(steps)
 
-    if ocr_after_dismiss and artifact_root is not None and adb is not None:
-        from game_agent.services.login_form_ocr import capture_login_form_targets
-        from game_agent.utils.ocr_util import is_screencap_mostly_black
-
-        targets, shot, summary = capture_login_form_targets(
-            adb,
-            artifact_root,
-            screen_width=width,
-            screen_height=screen_height,
-            tag="login_post_dismiss",
-        )
-        steps.append(f"[5] {summary}")
-        if is_screencap_mostly_black(shot):
-            steps.append(
-                "[5] OCR skipped: screencap mostly black (secure keyboard). "
-                "Not game freeze — cache Login via get_ocr_summary before filling password."
-            )
-        elif targets.login_button_xy is not None:
-            lx, ly = targets.login_button_xy
-            _tap_xy((lx, ly), "[5] OCR Login")
-            return "\n".join(steps)
-
     steps.append(
-        "Login submit exhausted. Before password: call get_ocr_summary once (keyboard down) "
-        "to cache Login; ensure login_submit_press_enter=true."
+        "Login submit exhausted. Ensure use_cached_login_button_xy=true and "
+        "login_submit_press_enter=true in settings executor section."
     )
     return "\n".join(steps)
 
@@ -865,5 +910,5 @@ def dismiss_secure_keyboard_focus(
         except Exception as e:
             parts.append(f"BACK failed: {e!s}")
 
-    parts.append("Re-run get_ocr_summary then tap_coordinate on Login.")
+    parts.append("Re-OCR login screen then tap Login button.")
     return "; ".join(parts)

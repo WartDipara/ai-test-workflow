@@ -114,14 +114,68 @@ def _latest_session_archive(artifact_root: Path) -> Path | None:
     return archives[-1] if archives else None
 
 
+def _iter_nonempty_log_lines(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    return [
+        line.strip()
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line.strip()
+    ]
+
+
+def merge_gameturbo_session_archives(artifact_root: Path) -> Path:
+    """
+    按序号合并 gameturbo_session_*.log 与当前 gameturbo.log 为单一 gameturbo.log。
+    使用时间戳去重键，避免会话边界重叠行重复。
+    """
+    active = gameturbo_log_path(artifact_root)
+    archives = sorted(artifact_root.glob("gameturbo_session_*.log"))
+    if not archives:
+        return active
+
+    seen_keys: set[str] = set()
+    merged: list[str] = []
+
+    for archive in archives:
+        for line in _iter_nonempty_log_lines(archive):
+            key = gameturbo_log_dedup_key(line)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            merged.append(line)
+
+    for line in _iter_nonempty_log_lines(active):
+        key = gameturbo_log_dedup_key(line)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        merged.append(line)
+
+    active.parent.mkdir(parents=True, exist_ok=True)
+    if merged:
+        active.write_text("\n".join(merged) + "\n", encoding="utf-8")
+        logger.info(
+            "[GameTurboLog] 已合并 %d 个会话归档到 %s | 共 %d 行",
+            len(archives),
+            GAMETURBO_LOG_FILENAME,
+            len(merged),
+        )
+    return active
+
+
 def ensure_gameturbo_log_for_analysis(artifact_root: Path) -> Path | None:
     """
     保证产物目录内存在非空的 gameturbo.log（分析脚本固定读取此文件名）。
-    若当前文件为空且存在会话归档，则将最近一段归档复制为 gameturbo.log。
+    若存在会话归档则先合并全部 gameturbo_session_*.log；
+    仍为空则将最近一段归档复制为 gameturbo.log。
     仍无内容则返回 None。
     """
     path = gameturbo_log_path(artifact_root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if sorted(artifact_root.glob("gameturbo_session_*.log")):
+        merge_gameturbo_session_archives(artifact_root)
+        path = gameturbo_log_path(artifact_root)
     if path.is_file() and _count_nonempty_lines(path) > 0:
         return path
     latest = _latest_session_archive(artifact_root)
@@ -306,6 +360,7 @@ def finalize_gameturbo_log(adb: AdbService, artifact_root: Path) -> Path | None:
         if added:
             logger.info("[GameTurboLog] 收尾追加设备缓冲区 %d 行", added)
 
+    merge_gameturbo_session_archives(artifact_root)
     path = ensure_gameturbo_log_for_analysis(artifact_root)
     if path is None:
         logger.warning(
