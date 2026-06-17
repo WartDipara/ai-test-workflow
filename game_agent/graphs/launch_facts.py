@@ -76,7 +76,10 @@ _SUB_ACCOUNT_HINT_RE = re.compile(
     r"sub-?account|小号|子账号|选择小号|上次登录",
     re.IGNORECASE,
 )
-_CHARACTER_HINT_RE = re.compile(r"创角|创建角色|选择职业", re.IGNORECASE)
+_CHARACTER_HINT_RE = re.compile(
+    r"创角|创建角色|选择职业|Click\s*to\s*Create|Create\s*Role|Enter\s*World|进入世界",
+    re.IGNORECASE,
+)
 
 
 def classify_screen_facts(
@@ -121,6 +124,8 @@ def classify_screen_facts(
         reason_parts.append("terms_checkbox_visible")
     if target is not None:
         reason_parts.append(f"server_slot={target.label[:40]!r}")
+    if _CHARACTER_HINT_RE.search(merged):
+        reason_parts.append("character_creation_ocr")
 
     return LaunchFacts(
         login_blocking=login_probe.blocking and login_probe.stage == "login_form",
@@ -139,6 +144,7 @@ def classify_screen_facts(
         ),
         download_visible=download_visible,
         announcement_overlay=announcement_overlay,
+        character_creation_blocking=bool(_CHARACTER_HINT_RE.search(merged)),
         classify_reason="; ".join(reason_parts),
     )
 

@@ -29,6 +29,185 @@ class InGameCheckResult:
     message: str
 
 
+def _finalize_confirmed_run_state(
+    run_state: RunState,
+    *,
+    game_pkg: str,
+    judgment: GameEntryJudgment,
+    streak: int,
+) -> None:
+    run_state.in_game_confirmed = True
+    run_state.game_started = True
+    run_state.finished = True
+    run_state.success = True
+    run_state.note = (judgment.reason or "In-game confirmed")[:2000]
+    logger.info(
+        "[check_in_game] Confirmed in-game for %s | streak=%d | conf=%.2f",
+        game_pkg,
+        streak,
+        judgment.confidence,
+    )
+
+
+async def run_in_game_check_on_capture(
+    *,
+    shot_path: Path,
+    ocr_summary: str,
+    cfg: AppConfig,
+    run_state: RunState,
+    audit: RunAuditLogger | None = None,
+    round_id: int = 0,
+    sessions_restarted: int = 0,
+    session_index: int = 1,
+    confirm_needed: int | None = None,
+    provisional: bool = False,
+) -> InGameCheckResult:
+    """对已有截图+OCR 做多模态进游戏判定；provisional 时不写 run_state 终局字段。"""
+    game_pkg = cfg.game.package_name
+    confirm_need = confirm_needed if confirm_needed is not None else cfg.game.main_screen_confirm_rounds
+    min_conf = cfg.game.main_screen_min_confidence
+    llm_cfg = cfg.llm_multimodal
+    if llm_cfg is None:
+        body = format_vision_tool_response(
+            error_code=VisionToolErrorCode.NO_MULTIMODAL,
+            error_message="llm_multimodal 未配置，check_in_game 需要视觉模型",
+        )
+        return InGameCheckResult(
+            judgment=None,
+            ocr_creation_hits=[],
+            screenshot_path=shot_path,
+            streak=run_state.in_game_confirm_streak,
+            confirm_needed=confirm_need,
+            confirmed=False,
+            message=body,
+        )
+
+    ocr_creation_hits = match_character_creation_ocr(ocr_summary)
+    vision = VisionWorker(llm_cfg)
+    try:
+        judgment = await vision.judge_in_game_main(
+            screenshot_path=shot_path,
+            ocr_summary=ocr_summary,
+            ocr_creation_hits=ocr_creation_hits,
+            round_id=round_id,
+            session_index=max(1, session_index),
+            sessions_restarted=sessions_restarted,
+        )
+    except Exception as e:
+        logger.exception("check_in_game 多模态 API 失败")
+        body = format_vision_tool_response(
+            error_code=VisionToolErrorCode.API_ERROR,
+            error_message=str(e)[:800],
+            data={"screenshot": str(shot_path), "ocr_preview": ocr_summary[:500]},
+        )
+        return InGameCheckResult(
+            judgment=None,
+            ocr_creation_hits=ocr_creation_hits,
+            screenshot_path=shot_path,
+            streak=0,
+            confirm_needed=confirm_need,
+            confirmed=False,
+            message=body,
+        )
+
+    if audit is not None:
+        audit.log_observer(
+            kind="check_in_game",
+            message=judgment.reason,
+            round_id=round_id,
+            extra=judgment.model_dump(),
+        )
+
+    if ocr_creation_hits:
+        run_state.in_game_confirm_streak = 0
+        body = format_vision_tool_response(
+            error_code=VisionToolErrorCode.OK,
+            data={
+                "in_game_main": False,
+                "confirmed": False,
+                "streak": 0,
+                "confirm_needed": confirm_need,
+                "stage": judgment.stage,
+                "confidence": judgment.confidence,
+                "ocr_creation_hits": ocr_creation_hits,
+                "reason": judgment.reason,
+                "screenshot": str(shot_path),
+                "hint": "Creation/login OCR hit; continue login flow, do not treat as in-game.",
+            },
+        )
+        return InGameCheckResult(
+            judgment=judgment,
+            ocr_creation_hits=ocr_creation_hits,
+            screenshot_path=shot_path,
+            streak=0,
+            confirm_needed=confirm_need,
+            confirmed=False,
+            message=body,
+        )
+
+    ok_sample = (
+        judgment.in_game_main
+        and judgment.confidence >= min_conf
+        and "character_creation" not in judgment.blockers
+    )
+    if ok_sample:
+        run_state.in_game_confirm_streak += 1
+    else:
+        run_state.in_game_confirm_streak = 0
+
+    streak = run_state.in_game_confirm_streak
+    confirmed = streak >= confirm_need
+    if confirmed and not provisional:
+        _finalize_confirmed_run_state(
+            run_state,
+            game_pkg=game_pkg,
+            judgment=judgment,
+            streak=streak,
+        )
+    elif confirmed and provisional:
+        logger.info(
+            "[check_in_game] Provisional in-game entry for %s | streak=%d | conf=%.2f",
+            game_pkg,
+            streak,
+            judgment.confidence,
+        )
+
+    body = format_vision_tool_response(
+        error_code=VisionToolErrorCode.OK,
+        data={
+            "in_game_main": judgment.in_game_main,
+            "confidence": judgment.confidence,
+            "stage": judgment.stage,
+            "blockers": judgment.blockers,
+            "ocr_signals": judgment.ocr_signals,
+            "reason": judgment.reason,
+            "streak": streak,
+            "confirm_needed": confirm_need,
+            "confirmed": confirmed,
+            "provisional": provisional,
+            "screenshot": str(shot_path),
+            "hint": (
+                "CONFIRMED — proceed to stability observe."
+                if confirmed and provisional
+                else (
+                    "CONFIRMED — stop tapping and end tool use."
+                    if confirmed
+                    else f"Need {confirm_need - streak} more positive check_in_game sample(s)."
+                )
+            ),
+        },
+    )
+    return InGameCheckResult(
+        judgment=judgment,
+        ocr_creation_hits=ocr_creation_hits,
+        screenshot_path=shot_path,
+        streak=streak,
+        confirm_needed=confirm_need,
+        confirmed=confirmed,
+        message=body,
+    )
+
+
 async def run_in_game_check(
     *,
     adb: AdbService,
@@ -39,11 +218,10 @@ async def run_in_game_check(
     round_id: int = 0,
     sessions_restarted: int = 0,
     session_index: int = 1,
+    provisional: bool = False,
 ) -> InGameCheckResult:
     """主脑工具：截图 + OCR + 多模态进游戏判定；更新 confirm streak。"""
-    game_pkg = cfg.game.package_name
     confirm_need = cfg.game.main_screen_confirm_rounds
-    min_conf = cfg.game.main_screen_min_confidence
     llm_cfg = cfg.llm_multimodal
     if llm_cfg is None:
         body = format_vision_tool_response(
@@ -84,120 +262,14 @@ async def run_in_game_check(
     except Exception as e:
         ocr_summary = f"[OCR failed] {e}"
 
-    ocr_creation_hits = match_character_creation_ocr(ocr_summary)
-    vision = VisionWorker(llm_cfg)
-    try:
-        judgment = await vision.judge_in_game_main(
-            screenshot_path=shot_path,
-            ocr_summary=ocr_summary,
-            ocr_creation_hits=ocr_creation_hits,
-            round_id=round_id,
-            session_index=max(1, session_index),
-            sessions_restarted=sessions_restarted,
-        )
-    except Exception as e:
-        logger.exception("check_in_game 多模态 API 失败")
-        body = format_vision_tool_response(
-            error_code=VisionToolErrorCode.API_ERROR,
-            error_message=str(e)[:800],
-            data={"screenshot": str(shot_path), "ocr_preview": ocr_summary[:500]},
-        )
-        return InGameCheckResult(
-            judgment=None,
-            ocr_creation_hits=ocr_creation_hits,
-            screenshot_path=shot_path,
-            streak=0,
-            confirm_needed=confirm_need,
-            confirmed=False,
-            message=body,
-        )
-
-    if audit is not None:
-        audit.log_observer(
-            kind="check_in_game",
-            message=judgment.reason[:500],
-            round_id=round_id,
-            extra=judgment.model_dump(),
-        )
-
-    if ocr_creation_hits:
-        run_state.in_game_confirm_streak = 0
-        body = format_vision_tool_response(
-            error_code=VisionToolErrorCode.OK,
-            data={
-                "in_game_main": False,
-                "confirmed": False,
-                "streak": 0,
-                "confirm_needed": confirm_need,
-                "stage": judgment.stage,
-                "confidence": judgment.confidence,
-                "ocr_creation_hits": ocr_creation_hits,
-                "reason": judgment.reason[:500],
-                "screenshot": str(shot_path),
-                "hint": "Creation/login OCR hit; continue login flow, do not treat as in-game.",
-            },
-        )
-        return InGameCheckResult(
-            judgment=judgment,
-            ocr_creation_hits=ocr_creation_hits,
-            screenshot_path=shot_path,
-            streak=0,
-            confirm_needed=confirm_need,
-            confirmed=False,
-            message=body,
-        )
-
-    ok_sample = (
-        judgment.in_game_main
-        and judgment.confidence >= min_conf
-        and "character_creation" not in judgment.blockers
-    )
-    if ok_sample:
-        run_state.in_game_confirm_streak += 1
-    else:
-        run_state.in_game_confirm_streak = 0
-
-    streak = run_state.in_game_confirm_streak
-    confirmed = streak >= confirm_need
-    if confirmed:
-        run_state.in_game_confirmed = True
-        run_state.game_started = True
-        run_state.finished = True
-        run_state.success = True
-        run_state.note = (judgment.reason or "In-game confirmed")[:2000]
-        logger.info(
-            "[check_in_game] Confirmed in-game for %s | streak=%d | conf=%.2f",
-            game_pkg,
-            streak,
-            judgment.confidence,
-        )
-
-    body = format_vision_tool_response(
-        error_code=VisionToolErrorCode.OK,
-        data={
-            "in_game_main": judgment.in_game_main,
-            "confidence": judgment.confidence,
-            "stage": judgment.stage,
-            "blockers": judgment.blockers,
-            "ocr_signals": judgment.ocr_signals,
-            "reason": judgment.reason[:500],
-            "streak": streak,
-            "confirm_needed": confirm_need,
-            "confirmed": confirmed,
-            "screenshot": str(shot_path),
-            "hint": (
-                "CONFIRMED — stop tapping and end tool use."
-                if confirmed
-                else f"Need {confirm_need - streak} more positive check_in_game sample(s)."
-            ),
-        },
-    )
-    return InGameCheckResult(
-        judgment=judgment,
-        ocr_creation_hits=ocr_creation_hits,
-        screenshot_path=shot_path,
-        streak=streak,
-        confirm_needed=confirm_need,
-        confirmed=confirmed,
-        message=body,
+    return await run_in_game_check_on_capture(
+        shot_path=shot_path,
+        ocr_summary=ocr_summary,
+        cfg=cfg,
+        run_state=run_state,
+        audit=audit,
+        round_id=round_id,
+        sessions_restarted=sessions_restarted,
+        session_index=session_index,
+        provisional=provisional,
     )

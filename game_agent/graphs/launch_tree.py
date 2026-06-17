@@ -70,7 +70,42 @@ def _can_tap_enter(s: LaunchGraphState, f: LaunchFacts) -> bool:
     return True
 
 
+def _check_in_game_failed(s: LaunchGraphState) -> bool:
+    failed = s.get("failed_nodes") or {}
+    return "enter.check_in_game" in failed or "check_in_game" in failed
+
+
+def _needs_adaptive_phase(s: LaunchGraphState, f: LaunchFacts) -> bool:
+    if not is_login_done(s):
+        return False
+    if s.get("in_game_confirmed"):
+        return False
+    if s.get("in_game_entry_passed"):
+        return False
+    if s.get("adaptive_flow_done"):
+        return False
+    if f.login_blocking or f.sub_account_blocking:
+        return False
+    if f.initial_privacy_dialog:
+        return False
+    if s.get("adaptive_active_node_id"):
+        return True
+    if s.get("current_phase_spec"):
+        return True
+    if _check_in_game_failed(s):
+        return True
+    if f.character_creation_blocking:
+        return True
+    if f.interpreter_stage in ("character_creation", "unknown"):
+        return True
+    return False
+
+
 def _should_check_in_game(s: LaunchGraphState, f: LaunchFacts) -> bool:
+    if s.get("in_game_entry_passed"):
+        return False
+    if not s.get("adaptive_flow_done") and _needs_adaptive_phase(s, f):
+        return False
     if _initial_privacy_active(s, f):
         return False
     if f.character_creation_blocking:
@@ -88,6 +123,10 @@ def _should_check_in_game(s: LaunchGraphState, f: LaunchFacts) -> bool:
     if not is_login_done(s) and f.login_stage == "login_form":
         return False
     return True
+
+
+def _should_stability_observe(s: LaunchGraphState, _f: LaunchFacts) -> bool:
+    return bool(s.get("in_game_entry_passed")) and not bool(s.get("in_game_confirmed"))
 
 
 LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = StateTreeNode(
@@ -151,11 +190,25 @@ LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = S
             max_attempts=3,
         ),
         StateTreeNode(
+            id="post_login.adaptive",
+            action="adaptive_phase",
+            guard=_needs_adaptive_phase,
+            done=lambda s: bool(s.get("adaptive_flow_done")),
+            max_attempts=16,
+        ),
+        StateTreeNode(
             id="enter.check_in_game",
             action="check_in_game",
             guard=_should_check_in_game,
-            done=lambda s: bool(s.get("in_game_confirmed")),
+            done=lambda s: bool(s.get("in_game_entry_passed")),
             max_attempts=3,
+        ),
+        StateTreeNode(
+            id="enter.stability_observe",
+            action="stability_observe",
+            guard=_should_stability_observe,
+            done=lambda s: bool(s.get("in_game_confirmed")),
+            max_attempts=16,
         ),
         StateTreeNode(
             id="enter.tap",

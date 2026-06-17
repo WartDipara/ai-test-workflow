@@ -226,6 +226,18 @@ class GameSection(BaseModel):
         le=120.0,
         description="确认进入游戏后、force-stop 前的加速观察窗口（秒）。",
     )
+    stability_observe_s: float = Field(
+        60.0,
+        ge=10.0,
+        le=180.0,
+        description="进游戏确认后、终局 signal 前的稳定性观察总时长（秒）。",
+    )
+    stability_check_interval_s: float = Field(
+        15.0,
+        ge=5.0,
+        le=60.0,
+        description="稳定性观察期间两次多模态轮询的最小间隔（秒）。",
+    )
     session_poll_interval_s: float = Field(
         1.5,
         ge=0.5,

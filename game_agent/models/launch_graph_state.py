@@ -16,12 +16,25 @@ LaunchRouteTarget = Literal[
     "check_server_selector",
     "tap_enter_game",
     "check_in_game",
+    "stability_observe",
+    "adaptive_phase",
+    "dynamic_action",
+    "free",
     "recover_from_failure",
     "end",
 ]
 
 MAX_NODE_ATTEMPTS = 3
 MAX_GRAPH_ITERATIONS = 120
+MAX_FREE_ROUNDS = 8
+MAX_FREE_NO_PROGRESS_ROUNDS = 3
+MAX_FREE_SAME_ACTION = 2
+MAX_DYNAMIC_ROUNDS = 8
+MAX_DYNAMIC_NO_PROGRESS = 3
+MAX_DYNAMIC_STEP_ATTEMPTS = 2
+MAX_STABILITY_OBSERVE_ROUNDS = 16
+MAX_ADAPTIVE_ROUNDS = 12
+MAX_ADAPTIVE_NO_PROGRESS = 3
 
 
 class LaunchNodeStatus(BaseModel):
@@ -93,6 +106,7 @@ class LaunchGraphState(TypedDict, total=False):
     sub_account_selected: bool
     server_checked: bool
     enter_tapped_count: int
+    in_game_entry_passed: bool
     in_game_confirmed: bool
     recover_hint: str
     terminal_error: str
@@ -105,6 +119,32 @@ class LaunchGraphState(TypedDict, total=False):
     vision_enrichment_status: str
     tree_trace: str
     current_tree_node: str
+    free_rounds: int
+    free_no_progress_rounds: int
+    free_last_action_signature: str
+    free_last_progress_fingerprint: str
+    free_same_action_streak: int
+    dynamic_chain: list[dict[str, Any]]
+    dynamic_cursor: int
+    dynamic_rounds: int
+    dynamic_no_progress: int
+    dynamic_last_fingerprint: str
+    dynamic_failed: bool
+    stability_observe_started_at: float
+    stability_observe_deadline: float
+    stability_last_check_at: float
+    stability_rounds: int
+    free_in_game_ocr_hits: list[str]
+    adaptive_flow_done: bool
+    adaptive_rounds: int
+    adaptive_no_progress: int
+    adaptive_phase_tree: list[dict[str, Any]]
+    adaptive_active_node_id: str
+    current_phase_spec: dict[str, Any]
+    phase_registry: list[dict[str, Any]]
+    phase_entry_fingerprint: str
+    phase_last_fingerprint: str
+    phase_replan_count: int
 
 
 def empty_launch_graph_state() -> LaunchGraphState:
@@ -128,6 +168,7 @@ def empty_launch_graph_state() -> LaunchGraphState:
         sub_account_selected=False,
         server_checked=False,
         enter_tapped_count=0,
+        in_game_entry_passed=False,
         in_game_confirmed=False,
         recover_hint="",
         terminal_error="",
@@ -140,6 +181,32 @@ def empty_launch_graph_state() -> LaunchGraphState:
         vision_enrichment_status="",
         tree_trace="",
         current_tree_node="",
+        free_rounds=0,
+        free_no_progress_rounds=0,
+        free_last_action_signature="",
+        free_last_progress_fingerprint="",
+        free_same_action_streak=0,
+        dynamic_chain=[],
+        dynamic_cursor=0,
+        dynamic_rounds=0,
+        dynamic_no_progress=0,
+        dynamic_last_fingerprint="",
+        dynamic_failed=False,
+        stability_observe_started_at=0.0,
+        stability_observe_deadline=0.0,
+        stability_last_check_at=0.0,
+        stability_rounds=0,
+        free_in_game_ocr_hits=[],
+        adaptive_flow_done=False,
+        adaptive_rounds=0,
+        adaptive_no_progress=0,
+        adaptive_phase_tree=[],
+        adaptive_active_node_id="",
+        current_phase_spec={},
+        phase_registry=[],
+        phase_entry_fingerprint="",
+        phase_last_fingerprint="",
+        phase_replan_count=0,
     )
 
 

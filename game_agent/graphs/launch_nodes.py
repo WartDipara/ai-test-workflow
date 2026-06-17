@@ -42,8 +42,16 @@ from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.services.screen_interpreter import interpret_launch_screen
 from game_agent.services.node_verifier import verify_stage_exit
 from game_agent.models.launch_graph_state import (
+    MAX_DYNAMIC_NO_PROGRESS,
+    MAX_DYNAMIC_ROUNDS,
+    MAX_DYNAMIC_STEP_ATTEMPTS,
+    MAX_FREE_NO_PROGRESS_ROUNDS,
+    MAX_FREE_ROUNDS,
+    MAX_FREE_SAME_ACTION,
     MAX_GRAPH_ITERATIONS,
+    MAX_STABILITY_OBSERVE_ROUNDS,
     LaunchGraphState,
+    facts_from_state,
 )
 from game_agent.services.credentials import load_game_credentials
 from game_agent.services.dismiss_overlay import dismiss_overlay
@@ -52,13 +60,31 @@ from game_agent.services.blocking_overlay import (
     resolve_dismiss_target,
     verify_overlay_dismissed,
 )
-from game_agent.services.game_entry_check import run_in_game_check
+from game_agent.services.game_entry_check import run_in_game_check, run_in_game_check_on_capture
+from game_agent.services.in_game_stability_watch import run_stability_check
+from game_agent.services.phase_engine import run_once as run_adaptive_phase_once
 from game_agent.services.gameturbo_log import format_latest_gameturbo_log_for_agent
 from game_agent.services.privacy_checkbox import ensure_privacy_checkbox_checked_multimodal
 from game_agent.services.server_selector_pipeline import (
     message_indicates_e2006,
     run_full_server_selector_check,
 )
+from game_agent.services.free_action_planner import (
+    FreeActionPlan,
+    compute_progress_fingerprint,
+    decide_free_action,
+)
+from game_agent.services.dynamic_route_planner import (
+    DynamicActionStep,
+    advance_dynamic_cursor,
+    chain_progress_fingerprint,
+    clear_dynamic_chain,
+    get_current_step,
+    mark_step_attempt,
+    maybe_build_dynamic_chain,
+)
+from game_agent.workers.vision_worker import VisionWorker
+from game_agent.utils.in_game_hud_ocr import should_trigger_in_game_hud_check
 from game_agent.utils.ocr_util import (
     deserialize_bboxes,
     run_ocr_frame,
@@ -220,6 +246,12 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
     deps.run_state.launch_stage = state["current_stage"]
     if deps.attempt_context is not None:
         deps.attempt_context.set_ui_observation(state["current_stage"])
+    maybe_build_dynamic_chain(
+        state,
+        facts,
+        bboxes,
+        ocr_summary=ocr_merged,
+    )
     plan_route(state)
     return state  # type: ignore[return-value]
 
@@ -241,6 +273,8 @@ def _infer_stage_label(facts, state: LaunchGraphState) -> str:
         return "privacy_agree"
     if facts.enter_cta_visible:
         return "server_select"
+    if facts.character_creation_blocking:
+        return "character_creation"
     return "launch"
 
 
@@ -582,20 +616,439 @@ async def check_in_game_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> 
         round_id=deps.round_id,
         sessions_restarted=actx.session_restarts if actx else 0,
         session_index=actx.get_session_index() if actx else 1,
+        provisional=True,
     )
     if result.confirmed:
-        set_in_game_confirmed(state, evidence=result.message[:500])
-        deps.run_state.in_game_confirmed = True
-        deps.run_state.finished = True
-        deps.run_state.success = True
-        deps.run_state.note = result.message[:2000]
-        deps.run_state.launch_stage = "in_game"
-        if actx is not None:
-            actx.signal_in_game_confirmed(deps.run_state.note)
-        mark_tree_node_done(state, node)
+        state["in_game_entry_passed"] = True
+        mark_tree_node_done(state, node, evidence=result.message[:500])
+        logger.info("[LaunchGraph:check_in_game] provisional entry passed, route stability_observe")
     else:
         mark_tree_node_failed(state, node, result.message[:500])
     return state  # type: ignore[return-value]
+
+
+async def stability_observe_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
+    """进游戏后稳定性观察：多模态轮询网络/加载异常，通过后 signal 终局。"""
+    state = dict(state)
+    node = "stability_observe"
+    actx = deps.attempt_context
+    cfg = deps.app_config
+    observe_s = float(cfg.game.stability_observe_s)
+    interval_s = float(cfg.game.stability_check_interval_s)
+
+    stability_rounds = int(state.get("stability_rounds") or 0) + 1
+    state["stability_rounds"] = stability_rounds
+    if stability_rounds > MAX_STABILITY_OBSERVE_ROUNDS:
+        err = f"stability max rounds ({MAX_STABILITY_OBSERVE_ROUNDS})"
+        mark_tree_node_failed(state, node, err)
+        state["finished"] = True
+        state["terminal_error"] = err
+        deps.run_state.finished = True
+        deps.run_state.success = False
+        deps.run_state.note = err
+        return state  # type: ignore[return-value]
+
+    now = time.monotonic()
+    started = float(state.get("stability_observe_started_at") or 0.0)
+    if started <= 0.0:
+        state["stability_observe_started_at"] = now
+        state["stability_observe_deadline"] = now + observe_s
+        started = now
+        logger.info(
+            "[LaunchGraph:stability] observe_start duration=%.0fs interval=%.0fs",
+            observe_s,
+            interval_s,
+        )
+
+    deadline = float(state.get("stability_observe_deadline") or (started + observe_s))
+    last_check = float(state.get("stability_last_check_at") or 0.0)
+    at_deadline = now >= deadline
+    should_check = at_deadline or last_check <= 0.0 or (now - last_check) >= interval_s
+
+    if not should_check:
+        wait_s = min(interval_s, max(0.5, deadline - now))
+        deps.adb.wait_seconds(wait_s)
+        mark_tree_node_done(state, node, evidence="stability_wait")
+        return state  # type: ignore[return-value]
+
+    result = await run_stability_check(
+        adb=deps.adb,
+        cfg=cfg,
+        artifact_root=deps.artifact_root,
+        round_id=stability_rounds,
+        audit=deps.audit,
+    )
+    state["stability_last_check_at"] = time.monotonic()
+    state["last_screenshot"] = str(result.screenshot_path.resolve())
+
+    if result.has_fatal_anomaly:
+        err = (result.reason or "stability fatal anomaly")[:2000]
+        mark_tree_node_failed(
+            state,
+            node,
+            err[:500],
+            artifact=str(result.screenshot_path.resolve()),
+        )
+        state["finished"] = True
+        state["terminal_error"] = err
+        deps.run_state.finished = True
+        deps.run_state.success = False
+        deps.run_state.note = err
+        state["recover_hint"] = f"stability_failed:{err[:200]}"
+        logger.warning("[LaunchGraph:stability] fatal anomaly | %s", err[:200])
+        return state  # type: ignore[return-value]
+
+    if at_deadline:
+        note = (result.reason or "In-game stability confirmed")[:2000]
+        set_in_game_confirmed(state, evidence=note[:500])
+        deps.run_state.in_game_confirmed = True
+        deps.run_state.finished = True
+        deps.run_state.success = True
+        deps.run_state.note = note
+        deps.run_state.launch_stage = "in_game"
+        state["finished"] = True
+        if actx is not None:
+            actx.signal_in_game_confirmed(note)
+        mark_tree_node_done(
+            state,
+            node,
+            artifact=str(result.screenshot_path.resolve()),
+            evidence=note[:500],
+        )
+        logger.info("[LaunchGraph:stability] observe_pass rounds=%d | %s", stability_rounds, note[:200])
+        return state  # type: ignore[return-value]
+
+    mark_tree_node_done(
+        state,
+        node,
+        artifact=str(result.screenshot_path.resolve()),
+        evidence=result.reason[:200],
+    )
+    return state  # type: ignore[return-value]
+
+
+async def adaptive_phase_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
+    """登录后可变 UI：PhaseEngine 模板单轮（plan → act → verify → commit）。"""
+    return await run_adaptive_phase_once(state, deps)  # type: ignore[return-value]
+
+
+def _execute_free_action(
+    plan: FreeActionPlan,
+    *,
+    adb,
+    sw: int,
+    sh: int,
+) -> str:
+    if plan.action == "tap_xy" or plan.action == "tap_text":
+        if plan.x <= 0 or plan.y <= 0:
+            return f"refused tap invalid ({plan.x},{plan.y})"
+        return adb.tap(plan.x, plan.y, width=sw, height=sh)
+    if plan.action == "press_back":
+        return adb.press_back()
+    if plan.action == "wait":
+        return adb.wait_seconds(plan.wait_s)
+    return "no-op"
+
+
+def _execute_dynamic_step(
+    step: DynamicActionStep,
+    *,
+    adb,
+    sw: int,
+    sh: int,
+) -> str:
+    if step.action == "tap_xy":
+        if step.x <= 0 or step.y <= 0:
+            return f"refused tap invalid ({step.x},{step.y})"
+        return adb.tap(step.x, step.y, width=sw, height=sh)
+    if step.action == "press_back":
+        return adb.press_back()
+    if step.action == "wait":
+        return adb.wait_seconds(step.wait_s)
+    return "no-op"
+
+
+async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
+    """执行动态子树链当前步骤（attempt 内有序链表）。"""
+    state = dict(state)
+    node = "dynamic_action"
+    step = get_current_step(state)
+    if step is None:
+        mark_tree_node_failed(state, node, "no active dynamic step")
+        clear_dynamic_chain(state, failed=True)
+        return state  # type: ignore[return-value]
+
+    dynamic_rounds = int(state.get("dynamic_rounds") or 0) + 1
+    state["dynamic_rounds"] = dynamic_rounds
+    if dynamic_rounds > MAX_DYNAMIC_ROUNDS:
+        mark_tree_node_failed(state, node, f"dynamic max rounds ({MAX_DYNAMIC_ROUNDS})")
+        clear_dynamic_chain(state, failed=True)
+        logger.warning("[LaunchGraph:dynamic] dynamic_exit max_rounds=%d", MAX_DYNAMIC_ROUNDS)
+        return state  # type: ignore[return-value]
+
+    no_progress = int(state.get("dynamic_no_progress") or 0)
+    if no_progress >= MAX_DYNAMIC_NO_PROGRESS:
+        mark_tree_node_failed(state, node, f"dynamic no progress ({MAX_DYNAMIC_NO_PROGRESS})")
+        clear_dynamic_chain(state, failed=True)
+        logger.warning("[LaunchGraph:dynamic] dynamic_exit no_progress=%d", no_progress)
+        return state  # type: ignore[return-value]
+
+    sw, sh = deps.screen_width, deps.screen_height
+    if not sw or not sh:
+        sw, sh = deps.adb.touch_size()
+        deps.screen_width, deps.screen_height = sw, sh
+
+    before_fp = str(state.get("dynamic_last_fingerprint") or "")
+    exec_msg = _execute_dynamic_step(step, adb=deps.adb, sw=sw, sh=sh)
+    deps.adb.wait_seconds(0.8)
+
+    ts = datetime.now().strftime("%H%M%S_%f")
+    shot = deps.artifact_root / f"graph_dynamic_{step.id}_{ts}.png"
+    deps.adb.screencap_png(shot)
+    actx = deps.attempt_context
+    if actx is not None:
+        actx.set_ocr_busy(True)
+    try:
+        ocr_summary, _ = await asyncio.to_thread(
+            run_ocr_frame,
+            shot,
+            device_w=sw,
+            device_h=sh,
+            worker_key=deps.adb.device_serial,
+        )
+    finally:
+        if actx is not None:
+            actx.set_ocr_busy(False)
+
+    after_fp = chain_progress_fingerprint(ocr_summary=ocr_summary, stage=step.label)
+    progressed = not before_fp or after_fp != before_fp
+    tap_ok = step.action != "tap_xy" or "Tapped" in exec_msg
+
+    if progressed and tap_ok:
+        mark_step_attempt(state, step, done=True)
+        state["dynamic_no_progress"] = 0
+        if step.label == "enter_world" or _ENTER_WORLD_RE.search(step.target_text or ocr_summary):
+            increment_enter_tapped(state)
+        advance_dynamic_cursor(state)
+        logger.info(
+            "[LaunchGraph:dynamic] step_done id=%s label=%s (%s,%s) | %s",
+            step.id,
+            step.label,
+            step.x,
+            step.y,
+            exec_msg[:120],
+        )
+    else:
+        mark_step_attempt(state, step, done=False)
+        state["dynamic_no_progress"] = no_progress + 1
+        cur = get_current_step(state)
+        if cur is not None and cur.attempts >= MAX_DYNAMIC_STEP_ATTEMPTS:
+            logger.warning(
+                "[LaunchGraph:dynamic] step_failed id=%s attempts=%d, clearing chain",
+                step.id,
+                cur.attempts,
+            )
+            mark_tree_node_failed(
+                state,
+                node,
+                f"step {step.id} failed after {cur.attempts} attempts",
+                artifact=str(shot.resolve()),
+            )
+            clear_dynamic_chain(state, failed=True)
+            return state  # type: ignore[return-value]
+        logger.info(
+            "[LaunchGraph:dynamic] step_retry id=%s label=%s progress=%s | %s",
+            step.id,
+            step.label,
+            progressed,
+            exec_msg[:120],
+        )
+
+    state["dynamic_last_fingerprint"] = after_fp
+    state["last_screenshot"] = str(shot.resolve())
+    state["last_ocr_summary"] = ocr_summary
+    mark_tree_node_done(
+        state,
+        node,
+        artifact=str(shot.resolve()),
+        evidence=f"{step.id}:{step.label}:{step.reason}",
+    )
+    state["recover_hint"] = f"dynamic:{step.label}:{step.reason}"
+    return state  # type: ignore[return-value]
+
+
+async def free_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
+    """登录后兜底：OCR+多模态规划单步动作，推进创角/选角/加载等可变流程。"""
+    state = dict(state)
+    node = "free"
+    free_rounds = int(state.get("free_rounds") or 0) + 1
+    state["free_rounds"] = free_rounds
+
+    if free_rounds > MAX_FREE_ROUNDS:
+        mark_tree_node_failed(state, node, f"free max rounds ({MAX_FREE_ROUNDS})")
+        state["recover_hint"] = f"free exhausted after {MAX_FREE_ROUNDS} rounds"
+        logger.warning("[LaunchGraph:free] free_exit max_rounds=%d", MAX_FREE_ROUNDS)
+        return state  # type: ignore[return-value]
+
+    no_progress = int(state.get("free_no_progress_rounds") or 0)
+    if no_progress >= MAX_FREE_NO_PROGRESS_ROUNDS:
+        mark_tree_node_failed(state, node, f"free no progress ({MAX_FREE_NO_PROGRESS_ROUNDS})")
+        state["recover_hint"] = "free stalled without UI progress"
+        logger.warning("[LaunchGraph:free] free_exit no_progress=%d", no_progress)
+        return state  # type: ignore[return-value]
+
+    sw, sh = deps.screen_width, deps.screen_height
+    if not sw or not sh:
+        sw, sh = deps.adb.touch_size()
+        deps.screen_width, deps.screen_height = sw, sh
+
+    before_fp = str(state.get("free_last_progress_fingerprint") or "")
+    before_stage = str(state.get("current_stage") or "")
+
+    actx = deps.attempt_context
+    if actx is not None:
+        actx.set_ocr_busy(True)
+    try:
+        ts = datetime.now().strftime("%H%M%S_%f")
+        shot = deps.artifact_root / f"graph_free_{ts}.png"
+        deps.adb.screencap_png(shot)
+        ocr_summary, bboxes = await asyncio.to_thread(
+            run_ocr_frame,
+            shot,
+            device_w=sw,
+            device_h=sh,
+            worker_key=deps.adb.device_serial,
+        )
+    finally:
+        if actx is not None:
+            actx.set_ocr_busy(False)
+
+    state["last_screenshot"] = str(shot.resolve())
+    state["last_ocr_summary"] = ocr_summary
+    state["last_bboxes"] = serialize_bboxes(bboxes)
+
+    trigger, hud_hits = should_trigger_in_game_hud_check(ocr_summary)
+    if trigger:
+        entry_result = await run_in_game_check_on_capture(
+            shot_path=shot,
+            ocr_summary=ocr_summary,
+            cfg=deps.app_config,
+            run_state=deps.run_state,
+            audit=deps.audit,
+            round_id=free_rounds,
+            sessions_restarted=actx.session_restarts if actx else 0,
+            session_index=actx.get_session_index() if actx else 1,
+            confirm_needed=1,
+            provisional=True,
+        )
+        if entry_result.confirmed:
+            state["in_game_entry_passed"] = True
+            state["free_in_game_ocr_hits"] = hud_hits
+            mark_tree_node_done(
+                state,
+                node,
+                artifact=str(shot.resolve()),
+                evidence=f"hud_trigger:{','.join(hud_hits)}",
+            )
+            state["recover_hint"] = f"free:in_game_entry_passed:{','.join(hud_hits)}"
+            logger.info(
+                "[LaunchGraph:free] HUD trigger confirmed, route stability_observe | %s",
+                hud_hits,
+            )
+            return state  # type: ignore[return-value]
+
+    prior_sig = str(state.get("free_last_action_signature") or "")
+    same_streak = int(state.get("free_same_action_streak") or 0)
+
+    vision = None
+    if deps.app_config.llm_multimodal is not None:
+        vision = VisionWorker(deps.app_config.llm_multimodal)
+
+    plan = await decide_free_action(
+        vision=vision,
+        screenshot_path=shot,
+        bboxes=bboxes,
+        ocr_summary=ocr_summary,
+        round_id=free_rounds,
+        prior_action_signature=prior_sig if same_streak >= 1 else "",
+    )
+
+    sig = plan.signature()
+    if sig == prior_sig:
+        same_streak += 1
+    else:
+        same_streak = 1
+    state["free_same_action_streak"] = same_streak
+
+    if same_streak >= MAX_FREE_SAME_ACTION and plan.action in ("tap_xy", "tap_text"):
+        logger.info(
+            "[LaunchGraph:free] same action x%d, switch to wait | %s",
+            same_streak,
+            sig,
+        )
+        plan = FreeActionPlan(
+            action="wait",
+            wait_s=2.5,
+            reason=f"dedupe after repeat {sig}",
+            stage=plan.stage,
+        )
+        sig = plan.signature()
+        same_streak = 0
+        state["free_same_action_streak"] = 0
+
+    exec_msg = _execute_free_action(plan, adb=deps.adb, sw=sw, sh=sh)
+    deps.adb.wait_seconds(0.8)
+
+    if plan.action in ("tap_xy", "tap_text") and "Tapped" in exec_msg:
+        if _ENTER_WORLD_RE.search(plan.target_text or ocr_summary):
+            increment_enter_tapped(state)
+
+    after_fp = compute_progress_fingerprint(
+        current_stage=before_stage,
+        ocr_summary=ocr_summary,
+        vision_stage=plan.stage,
+    )
+    if before_fp and after_fp == before_fp:
+        state["free_no_progress_rounds"] = no_progress + 1
+        logger.info(
+            "[LaunchGraph:free] free_progress stalled round=%d streak=%d",
+            free_rounds,
+            state["free_no_progress_rounds"],
+        )
+    else:
+        state["free_no_progress_rounds"] = 0
+        logger.info(
+            "[LaunchGraph:free] free_progress ok round=%d stage=%s",
+            free_rounds,
+            plan.stage,
+        )
+    state["free_last_progress_fingerprint"] = after_fp
+    state["free_last_action_signature"] = sig
+
+    logger.info(
+        "[LaunchGraph:free] free_action round=%d action=%s (%s,%s) reason=%s | %s",
+        free_rounds,
+        plan.action,
+        plan.x,
+        plan.y,
+        plan.reason[:100],
+        exec_msg[:120],
+    )
+
+    mark_tree_node_done(
+        state,
+        node,
+        artifact=str(shot.resolve()),
+        evidence=f"{plan.action}:{plan.reason[:120]}",
+    )
+    state["recover_hint"] = f"free:{plan.reason[:200]}"
+    return state  # type: ignore[return-value]
+
+
+_ENTER_WORLD_RE = re.compile(
+    r"进入世界|Enter\s*World|进入游戏|开始游戏",
+    re.IGNORECASE,
+)
 
 
 async def recover_from_failure_node(

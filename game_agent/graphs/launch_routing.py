@@ -1,19 +1,140 @@
-"""LangGraph 路由：DFS 状态树选择下一节点。"""
+"""LangGraph 路由：DFS 状态树 + 动态子树链 + free 兜底。"""
 
 from __future__ import annotations
 
 import logging
+import re
 
 from game_agent.graphs.launch_tree import TreeTrace, launch_dfs_next
-from game_agent.graphs.launch_state_store import node_attempts
+from game_agent.graphs.launch_state_store import (
+    is_login_done,
+    is_privacy_checked,
+    node_attempts,
+)
+from game_agent.graphs.state_tree import StateTreeDecision
 from game_agent.models.launch_graph_state import (
+    MAX_DYNAMIC_NO_PROGRESS,
+    MAX_DYNAMIC_ROUNDS,
+    MAX_FREE_NO_PROGRESS_ROUNDS,
+    MAX_FREE_ROUNDS,
     MAX_NODE_ATTEMPTS,
+    LaunchFacts,
     LaunchGraphState,
     LaunchRouteTarget,
     facts_from_state,
 )
+from game_agent.services.dynamic_route_planner import has_active_dynamic_chain
 
 logger = logging.getLogger(__name__)
+
+_CHARACTER_ROUTE_RE = re.compile(
+    r"创角|创建角色|选择职业|Click\s*to\s*Create|Create\s*Role|Enter\s*World|进入世界",
+    re.IGNORECASE,
+)
+
+_STATIC_BLOCKING_ACTIONS: frozenset[LaunchRouteTarget] = frozenset(
+    {
+        "handle_initial_privacy_dialog",
+        "ensure_privacy_checkbox",
+        "handle_download",
+        "dismiss_blocking_overlay",
+        "atomic_login",
+        "select_sub_account",
+        "check_server_selector",
+    },
+)
+
+
+def _check_in_game_failed(state: LaunchGraphState) -> bool:
+    failed = state.get("failed_nodes") or {}
+    return "enter.check_in_game" in failed or "check_in_game" in failed
+
+
+def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
+    """登录后可变 UI：由 AI 阶段模板处理，优先于 dynamic/check_in_game。"""
+    if not is_login_done(state):
+        return False
+    if state.get("in_game_confirmed"):
+        return False
+    if state.get("in_game_entry_passed"):
+        return False
+    if state.get("adaptive_flow_done"):
+        return False
+    if facts.login_blocking or facts.sub_account_blocking:
+        return False
+    if facts.initial_privacy_dialog:
+        return False
+    if state.get("adaptive_active_node_id"):
+        return True
+    if state.get("current_phase_spec"):
+        return True
+    if _check_in_game_failed(state):
+        return True
+    if facts.character_creation_blocking:
+        return True
+    if facts.interpreter_stage in ("character_creation", "unknown"):
+        return True
+    return False
+
+
+def should_route_dynamic(state: LaunchGraphState) -> bool:
+    """动态链仍有待执行步骤。"""
+    if should_route_adaptive(state, facts_from_state(state)):
+        return False
+    if state.get("in_game_entry_passed") and not state.get("in_game_confirmed"):
+        return False
+    if state.get("dynamic_failed"):
+        return False
+    if int(state.get("dynamic_rounds") or 0) >= MAX_DYNAMIC_ROUNDS:
+        return False
+    if int(state.get("dynamic_no_progress") or 0) >= MAX_DYNAMIC_NO_PROGRESS:
+        return False
+    return has_active_dynamic_chain(state)
+
+
+def should_route_free(
+    state: LaunchGraphState,
+    facts: LaunchFacts,
+    decision: StateTreeDecision[LaunchRouteTarget],
+) -> bool:
+    """登录完成后、仍未进游戏时，是否进入 free 兜底节点。"""
+    if not is_login_done(state):
+        return False
+    if state.get("in_game_confirmed"):
+        return False
+    if state.get("in_game_entry_passed"):
+        return False
+    if should_route_adaptive(state, facts):
+        return False
+    if should_route_dynamic(state):
+        return False
+    if int(state.get("free_rounds") or 0) >= MAX_FREE_ROUNDS:
+        return False
+    if int(state.get("free_no_progress_rounds") or 0) >= MAX_FREE_NO_PROGRESS_ROUNDS:
+        return False
+    if facts.login_blocking or facts.sub_account_blocking:
+        return False
+    if facts.initial_privacy_dialog:
+        return False
+    if facts.terms_checkbox_visible and not is_privacy_checked(state):
+        return False
+
+    ocr = str(state.get("last_ocr_summary") or "")
+    char_hint = bool(_CHARACTER_ROUTE_RE.search(ocr))
+
+    if facts.character_creation_blocking:
+        return True
+    if facts.vision_stage == "character_creation":
+        return True
+    if facts.interpreter_stage == "character_creation":
+        return True
+    if char_hint:
+        return True
+    if _check_in_game_failed(state):
+        return True
+    if decision.action is None and not facts.download_visible:
+        return True
+    return False
 
 
 def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
@@ -38,8 +159,38 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
         decision = launch_dfs_next(state, facts, trace=trace)
         state["current_tree_node"] = decision.node_id
         state["tree_trace"] = "->".join(trace.visited[-12:]) if trace.visited else decision.reason
-        if decision.action is not None:
-            target = decision.action
+
+        dfs_action = decision.action
+        if dfs_action in _STATIC_BLOCKING_ACTIONS:
+            target = dfs_action
+        elif should_route_adaptive(state, facts):
+            target = "adaptive_phase"
+            logger.info(
+                "[LaunchGraph:route] adaptive_enter rounds=%d registry=%d",
+                int(state.get("adaptive_rounds") or 0),
+                len(state.get("phase_registry") or []),
+            )
+        elif should_route_dynamic(state):
+            target = "dynamic_action"
+            logger.info(
+                "[LaunchGraph:route] dynamic_enter cursor=%d rounds=%d",
+                int(state.get("dynamic_cursor") or 0),
+                int(state.get("dynamic_rounds") or 0),
+            )
+        elif dfs_action == "check_in_game":
+            # Keep original convergence loop: after login/static steps, always re-check in-game.
+            # Dynamic chain is inserted before this branch via should_route_dynamic.
+            target = "check_in_game"
+        elif dfs_action is not None:
+            target = dfs_action
+        elif should_route_free(state, facts, decision):
+            target = "free"
+            logger.info(
+                "[LaunchGraph:route] free_enter tree=%s reason=%s free_rounds=%d",
+                decision.node_id,
+                decision.reason[:120],
+                int(state.get("free_rounds") or 0),
+            )
         elif node_attempts(state, "recover_from_failure") >= MAX_NODE_ATTEMPTS:
             target = "end"
         else:

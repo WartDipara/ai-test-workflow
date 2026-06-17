@@ -139,6 +139,20 @@ def test_dfs_check_in_game_when_enter_tapped_and_no_cta() -> None:
     assert d.action == "check_in_game"
 
 
+def test_dfs_stability_observe_after_entry_passed() -> None:
+    d = _decide(
+        facts=LaunchFacts(enter_cta_visible=False),
+        privacy_checked=True,
+        login_done=True,
+        server_checked=True,
+        enter_tapped_count=1,
+        in_game_entry_passed=True,
+        in_game_confirmed=False,
+    )
+    assert d.action == "stability_observe"
+    assert d.node_id == "enter.stability_observe"
+
+
 def test_dfs_skips_done_privacy_dialog() -> None:
     state = _state(
         facts=LaunchFacts(

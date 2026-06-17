@@ -69,6 +69,8 @@ artifacts/
 experiences/
 test_api.py
 image.png
+img_test.png
+img_test_2.png
 
 # --- GameTurbo-Native Not Tracked ---
 GameTurbo-Native/

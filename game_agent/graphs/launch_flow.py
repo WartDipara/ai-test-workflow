@@ -12,6 +12,7 @@ from langgraph.graph import END, StateGraph
 from game_agent.graphs.launch_deps import LaunchGraphDeps
 from game_agent.graphs.vision_enrichment import VisionEnrichmentQueue
 from game_agent.graphs.launch_nodes import (
+    adaptive_phase_node,
     atomic_login_node,
     check_in_game_node,
     check_server_selector_node,
@@ -23,7 +24,10 @@ from game_agent.graphs.launch_nodes import (
     observe_screen,
     recover_from_failure_node,
     select_sub_account_node,
+    stability_observe_node,
     tap_enter_game_node,
+    free_node,
+    dynamic_action_node,
 )
 from game_agent.graphs.launch_routing import consume_planned_route
 from game_agent.models.launch_graph_state import LaunchGraphState, empty_launch_graph_state
@@ -46,6 +50,10 @@ _ACTION_NODES = (
     "check_server_selector",
     "tap_enter_game",
     "check_in_game",
+    "stability_observe",
+    "adaptive_phase",
+    "dynamic_action",
+    "free",
     "recover_from_failure",
 )
 
@@ -86,8 +94,20 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     async def _in_game(state: LaunchGraphState) -> LaunchGraphState:
         return await check_in_game_node(state, deps)
 
+    async def _stability(state: LaunchGraphState) -> LaunchGraphState:
+        return await stability_observe_node(state, deps)
+
+    async def _adaptive(state: LaunchGraphState) -> LaunchGraphState:
+        return await adaptive_phase_node(state, deps)
+
     async def _recover(state: LaunchGraphState) -> LaunchGraphState:
         return await recover_from_failure_node(state, deps)
+
+    async def _free(state: LaunchGraphState) -> LaunchGraphState:
+        return await free_node(state, deps)
+
+    async def _dynamic(state: LaunchGraphState) -> LaunchGraphState:
+        return await dynamic_action_node(state, deps)
 
     def _route(state: LaunchGraphState) -> str:
         target = consume_planned_route(state)
@@ -107,6 +127,10 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     workflow.add_node("check_server_selector", _server)
     workflow.add_node("tap_enter_game", _enter)
     workflow.add_node("check_in_game", _in_game)
+    workflow.add_node("stability_observe", _stability)
+    workflow.add_node("adaptive_phase", _adaptive)
+    workflow.add_node("dynamic_action", _dynamic)
+    workflow.add_node("free", _free)
     workflow.add_node("recover_from_failure", _recover)
 
     workflow.set_entry_point("observe_screen")

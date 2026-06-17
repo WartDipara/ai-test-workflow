@@ -21,7 +21,11 @@ ACTION_TO_TREE_NODE: dict[str, str] = {
     "dismiss_blocking_overlay": "overlay.dismiss",
     "check_server_selector": "server.check",
     "check_in_game": "enter.check_in_game",
+    "stability_observe": "enter.stability_observe",
+    "adaptive_phase": "post_login.adaptive",
     "tap_enter_game": "enter.tap",
+    "dynamic_action": "dynamic.explore",
+    "free": "free.explore",
     "recover_from_failure": "recover_from_failure",
 }
 

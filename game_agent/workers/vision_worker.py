@@ -14,6 +14,7 @@ from game_agent.models.checkbox_tap_alignment import CheckboxTapAlignmentJudgmen
 from game_agent.models.privacy_checkbox_judgment import PrivacyCheckboxJudgment
 from game_agent.models.settings import LLMSection
 from game_agent.services.llm_service import build_llm_model
+from game_agent.utils.vision_log import log_full_text, log_vision_json
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +80,11 @@ Return valid JSON only (no markdown fence):
             result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
             output = (result.output or "").strip()
             elapsed = time.perf_counter() - t0
-            preview = output.replace("\n", " ")[:240]
-            logger.info(
-                "%s API 返回 | 耗时 %.2fs | 输出预览: %s%s",
+            log_vision_json(
+                logger,
                 prefix,
-                elapsed,
-                preview,
-                "..." if len(output) > 240 else "",
+                output,
+                summary=f"API 返回 | 耗时 {elapsed:.2f}s",
             )
             return output
         except asyncio.CancelledError:
@@ -102,6 +101,195 @@ Return valid JSON only (no markdown fence):
             else:
                 logger.exception("%s API 失败 | 耗时 %.2fs", prefix, elapsed)
             return '{"has_anomaly": false, "anomaly_reason": "", "stage": "unknown", "progress": ""}'
+
+    async def judge_in_game_stability(
+        self,
+        *,
+        screenshot_path: Path,
+        ocr_summary: str,
+        round_id: int | None = None,
+    ) -> str:
+        """
+        进游戏后稳定性观察：网络弹窗、资源/建模加载异常等。
+        返回 JSON：has_fatal_anomaly, anomaly_reason, stage, loading_ok, reason
+        """
+        prompt = f"""
+You observe an in-game screen after the player entered the game. Judge stability for automation QA.
+OCR:
+{ocr_summary}
+
+Set has_fatal_anomaly=true when ANY of:
+- Network error dialogs/copy (网络连接失败/断开/异常/请检查网络/连接超时/服务器连接失败/资源加载失败/下载失败/更新失败/地区不支持等)
+- Stuck on pure black screen with no HUD (likely failed load)
+- Explicit resource/model load failure messages
+- Infinite loading spinner with error or retry that blocks play
+
+Set has_fatal_anomaly=false for:
+- Normal in-game HUD, tutorial overlay, combat, dialogue, finger hints
+- Brief loading bars without error text
+- Account/login errors (should not appear here)
+- Privacy/announcement/event popups without network failure
+- Top-left GameTurbo acceleration overlay (GT, Mbps) — ignore it
+
+loading_ok=false only when visible evidence of broken/stuck asset loading (not mere black frame between scenes).
+
+Return valid JSON only (no markdown fence):
+{{
+    "has_fatal_anomaly": bool,
+    "anomaly_reason": "short reason if fatal else empty",
+    "loading_ok": bool,
+    "stage": "in_game | loading | error_dialog | black_screen | unknown",
+    "reason": "one sentence summary"
+}}
+"""
+        prefix = (
+            f"[VisionWorker:stability] 第 {round_id} 轮"
+            if round_id is not None
+            else "[VisionWorker:stability]"
+        )
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
+            output = (result.output or "").strip()
+            log_vision_json(
+                logger,
+                prefix,
+                output,
+                summary=f"稳定性观察 | 耗时 {time.perf_counter() - t0:.2f}s",
+            )
+            return output
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("%s API 失败", prefix)
+            return (
+                '{"has_fatal_anomaly": false, "anomaly_reason": "", '
+                '"loading_ok": true, "stage": "unknown", "reason": "api_error"}'
+            )
+
+    async def plan_phase_spec(
+        self,
+        *,
+        screenshot_path: Path,
+        ocr_summary: str,
+        completed_phases_summary: str = "",
+        prior_phase_summary: str = "",
+        stall_hint: str = "",
+        login_done: bool = False,
+        enter_tapped_count: int = 0,
+        round_id: int | None = None,
+    ) -> str:
+        """adaptive_phase：根据画面规划一个 PhaseSpec JSON（通用模板，无游戏业务枚举）。"""
+        prior_block = ""
+        if prior_phase_summary:
+            prior_block = f"\nPrior phase (may still be active): {prior_phase_summary}\n"
+        stall_block = ""
+        if stall_hint:
+            stall_block = f"\nStall hint: {stall_hint}\n"
+        done_block = ""
+        if completed_phases_summary:
+            done_block = f"\nCompleted phases this attempt (do NOT repeat these phase_id):\n{completed_phases_summary}\n"
+
+        prompt = f"""
+You plan ONE automation step for a mobile game AFTER login, before confirmed in-game.
+Use screenshot + OCR. Output JSON for a generic phase template (no game-specific code paths).
+Output exactly ONE step per response — never a multi-step plan.
+
+OCR (x,y text):
+{ocr_summary}
+{done_block}{prior_block}{stall_block}
+Context: login_done={login_done}, enter_tapped_count={enter_tapped_count}
+
+If there is NO variable post-login UI (no creation, no class pick, no tutorial gate, already loading/in-game CTA), set flow_active=false.
+
+Do NOT reuse any phase_id listed under Completed phases. Pick a new slug for the next distinct step.
+
+Otherwise set flow_active=true and fill:
+- phase_id: short slug (english, e.g. list_pick, confirm_next, dismiss_popup)
+- phase_label: human label in screen language (e.g. 职业选择)
+- action: tap_xy | wait | press_back | none
+- x,y: tap coordinates (device space); 0 if not tapping
+- wait_s: 1.5-4.0 if action=wait else optional after tap
+- target_text: button/list label if any
+- reason: one sentence
+- complete: {{ "kind": "fingerprint_change|ocr_contains|always_after_wait|manual_next_plan", "hint": "" }}
+- confidence: 0.0-1.0
+
+Patterns (abstract):
+- Vertical list pick then animation then forward button → first phase tap list item + wait; later phase tap forward/下一步/Next
+- Character slot then enter world → tap slot then enter CTA (may be handled elsewhere; still plan if you see it)
+- If screen is loading only, use action=wait with complete.kind=always_after_wait
+- If unsafe to tap, use wait or none with low confidence
+
+JSON only (no markdown fence):
+{{
+  "flow_active": bool,
+  "phase_id": "slug",
+  "phase_label": "label",
+  "action": "tap_xy|wait|press_back|none",
+  "x": 0,
+  "y": 0,
+  "wait_s": 2.0,
+  "target_text": "",
+  "reason": "",
+  "complete": {{ "kind": "fingerprint_change", "hint": "" }},
+  "confidence": 0.0
+}}
+"""
+        prefix = (
+            f"[VisionWorker:adaptive] 第 {round_id} 轮"
+            if round_id is not None
+            else "[VisionWorker:adaptive]"
+        )
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run(
+                [prompt, BinaryImage.from_path(screenshot_path)],
+            )
+            output = (result.output or "").strip()
+            log_vision_json(
+                logger,
+                prefix,
+                output,
+                summary=f"阶段规划 | 耗时 {time.perf_counter() - t0:.2f}s",
+            )
+            return output
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("%s API 失败", prefix)
+            return '{"flow_active": false, "phase_id": "skip", "action": "none", "confidence": 0}'
+
+    async def plan_free_step(
+        self,
+        *,
+        screenshot_path: Path,
+        prompt: str,
+        round_id: int | None = None,
+    ) -> str:
+        """free 节点：根据截图+OCR 规划单步动作 JSON。"""
+        prefix = (
+            f"[VisionWorker:free] 第 {round_id} 轮"
+            if round_id is not None
+            else "[VisionWorker:free]"
+        )
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run(
+                [prompt, BinaryImage.from_path(screenshot_path)],
+            )
+            output = (result.output or "").strip()
+            log_full_text(
+                logger,
+                prefix,
+                f"完成 {time.perf_counter() - t0:.2f}s\n{output}",
+            )
+            return output
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("%s API 失败", prefix)
+            return "{}"
 
     async def interpret_launch_screen(
         self,
@@ -124,13 +312,11 @@ Return valid JSON only (no markdown fence):
             result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
             output = (result.output or "").strip()
             elapsed = time.perf_counter() - t0
-            preview = output.replace("\n", " ")[:240]
-            logger.info(
-                "%s API 返回 | 耗时 %.2fs | 输出预览: %s%s",
+            log_vision_json(
+                logger,
                 prefix,
-                elapsed,
-                preview,
-                "..." if len(output) > 240 else "",
+                output,
+                summary=f"API 返回 | 耗时 {elapsed:.2f}s",
             )
             return output
         except asyncio.CancelledError:
@@ -199,11 +385,10 @@ Rules:
                 [prompt, BinaryImage.from_path(screenshot_path)],
             )
             output = (result.output or "").strip()
-            logger.info(
-                "%s 完成 %.2fs | %s",
+            log_full_text(
+                logger,
                 prefix,
-                time.perf_counter() - t0,
-                output.replace("\n", " ")[:200],
+                f"完成 {time.perf_counter() - t0:.2f}s\n{output}",
             )
             return output
         except Exception:
@@ -249,11 +434,10 @@ Rules:
                 [prompt, BinaryImage.from_path(screenshot_path)],
             )
             output = (result.output or "").strip()
-            logger.info(
-                "%s 完成 %.2fs | %s",
+            log_full_text(
+                logger,
                 prefix,
-                time.perf_counter() - t0,
-                output.replace("\n", " ")[:200],
+                f"完成 {time.perf_counter() - t0:.2f}s\n{output}",
             )
             return output
         except Exception:
@@ -340,14 +524,20 @@ JSON only (no markdown fence):
             elapsed = time.perf_counter() - t0
             judgment = _parse_game_entry_judgment(raw)
             logger.info(
-                "%s 判定 | %.2fs | in_game=%s conf=%.2f stage=%s | %s",
+                "%s 判定 | %.2fs | in_game=%s conf=%.2f stage=%s",
                 prefix,
                 elapsed,
                 judgment.in_game_main,
                 judgment.confidence,
                 judgment.stage,
-                judgment.reason[:200],
             )
+            log_vision_json(
+                logger,
+                prefix,
+                judgment.model_dump(),
+                summary="game_entry judgment full",
+            )
+            log_full_text(logger, prefix, raw, summary="game_entry raw_model_output")
             if ocr_creation_hits and judgment.in_game_main:
                 judgment = judgment.model_copy(
                     update={
@@ -360,7 +550,7 @@ JSON only (no markdown fence):
                         "reason": (
                             f"OCR creation override: {ocr_creation_hits}; "
                             + judgment.reason
-                        )[:500],
+                        ),
                     },
                 )
             return judgment
@@ -455,14 +645,14 @@ Rules:
             raw = (result.output or "").strip()
             judgment = parse_privacy_checkbox_judgment(raw)
             logger.info(
-                "%s 判定 | %.2fs | state=%s conf=%.2f visible=%s | %s",
+                "%s 判定 | %.2fs | state=%s conf=%.2f visible=%s",
                 prefix,
                 time.perf_counter() - t0,
                 judgment.state,
                 judgment.confidence,
                 judgment.checkbox_visible,
-                judgment.reason[:200],
             )
+            log_vision_json(logger, prefix, judgment.model_dump(), summary="checkbox judgment full")
             return judgment
         except Exception:
             logger.exception("%s API 失败 | %.2fs", prefix, time.perf_counter() - t0)
@@ -525,14 +715,14 @@ Rules:
             raw = (result.output or "").strip()
             judgment = parse_checkbox_tap_alignment(raw)
             logger.info(
-                "%s | %.2fs | on_checkbox=%s conf=%.2f dir=%s | %s",
+                "%s | %.2fs | on_checkbox=%s conf=%.2f dir=%s",
                 prefix,
                 time.perf_counter() - t0,
                 judgment.on_checkbox,
                 judgment.confidence,
                 judgment.adjust_direction,
-                judgment.reason[:200],
             )
+            log_vision_json(logger, prefix, judgment.model_dump(), summary="checkbox_align judgment full")
             return judgment
         except Exception:
             logger.exception("%s API 失败", prefix)
