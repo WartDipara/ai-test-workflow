@@ -83,6 +83,21 @@ def test_route_checkbox_before_enter() -> None:
     assert route_next(state) == "ensure_privacy_checkbox"
 
 
+def test_route_checkbox_before_login_when_both_visible() -> None:
+    state = _state(
+        facts=LaunchFacts(
+            terms_checkbox_visible=True,
+            login_blocking=True,
+            login_stage="login_form",
+            enter_cta_visible=True,
+            enter_cta_xy=(400, 800),
+        ),
+        privacy_checked=False,
+        login_done=False,
+    )
+    assert route_next(state) == "ensure_privacy_checkbox"
+
+
 def test_route_server_after_login() -> None:
     state = _state(
         facts=LaunchFacts(

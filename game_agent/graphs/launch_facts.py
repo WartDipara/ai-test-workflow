@@ -7,66 +7,15 @@ import re
 
 from game_agent.models.launch_graph_state import LaunchFacts
 from game_agent.models.screen_interpretation import ScreenInterpretation
-from game_agent.services.checkbox_locator import locate_privacy_checkbox
 from game_agent.services.login_stage_probe import probe_login_stage
 from game_agent.services.server_selector_locator import find_enter_game_bbox, locate_server_selector_target
 from game_agent.utils.ocr_util import OcrBbox
 
-_INITIAL_PRIVACY_RE = re.compile(
-    r"个人信息保护|隐私政策|用户协议|许可及服务|protect.*privacy|privacy\s*policy",
+_PRIVACY_CONTEXT_RE = re.compile(
+    r"个人信息保护|隐私政策|用户协议|许可及服务|已阅读并同意|protect.*privacy|privacy\s*policy",
     re.IGNORECASE,
 )
-_AGREE_BUTTON_RE = re.compile(r"^(同意|接受|确认|agree|accept|continue)$", re.IGNORECASE)
-_DISAGREE_RE = re.compile(r"不同意|拒绝|decline|reject", re.IGNORECASE)
-_MODAL_PRIVACY_TITLE_RE = re.compile(
-    r"用户协议和隐私政策|用户协议.*隐私政策|个人信息保护指引",
-    re.IGNORECASE,
-)
-
-
-def _normalize_button_text(text: str) -> str:
-    return re.sub(r"\s+", "", (text or "").strip())
-
-
-def _pick_agree_button(bboxes: list[OcrBbox]) -> OcrBbox | None:
-    candidates: list[tuple[int, OcrBbox]] = []
-    for bbox in bboxes:
-        text = bbox.text.strip()
-        norm = _normalize_button_text(text)
-        if not norm or _DISAGREE_RE.search(norm):
-            continue
-        if _AGREE_BUTTON_RE.search(norm):
-            candidates.append((bbox.cy, bbox))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
-
-
-def _detect_initial_privacy_modal(
-    bboxes: list[OcrBbox],
-    merged: str,
-) -> tuple[bool, tuple[int, int] | None]:
-    """
-    冷启动全屏隐私弹窗：正文含协议字样 + 底部「同意/不同意」按钮。
-    与登录页协议行 checkbox 区分，避免误走 ensure_privacy_checkbox。
-    """
-    agree_bbox = _pick_agree_button(bboxes)
-    if agree_bbox is None:
-        return False, None
-
-    has_disagree = any(_DISAGREE_RE.search(_normalize_button_text(b.text)) for b in bboxes)
-    has_privacy_terms = bool(_INITIAL_PRIVACY_RE.search(merged))
-    title_modal = bool(_MODAL_PRIVACY_TITLE_RE.search(merged))
-
-    if has_disagree and has_privacy_terms:
-        return True, (agree_bbox.cx, agree_bbox.cy)
-    if title_modal:
-        return True, (agree_bbox.cx, agree_bbox.cy)
-    return False, None
-_DOWNLOAD_RE = re.compile(
-    r"下载|更新|resource|download|MB|GB|热更|patch|正在加载",
-    re.IGNORECASE,
-)
+from game_agent.services.download_gate import ocr_has_download_context
 _ANNOUNCEMENT_RE = re.compile(
     r"公告|announcement|Notice|日常通知|点击空白|今日不再|不再提示",
     re.IGNORECASE,
@@ -111,21 +60,11 @@ def classify_screen_facts(
     login_probe = probe_login_stage(bboxes, screen_w=screen_w, screen_h=screen_h)
     enter = find_enter_game_bbox(bboxes)
     target, _enter = locate_server_selector_target(bboxes, screen_w=screen_w, screen_h=screen_h)
-    checkbox = locate_privacy_checkbox(bboxes, screen_w, screen_h, step=0)
 
     merged = ocr_summary or " ".join(b.text for b in bboxes)
-    download_visible = bool(_DOWNLOAD_RE.search(merged))
+    download_visible = ocr_has_download_context(merged)
     announcement_overlay = bool(_ANNOUNCEMENT_RE.search(merged))
-
-    modal_privacy, agree_xy = _detect_initial_privacy_modal(bboxes, merged)
-    initial_privacy = modal_privacy
-    if not initial_privacy and checkbox is None and _INITIAL_PRIVACY_RE.search(merged):
-        agree_bbox = _pick_agree_button(bboxes)
-        if agree_bbox is not None:
-            initial_privacy = True
-            agree_xy = (agree_bbox.cx, agree_bbox.cy)
-
-    terms_checkbox_visible = checkbox is not None and not initial_privacy
+    privacy_context = bool(_PRIVACY_CONTEXT_RE.search(merged))
 
     sub_action = None
     sub_label = ""
@@ -136,10 +75,8 @@ def classify_screen_facts(
     reason_parts = [login_probe.reason]
     if enter is not None:
         reason_parts.append(f"enter_cta={enter.text[:40]!r}")
-    if initial_privacy:
-        reason_parts.append("initial_privacy_modal")
-    elif checkbox is not None:
-        reason_parts.append("terms_checkbox_visible")
+    if privacy_context:
+        reason_parts.append("privacy_context_detected")
     if target is not None:
         reason_parts.append(f"server_slot={target.label[:40]!r}")
     if _CHARACTER_HINT_RE.search(merged):
@@ -151,9 +88,6 @@ def classify_screen_facts(
         sub_account_blocking=login_probe.blocking and login_probe.stage == "sub_account_select",
         sub_account_action_xy=sub_action,
         sub_account_label=sub_label,
-        initial_privacy_dialog=initial_privacy,
-        agree_button_xy=agree_xy,
-        terms_checkbox_visible=terms_checkbox_visible,
         enter_cta_visible=enter is not None,
         enter_cta_xy=(enter.cx, enter.cy) if enter else None,
         enter_cta_label=enter.text.strip() if enter else "",
@@ -297,6 +231,12 @@ def merge_interpretation_into_facts(
 
 def needs_sync_interpretation(facts: LaunchFacts, *, ocr_merged: str = "") -> bool:
     """L2：阻塞但缺少可执行坐标，或阶段未知需模型判读。"""
+    if facts.terms_checkbox_visible:
+        return False
+    if facts.download_visible:
+        return False
+    if facts.sub_account_blocking and facts.sub_account_action_xy is not None:
+        return False
     if facts.sub_account_blocking and facts.sub_account_action_xy is None:
         return True
     if (
@@ -337,20 +277,20 @@ def interpretation_focus_for_facts(facts: LaunchFacts) -> str:
 
 
 def needs_async_vision_enrichment(facts: LaunchFacts) -> bool:
-    """OCR 已能路由的页面不提交后台多模态；歧义/下载/公告场景才 enrich。"""
+    """OCR 已能路由的页面不提交后台多模态；歧义/公告场景才 enrich。"""
     if facts.initial_privacy_dialog:
         return False
     if facts.login_blocking:
         return False
-    if facts.sub_account_blocking and facts.sub_account_action_xy is not None:
-        return False
-    if facts.sub_account_blocking and facts.sub_account_action_xy is None:
+    if facts.sub_account_blocking:
         return False
     if facts.terms_checkbox_visible:
         return False
     if facts.enter_cta_visible or facts.server_slot_visible:
         return False
-    if facts.download_visible or facts.announcement_overlay:
+    if facts.download_visible:
+        return False
+    if facts.announcement_overlay:
         return True
     return False
 

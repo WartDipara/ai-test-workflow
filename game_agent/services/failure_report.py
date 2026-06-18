@@ -231,7 +231,8 @@ Analyze **this attempt only** — not a multi-attempt executive summary.
             failure_stage=_guess_failure_stage(reason),
             immediate_verdict=reason[:500],
             confidence="low",
-            gameturbo_log_analysis="See gameturbo.log in this artifact dir",
+            external_log_analysis="See external plugin log in this artifact dir",
+            gameturbo_log_analysis="See external plugin log in this artifact dir",
             human_triage_steps=["Review gameturbo.log and domain_region_analysis.json"],
             evidence_gaps=[str(e)],
         )

@@ -68,8 +68,9 @@ class RetryConfigHandler:
     async def run(self, retry_count: int, reason: str) -> None:
         with pipeline_stage(
             PipelinePhase.MODIFY.value,
-            gameturbo_root=self.artifact_root,
+            artifact_root=self.artifact_root,
             note=f"modify retry after attempt {retry_count}",
+            write_external_log_marker=True,
         ):
             await self._run_impl(retry_count, reason)
 

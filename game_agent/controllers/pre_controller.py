@@ -17,7 +17,7 @@ class PreprocessingController:
     def __init__(
         self,
         cache_dir: Path,
-        packages_dir: Path,
+        packages_dir: Path | None,
         *,
         preserved_abis: list[str] | None = None,
     ) -> None:

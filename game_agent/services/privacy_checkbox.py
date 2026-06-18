@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from game_agent.models.privacy_checkbox_judgment import PrivacyCheckboxJudgment
 from game_agent.services.adb_service import AdbService
 from game_agent.services.checkbox_locator import (
     CheckboxLocateResult,
@@ -281,6 +282,21 @@ async def ensure_privacy_checkbox_checked_multimodal(
             locate=located,
             screenshot=before_shot,
             debug_marked_image=debug_path,
+        )
+
+    if before_judgment.suggests_consent_button(min_confidence=vision_confidence):
+        return PrivacyCheckboxEnsureResult(
+            action="failed",
+            message=(
+                "[PrivacyCheckbox] MISROUTED — vision sees consent-button modal, not checkbox; "
+                "privacy_gate should route to handle_initial_privacy_dialog "
+                f"state={before_judgment.state} conf={before_judgment.confidence:.2f} "
+                f"{before_judgment.reason}"
+            ),
+            screenshot=before_shot,
+            vision_state=before_judgment.state,
+            vision_confidence=before_judgment.confidence,
+            locate=located,
         )
 
     tap_msg = adb.tap(located.cx, located.cy, width=sw, height=sh)

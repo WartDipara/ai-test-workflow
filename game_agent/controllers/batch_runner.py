@@ -7,6 +7,7 @@ from pathlib import Path
 
 from game_agent.config.loader import load_app_config
 from game_agent.config.paths import resolve_repo_path
+from game_agent.core.deliverables import resolve_deliverables_dir
 from game_agent.controllers.orchestrator import GameTestOrchestrator
 from game_agent.controllers.task_queue import (
     ApkTaskStatus,
@@ -32,7 +33,7 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
         return 1
 
     cfg = load_app_config(config_path)
-    out_dir = resolve_repo_path(cfg.gameturbo.run_outputs_dir)
+    out_dir = resolve_repo_path(resolve_deliverables_dir(cfg))
     global_cache_dir = resolve_repo_path(cfg.preprocessing.apk_cache_dir)
     batch_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     batch_root = (out_dir / f"batch_{batch_id}").resolve()

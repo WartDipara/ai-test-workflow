@@ -31,10 +31,8 @@ class Preprocessor:
         *,
         preserved_abis: list[str] | None = None,
     ) -> None:
-        from game_agent.utils.gameturbo_bootstrap import PACKAGES_DIR
-
         self._cache_dir = Path(cache_dir) if cache_dir else APK_CACHE_DIR
-        self._packages_dir = Path(packages_dir) if packages_dir else PACKAGES_DIR
+        self._packages_dir = Path(packages_dir) if packages_dir else None
         abis = preserved_abis if preserved_abis else list(DEFAULT_PRESERVED_ABIS)
         self._preserved_abis = frozenset(a.strip() for a in abis if a.strip())
         if not self._preserved_abis:
@@ -56,11 +54,15 @@ class Preprocessor:
                 source_apk=source_apk,
             )
 
-        final_apk = self._move_to_packages(stripped_apk, source_apk.name)
+        if self._packages_dir is None:
+            final_apk = self._finalize_in_cache(stripped_apk, source_apk.name)
+        else:
+            final_apk = self._move_to_packages(stripped_apk, source_apk.name)
         if final_apk is None:
+            dest = "cache" if self._packages_dir is None else "packages/"
             return PreprocessResult(
                 ok=False,
-                message=f"移动 APK 到 packages/ 失败: {source_apk.name}",
+                message=f"移动 APK 到 {dest} 失败: {source_apk.name}",
                 source_apk=source_apk,
             )
 
@@ -175,7 +177,23 @@ class Preprocessor:
                 data = zin.read(item.filename)
                 zout.writestr(item, data)
 
+    def _finalize_in_cache(self, source: Path, target_name: str) -> Path | None:
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        target = self._cache_dir / target_name
+        if target.exists() and target.resolve() != source.resolve():
+            logger.info("cache 中已存在 %s，将被覆盖", target_name)
+            target.unlink()
+        try:
+            if source.resolve() != target.resolve():
+                shutil.move(str(source), str(target))
+            logger.info("APK 已保留在 cache: %s", target)
+            return target
+        except OSError as e:
+            logger.error("保留 APK 到 cache 失败: %s → %s: %s", source, target, e)
+            return None
+
     def _move_to_packages(self, source: Path, target_name: str) -> Path | None:
+        assert self._packages_dir is not None
         self._packages_dir.mkdir(parents=True, exist_ok=True)
         target = self._packages_dir / target_name
 

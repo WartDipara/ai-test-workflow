@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -15,12 +16,15 @@ from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.services.screen_download_health import (
     ScreenProgressTracker,
     detect_network_dialog_in_ocr,
+    is_download_stall_watch_stage,
     parse_download_percent_from_ocr,
     parse_percent_from_progress_text,
 )
 from game_agent.utils.ocr_util import run_ocr_frame
 
 logger = logging.getLogger(__name__)
+
+_PASSIVE_OCR_MIN_INTERVAL_S = 30.0
 
 
 def format_confirmed_network_anomaly(
@@ -84,6 +88,7 @@ class NetworkAnomalyCoordinator:
     artifact_root: Path
     attempt_context: AttemptContext | None = None
     audit: RunAuditLogger | None = None
+    _last_passive_ocr_monotonic: float = field(default=0.0, init=False, repr=False)
 
     async def run_until_confirmed(self, stop_event: asyncio.Event) -> str | None:
         cfg = self.app_config.network_anomaly
@@ -118,13 +123,14 @@ class NetworkAnomalyCoordinator:
         stage, progress = "", ""
         if self.attempt_context is not None:
             stage, progress = self.attempt_context.get_ui_observation()
+        effective_stage = stage or "unknown"
 
         ocr_summary = ""
         dialog_hint = ""
         shot_path = ""
         percent = parse_percent_from_progress_text(progress)
 
-        if cfg.use_ocr_poll:
+        if self._should_run_ocr_poll(effective_stage):
             if self.attempt_context is not None and self.attempt_context.is_ocr_busy():
                 logger.debug("[NetworkAnomaly] skip OCR poll — executor busy")
             else:
@@ -146,7 +152,6 @@ class NetworkAnomalyCoordinator:
             ocr_suspect = True
             ocr_reason = f"network dialog on screen: {dialog_hint}"
 
-        effective_stage = stage or "unknown"
         stall_percent: int | None = None
         if effective_stage in ("resource_download", "loading"):
             if percent is not None and not progress:
@@ -251,6 +256,29 @@ class NetworkAnomalyCoordinator:
         if self.attempt_context is not None:
             self.attempt_context.signal_fatal(msg)
         return msg
+
+    def _should_run_ocr_poll(self, effective_stage: str) -> bool:
+        cfg = self.app_config.network_anomaly
+        if not cfg.use_ocr_poll:
+            return False
+        stage = (effective_stage or "unknown").strip()
+        if stage in ("", "unknown"):
+            return True
+        if is_download_stall_watch_stage(stage):
+            return True
+
+        now = time.monotonic()
+        min_interval = max(_PASSIVE_OCR_MIN_INTERVAL_S, float(cfg.poll_interval_s) * 6.0)
+        if now - self._last_passive_ocr_monotonic >= min_interval:
+            self._last_passive_ocr_monotonic = now
+            logger.debug(
+                "[NetworkAnomaly] passive OCR poll stage=%s interval=%.0fs",
+                stage,
+                min_interval,
+            )
+            return True
+        logger.debug("[NetworkAnomaly] skip OCR poll stage=%s", stage)
+        return False
 
     def _capture_ocr_summary(self) -> tuple[str, str, str]:
         cfg = self.app_config.network_anomaly

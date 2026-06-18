@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,4 +27,5 @@ class LaunchGraphDeps:
     screen_width: int = 0
     screen_height: int = 0
     vision_queue: VisionEnrichmentQueue | None = None
+    external_log_reader: Callable[..., str] | None = None
     _graph_config: dict = field(default_factory=dict, repr=False)

@@ -9,6 +9,7 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
+from game_agent.core.external_log import resolve_external_log_reader
 from game_agent.graphs.launch_deps import LaunchGraphDeps
 from game_agent.graphs.vision_enrichment import VisionEnrichmentQueue
 from game_agent.graphs.launch_nodes import (
@@ -28,6 +29,7 @@ from game_agent.graphs.launch_nodes import (
     tap_enter_game_node,
     free_node,
     dynamic_action_node,
+    scene_action_node,
 )
 from game_agent.graphs.launch_routing import consume_planned_route
 from game_agent.graphs.launch_limits import seed_launch_graph_limits
@@ -54,6 +56,7 @@ _ACTION_NODES = (
     "stability_observe",
     "adaptive_phase",
     "dynamic_action",
+    "scene_action",
     "free",
     "recover_from_failure",
 )
@@ -110,6 +113,9 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     async def _dynamic(state: LaunchGraphState) -> LaunchGraphState:
         return await dynamic_action_node(state, deps)
 
+    async def _scene(state: LaunchGraphState) -> LaunchGraphState:
+        return await scene_action_node(state, deps)
+
     def _route(state: LaunchGraphState) -> str:
         target = consume_planned_route(state)
         if target == "end":
@@ -131,6 +137,7 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     workflow.add_node("stability_observe", _stability)
     workflow.add_node("adaptive_phase", _adaptive)
     workflow.add_node("dynamic_action", _dynamic)
+    workflow.add_node("scene_action", _scene)
     workflow.add_node("free", _free)
     workflow.add_node("recover_from_failure", _recover)
 
@@ -141,17 +148,13 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     workflow.add_conditional_edges("classify_screen", _route, route_map)
 
     def _after_atomic_login(state: LaunchGraphState) -> str:
-        if state.get("login_done"):
-            logger.info(
-                "[LaunchGraph:route] atomic_login → classify_screen (skip observe)"
-            )
-            return "classify_screen"
+        logger.info("[LaunchGraph:route] atomic_login → observe_screen (refresh + keyboard check)")
         return "observe_screen"
 
     workflow.add_conditional_edges(
         "atomic_login",
         _after_atomic_login,
-        {"classify_screen": "classify_screen", "observe_screen": "observe_screen"},
+        {"observe_screen": "observe_screen"},
     )
     for name in _ACTION_NODES:
         if name != "atomic_login":
@@ -233,6 +236,7 @@ async def run_launch_graph_async(
         vision_queue=vision_queue,
         screen_width=screen_width,
         screen_height=screen_height,
+        external_log_reader=resolve_external_log_reader(app_config),
     )
     bootstrap_err = await _bootstrap_game(deps)
     if bootstrap_err:

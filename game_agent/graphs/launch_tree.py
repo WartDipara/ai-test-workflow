@@ -155,6 +155,13 @@ LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = S
             max_attempts=3,
         ),
         StateTreeNode(
+            id="privacy.checkbox",
+            action="ensure_privacy_checkbox",
+            guard=lambda s, f: bool(f.terms_checkbox_visible) and not is_privacy_checked(s),
+            done=lambda s: is_privacy_checked(s),
+            max_attempts=3,
+        ),
+        StateTreeNode(
             id="atomic_login",
             action="atomic_login",
             guard=_login_blocking,
@@ -173,13 +180,6 @@ LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = S
             action="handle_download",
             guard=lambda _s, f: bool(f.download_visible),
             done=lambda s: completed_tree_node(s, "handle_download"),
-            max_attempts=3,
-        ),
-        StateTreeNode(
-            id="privacy.checkbox",
-            action="ensure_privacy_checkbox",
-            guard=lambda s, f: bool(f.terms_checkbox_visible) and not is_privacy_checked(s),
-            done=lambda s: is_privacy_checked(s),
             max_attempts=3,
         ),
         StateTreeNode(

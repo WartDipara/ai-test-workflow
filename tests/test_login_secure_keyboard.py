@@ -5,8 +5,12 @@ from pathlib import Path
 from game_agent.graphs.launch_tree import _login_blocking
 from game_agent.models.launch_graph_state import LaunchFacts, empty_launch_graph_state
 from game_agent.services.login_secure_keyboard import (
+    bump_blackout_streak,
     is_login_flow_in_progress,
     is_login_secure_keyboard_blackout,
+    reset_blackout_streak,
+    should_handle_secure_keyboard_blackout,
+    should_press_back_for_blackout,
 )
 from game_agent.utils.ocr_util import OcrBbox
 
@@ -44,3 +48,26 @@ def test_login_blackout_requires_black_image_and_empty_ocr(tmp_path: Path) -> No
     assert is_login_secure_keyboard_blackout(black, [], ocr_summary="") is True
     assert is_login_secure_keyboard_blackout(normal, [], ocr_summary="") is False
     assert is_login_secure_keyboard_blackout(black, [bbox, bbox], ocr_summary="x") is False
+
+
+def test_post_login_blackout_should_handle() -> None:
+    state = _state(login_done=True, sub_account_selected=False)
+    assert is_login_flow_in_progress(state) is False
+    assert should_handle_secure_keyboard_blackout(state) is True
+
+
+def test_post_login_blackout_streak_escalation() -> None:
+    state = _state(login_done=True, sub_account_selected=False)
+    assert bump_blackout_streak(state) == 1
+    assert should_press_back_for_blackout(1) is False
+    assert bump_blackout_streak(state) == 2
+    assert should_press_back_for_blackout(2) is False
+    assert bump_blackout_streak(state) == 3
+    assert should_press_back_for_blackout(3) is True
+    reset_blackout_streak(state)
+    assert state.get("secure_keyboard_blackout_streak") == 0
+
+
+def test_no_blackout_handling_after_sub_account_selected() -> None:
+    state = _state(login_done=True, sub_account_selected=True)
+    assert should_handle_secure_keyboard_blackout(state) is False

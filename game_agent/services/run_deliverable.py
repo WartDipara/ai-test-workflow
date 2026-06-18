@@ -63,6 +63,40 @@ def _copy_tree_if_exists(src: Path, dst: Path) -> None:
         shutil.copytree(src, dst)
 
 
+def publish_core_success_deliverable(
+    deliverable: RunDeliverablePaths,
+    *,
+    winning_artifact_root: Path,
+    winning_retry: int,
+    total_attempts: int,
+    package_name: str,
+    source_apk: Path | None,
+    install_apk: Path | None,
+    in_game_confirmed: bool = True,
+    session_restarts: int = 0,
+    external_services: dict | None = None,
+) -> None:
+    """成功：核心测试结果（是否进入游戏），不依赖 GameTurbo merged config。"""
+    _write_json(
+        deliverable.root / "result.json",
+        {
+            "success": True,
+            "gid": deliverable.gid,
+            "task_id": deliverable.task_id,
+            "winning_retry": winning_retry,
+            "total_attempts": total_attempts,
+            "package_name": package_name,
+            "source_apk": str(source_apk.resolve()) if source_apk else None,
+            "install_apk": str(install_apk.resolve()) if install_apk else None,
+            "in_game_confirmed": in_game_confirmed,
+            "winning_artifact": str(winning_artifact_root.resolve()),
+            "session_restarts": session_restarts,
+            "external_services": external_services or {},
+            "finished_at": datetime.now(tz=UTC).isoformat(),
+        },
+    )
+
+
 def publish_success_deliverable(
     deliverable: RunDeliverablePaths,
     *,
@@ -154,6 +188,9 @@ def publish_failure_deliverable(
             "success": False,
             "gid": deliverable.gid,
             "task_id": deliverable.task_id,
+            "package_name": None,
+            "install_apk": None,
+            "in_game_confirmed": False,
             "error_code": error_code or None,
             "retryable": error_code.startswith("E2") if error_code else None,
             "max_retries": max_retries,

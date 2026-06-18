@@ -19,6 +19,7 @@ LaunchRouteTarget = Literal[
     "stability_observe",
     "adaptive_phase",
     "dynamic_action",
+    "scene_action",
     "free",
     "recover_from_failure",
     "end",
@@ -47,6 +48,7 @@ class LaunchFacts(BaseModel):
 
     initial_privacy_dialog: bool = False
     agree_button_xy: tuple[int, int] | None = None
+    privacy_gate_kind: str = ""
 
     terms_checkbox_visible: bool = False
     enter_cta_visible: bool = False
@@ -55,6 +57,11 @@ class LaunchFacts(BaseModel):
 
     server_slot_visible: bool = False
     download_visible: bool = False
+    download_gate_kind: str = ""
+    download_in_progress: bool = False
+    download_progress_text: str = ""
+    download_action: str = ""
+    download_continue_xy: tuple[int, int] | None = None
     announcement_overlay: bool = False
     announcement_dismiss_xy: tuple[int, int] | None = None
 
@@ -70,6 +77,9 @@ class LaunchFacts(BaseModel):
 
     classify_reason: str = ""
 
+    scene_id: str = ""
+    scene_confidence: float = 0.0
+
 
 class LaunchGraphState(TypedDict, total=False):
     """LangGraph 共享状态（可序列化字段）。"""
@@ -84,6 +94,7 @@ class LaunchGraphState(TypedDict, total=False):
     interpret_screenshot_hash: str
     last_analyze_screen_ts: float
     last_vision_summary: str
+    external_log_summary: str
     gameturbo_summary: str
     privacy_checked: bool
     account_filled: bool
@@ -133,6 +144,23 @@ class LaunchGraphState(TypedDict, total=False):
     phase_last_fingerprint: str
     phase_replan_count: int
     launch_graph_limits: dict[str, Any]
+    scene_id: str
+    scene_confidence: float
+    scene_evidence: str
+    scene_fingerprint: str
+    scene_transition: str
+    scene_transition_reason: str
+    active_scene_strategy: str
+    scene_strategy_active: bool
+    scene_last_action_signature: str
+    scene_low_confidence_streak: int
+    scene_rounds: int
+    secure_keyboard_blackout_streak: int
+    scene_gate_screenshot_hash: str
+    scene_gate_scene_id: str
+    scene_gate_confidence: float
+    scene_gate_description: str
+    scene_gate_action: str
 
 
 def empty_launch_graph_state() -> LaunchGraphState:
@@ -147,6 +175,7 @@ def empty_launch_graph_state() -> LaunchGraphState:
         interpret_screenshot_hash="",
         last_analyze_screen_ts=0.0,
         last_vision_summary="",
+        external_log_summary="",
         gameturbo_summary="",
         privacy_checked=False,
         account_filled=False,
@@ -196,6 +225,23 @@ def empty_launch_graph_state() -> LaunchGraphState:
         phase_last_fingerprint="",
         phase_replan_count=0,
         launch_graph_limits={},
+        scene_id="unknown",
+        scene_confidence=0.0,
+        scene_evidence="",
+        scene_fingerprint="",
+        scene_transition="none",
+        scene_transition_reason="",
+        active_scene_strategy="",
+        scene_strategy_active=False,
+        scene_last_action_signature="",
+        scene_low_confidence_streak=0,
+        scene_rounds=0,
+        secure_keyboard_blackout_streak=0,
+        scene_gate_screenshot_hash="",
+        scene_gate_scene_id="",
+        scene_gate_confidence=0.0,
+        scene_gate_description="",
+        scene_gate_action="",
     )
 
 

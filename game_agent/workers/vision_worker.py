@@ -9,9 +9,13 @@ from pathlib import Path
 from pydantic_ai import Agent
 from pydantic_ai.messages import BinaryImage
 
+from game_agent.models.download_gate import DownloadGateJudgment
 from game_agent.models.game_entry_judgment import GameEntryJudgment
 from game_agent.models.checkbox_tap_alignment import CheckboxTapAlignmentJudgment
 from game_agent.models.privacy_checkbox_judgment import PrivacyCheckboxJudgment
+from game_agent.models.privacy_gate import PrivacyGateJudgment
+from game_agent.models.sub_account_gate import SubAccountGateJudgment
+from game_agent.models.scene_gate import SceneGateJudgment
 from game_agent.models.settings import LLMSection
 from game_agent.services.llm_service import build_llm_model
 from game_agent.utils.vision_log import log_full_text, log_vision_json
@@ -565,6 +569,271 @@ JSON only (no markdown fence):
                 reason="Multimodal API call failed",
             )
 
+    async def judge_privacy_gate(
+        self,
+        *,
+        screenshot_path: Path,
+        ocr_summary: str,
+        round_id: int | None = None,
+    ) -> PrivacyGateJudgment:
+        """
+        路由前裁决：冷启动隐私弹窗 vs 登录页协议 checkbox。
+        """
+        prompt = f"""
+You classify which privacy UI blocks the game launch on this mobile screenshot.
+
+Two distinct patterns:
+1) modal — full-screen or blocking dialog with body text about privacy/terms AND bottom
+   action buttons like 不同意 + 同意并进入 / Agree and Enter. No login checkbox row.
+2) checkbox — login/register screen with a small checkbox LEFT of inline text like
+   "已阅读并同意" / "I have read and agree" before tapping 开始游戏 / Login.
+3) none — no blocking privacy UI (loading, in-game, login without privacy gate, etc.).
+
+Ignore top-left GameTurbo network overlay.
+
+OCR:
+{ocr_summary[:3000]}
+
+Return JSON only (no markdown fence):
+{{
+  "gate_kind": "modal | checkbox | none",
+  "confidence": 0.0-1.0,
+  "tap_x": 0,
+  "tap_y": 0,
+  "tap_label": "affirmative button label if modal",
+  "reason": "one sentence"
+}}
+
+Rules:
+- modal: prefer when 不同意 and 同意并进入 (or similar pair) appear as buttons, even if OCR
+  also mentions 已阅读并同意 in the dialog body.
+- checkbox: small control beside terms line on a login form, not a full-screen consent dialog.
+- none: privacy already accepted or screen is unrelated.
+- For gate_kind=modal, set tap_x/tap_y to the affirmative/consent button center (device pixels).
+- For checkbox or none, tap_x/tap_y=0.
+"""
+        prefix = (
+            f"[VisionWorker:privacy_gate] 第 {round_id} 轮"
+            if round_id is not None
+            else "[VisionWorker:privacy_gate]"
+        )
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = (result.output or "").strip()
+            judgment = parse_privacy_gate_judgment(raw)
+            logger.info(
+                "%s 判定 | %.2fs | gate=%s conf=%.2f",
+                prefix,
+                time.perf_counter() - t0,
+                judgment.gate_kind,
+                judgment.confidence,
+            )
+            log_vision_json(logger, prefix, judgment.model_dump(), summary="privacy_gate full")
+            return judgment
+        except Exception:
+            logger.exception("%s API 失败 | %.2fs", prefix, time.perf_counter() - t0)
+            return PrivacyGateJudgment(
+                gate_kind="unknown",
+                confidence=0.0,
+                reason="Multimodal API call failed",
+            )
+
+    async def judge_download_gate(
+        self,
+        *,
+        screenshot_path: Path,
+        ocr_summary: str,
+        round_id: int | None = None,
+    ) -> DownloadGateJudgment:
+        """裁决资源下载屏：进度、是否继续等待、继续按钮坐标。"""
+        prompt = f"""
+You classify whether this mobile game screen shows a resource/asset download or update UI.
+
+OCR:
+{ocr_summary[:3000]}
+
+Return JSON only (no markdown fence):
+{{
+  "is_download": true,
+  "in_progress": true,
+  "progress_text": "35%",
+  "action": "wait | tap_continue | done",
+  "tap_x": 0,
+  "tap_y": 0,
+  "confidence": 0.0-1.0,
+  "reason": "one sentence"
+}}
+
+Rules:
+- is_download=true for download/update/patch screens with progress bar or MB/GB text.
+- in_progress=true while downloading; false when complete.
+- action=wait while downloading; tap_continue if a Continue/确定/确认 button is visible;
+  done when download UI is gone.
+- For tap_continue, set tap_x/tap_y to button center (device pixels).
+- Ignore top-left GameTurbo network overlay.
+"""
+        prefix = (
+            f"[VisionWorker:download_gate] 第 {round_id} 轮"
+            if round_id is not None
+            else "[VisionWorker:download_gate]"
+        )
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = (result.output or "").strip()
+            judgment = parse_download_gate_judgment(raw)
+            logger.info(
+                "%s 判定 | %.2fs | download=%s action=%s",
+                prefix,
+                time.perf_counter() - t0,
+                judgment.is_download,
+                judgment.action,
+            )
+            log_vision_json(logger, prefix, judgment.model_dump(), summary="download_gate full")
+            return judgment
+        except Exception:
+            logger.exception("%s API 失败 | %.2fs", prefix, time.perf_counter() - t0)
+            return DownloadGateJudgment(
+                is_download=False,
+                confidence=0.0,
+                reason="Multimodal API call failed",
+            )
+
+    async def judge_sub_account_gate(
+        self,
+        *,
+        screenshot_path: Path,
+        ocr_summary: str,
+        round_id: int | None = None,
+    ) -> SubAccountGateJudgment:
+        """裁决小号选择页并定位已有账号点击点。"""
+        prompt = f"""
+You classify whether this mobile game screen is a sub-account / alt-account selection page.
+
+OCR:
+{ocr_summary[:3000]}
+
+Return JSON only (no markdown fence):
+{{
+  "is_sub_account": true,
+  "confidence": 0.0-1.0,
+  "tap_x": 0,
+  "tap_y": 0,
+  "tap_label": "existing account label",
+  "reason": "one sentence"
+}}
+
+Rules:
+- is_sub_account=true when user must pick among existing accounts / last login entries.
+- Tap ONLY an existing account row or "last login" entry — NOT create/purchase sub-account buttons.
+- Set tap_x/tap_y to the center of the chosen existing account row (device pixels).
+- Ignore top-left GameTurbo network overlay.
+"""
+        prefix = (
+            f"[VisionWorker:sub_account_gate] 第 {round_id} 轮"
+            if round_id is not None
+            else "[VisionWorker:sub_account_gate]"
+        )
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = (result.output or "").strip()
+            judgment = parse_sub_account_gate_judgment(raw)
+            logger.info(
+                "%s 判定 | %.2fs | sub_account=%s conf=%.2f",
+                prefix,
+                time.perf_counter() - t0,
+                judgment.is_sub_account,
+                judgment.confidence,
+            )
+            log_vision_json(logger, prefix, judgment.model_dump(), summary="sub_account_gate full")
+            return judgment
+        except Exception:
+            logger.exception("%s API 失败 | %.2fs", prefix, time.perf_counter() - t0)
+            return SubAccountGateJudgment(
+                is_sub_account=False,
+                confidence=0.0,
+                reason="Multimodal API call failed",
+            )
+
+    async def judge_scene_gate(
+        self,
+        *,
+        screenshot_path: Path,
+        ocr_summary: str,
+        rule_scene_id: str = "unknown",
+        rule_confidence: float = 0.0,
+        active_strategy: str = "",
+        round_id: int | None = None,
+    ) -> SceneGateJudgment:
+        """描述并定性当前游戏画面场景（对话/教程/加载/进游戏等）。"""
+        prompt = f"""
+You observe a mobile game screenshot for test automation. Describe what is on screen and classify the scene.
+
+OCR (may be incomplete; trust the image when OCR conflicts):
+{ocr_summary[:3000]}
+
+Heuristic OCR rule guess: scene={rule_scene_id} confidence={rule_confidence:.2f}
+Active automation strategy: {active_strategy or "none"}
+
+Return JSON only (no markdown fence):
+{{
+  "scene_id": "dialogue | tutorial | loading | character_creation | character_select | in_game_hud | blocking_popup | unknown",
+  "confidence": 0.0-1.0,
+  "description": "one sentence describing visible UI and key elements",
+  "action": "wait | tap_dialogue | tap_skip | tap_continue | none",
+  "reason": "one sentence"
+}}
+
+Do NOT output coordinates (no tap_x/tap_y). Automation will locate tap targets via OCR.
+
+Scene rules:
+- dialogue: story cutscene / NPC speech with text box (often NO visible Continue button; tap dialogue box to advance)
+- tutorial: guided finger, highlight, tutorial prompt
+- loading: black screen, spinner, connecting, patch progress, no interactive story UI
+- character_creation / character_select: create or pick a character before entering world
+- in_game_hud: playable main game UI (inventory, map, quests, joystick area)
+- blocking_popup: announcement, reward popup, system modal blocking play
+- unknown: cannot tell
+
+Action rules (semantic only — OCR supplies coordinates):
+- tap_dialogue: story text box visible; tap dialogue area to advance (often no Continue button)
+- tap_skip: visible Skip/跳过 control
+- tap_continue: explicit Continue/继续 button visible
+- wait: loading / animation, nothing to tap yet
+- none: in_game_hud or no tap needed
+
+Ignore top-left GameTurbo overlay.
+"""
+        prefix = (
+            f"[VisionWorker:scene_gate] 第 {round_id} 轮"
+            if round_id is not None
+            else "[VisionWorker:scene_gate]"
+        )
+        t0 = time.perf_counter()
+        try:
+            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = (result.output or "").strip()
+            judgment = parse_scene_gate_judgment(raw)
+            logger.info(
+                "%s 判定 | %.2fs | scene=%s conf=%.2f action=%s",
+                prefix,
+                time.perf_counter() - t0,
+                judgment.scene_id,
+                judgment.confidence,
+                judgment.action,
+            )
+            log_vision_json(logger, prefix, judgment.model_dump(), summary="scene_gate full")
+            return judgment
+        except Exception:
+            logger.exception("%s API 失败 | %.2fs", prefix, time.perf_counter() - t0)
+            return SceneGateJudgment(
+                scene_id="unknown",
+                confidence=0.0,
+                reason="Multimodal API call failed",
+            )
+
     async def judge_privacy_checkbox_state(
         self,
         *,
@@ -620,15 +889,20 @@ Return JSON only (no markdown fence):
   "state": "checked | unchecked | not_found | uncertain",
   "confidence": 0.0-1.0,
   "checkbox_visible": bool,
-  "reason": "one sentence"
+  "reason": "one sentence",
+  "suggested_action": "tap_checkbox | none",
+  "tap_x": 0,
+  "tap_y": 0,
+  "tap_label": ""
 }}
 
 Rules:
 - checked: visible checkmark, filled/highlighted box, tick inside square/circle, or clearly selected.
 - unchecked: empty square/circle clearly visible and NOT selected.
-- not_found: no privacy checkbox near terms text on screen.
+- not_found: no privacy checkbox near terms text on screen (may be a modal dialog — classify elsewhere).
 - uncertain: checkbox area occluded, too small, or ambiguous.
 - checkbox_visible=true when you can see the control even if state is uncertain.
+- suggested_action=tap_checkbox when unchecked and checkbox is visible; otherwise none.
 """
         prefix = (
             f"[VisionWorker:checkbox] 第 {round_id} 轮"
@@ -764,6 +1038,110 @@ def parse_checkbox_tap_alignment(raw: str) -> CheckboxTapAlignmentJudgment:
         )
 
 
+def parse_privacy_gate_judgment(raw: str) -> PrivacyGateJudgment:
+    text = (raw or "").strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        gate_kind = str(data.get("gate_kind", "unknown") or "unknown").strip().lower()
+        if gate_kind not in ("modal", "checkbox", "none"):
+            gate_kind = "unknown"
+        try:
+            tap_x = int(data.get("tap_x", 0) or 0)
+            tap_y = int(data.get("tap_y", 0) or 0)
+        except (TypeError, ValueError):
+            tap_x, tap_y = 0, 0
+        return PrivacyGateJudgment(
+            gate_kind=gate_kind,
+            confidence=float(data.get("confidence", 0.0) or 0.0),
+            tap_x=tap_x,
+            tap_y=tap_y,
+            tap_label=str(data.get("tap_label", "") or "")[:80],
+            reason=str(data.get("reason", "") or "")[:500],
+        )
+    except Exception:
+        return PrivacyGateJudgment(
+            gate_kind="unknown",
+            confidence=0.0,
+            reason=f"Failed to parse model JSON: {text[:300]}",
+        )
+
+
+def parse_download_gate_judgment(raw: str) -> DownloadGateJudgment:
+    text = (raw or "").strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        action = str(data.get("action", "wait") or "wait").strip().lower()
+        if action not in ("wait", "tap_continue", "done"):
+            action = "wait"
+        try:
+            tap_x = int(data.get("tap_x", 0) or 0)
+            tap_y = int(data.get("tap_y", 0) or 0)
+        except (TypeError, ValueError):
+            tap_x, tap_y = 0, 0
+        return DownloadGateJudgment(
+            is_download=bool(data.get("is_download", False)),
+            in_progress=bool(data.get("in_progress", False)),
+            progress_text=str(data.get("progress_text", "") or "")[:40],
+            action=action,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            confidence=float(data.get("confidence", 0.0) or 0.0),
+            reason=str(data.get("reason", "") or "")[:500],
+        )
+    except Exception:
+        return DownloadGateJudgment(
+            is_download=False,
+            confidence=0.0,
+            reason=f"Failed to parse model JSON: {text[:300]}",
+        )
+
+
+def parse_sub_account_gate_judgment(raw: str) -> SubAccountGateJudgment:
+    text = (raw or "").strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        try:
+            tap_x = int(data.get("tap_x", 0) or 0)
+            tap_y = int(data.get("tap_y", 0) or 0)
+        except (TypeError, ValueError):
+            tap_x, tap_y = 0, 0
+        return SubAccountGateJudgment(
+            is_sub_account=bool(data.get("is_sub_account", False)),
+            confidence=float(data.get("confidence", 0.0) or 0.0),
+            tap_x=tap_x,
+            tap_y=tap_y,
+            tap_label=str(data.get("tap_label", "") or "")[:80],
+            reason=str(data.get("reason", "") or "")[:500],
+        )
+    except Exception:
+        return SubAccountGateJudgment(
+            is_sub_account=False,
+            confidence=0.0,
+            reason=f"Failed to parse model JSON: {text[:300]}",
+        )
+
+
 def parse_privacy_checkbox_judgment(raw: str) -> PrivacyCheckboxJudgment:
     text = (raw or "").strip()
     if text.startswith("```json"):
@@ -778,17 +1156,58 @@ def parse_privacy_checkbox_judgment(raw: str) -> PrivacyCheckboxJudgment:
         state = str(data.get("state", "uncertain")).strip().lower()
         if state not in ("checked", "unchecked", "not_found", "uncertain"):
             state = "uncertain"
+        suggested = str(data.get("suggested_action", "none") or "none").strip().lower()
+        if suggested not in ("tap_checkbox", "tap_consent_button", "none"):
+            suggested = "none"
+        try:
+            tap_x = int(data.get("tap_x", 0) or 0)
+            tap_y = int(data.get("tap_y", 0) or 0)
+        except (TypeError, ValueError):
+            tap_x, tap_y = 0, 0
         return PrivacyCheckboxJudgment(
             state=state,
             confidence=float(data.get("confidence", 0.0) or 0.0),
             checkbox_visible=bool(data.get("checkbox_visible", False)),
             reason=str(data.get("reason", "") or "")[:500],
+            suggested_action=suggested,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            tap_label=str(data.get("tap_label", "") or "")[:80],
         )
     except Exception:
         return PrivacyCheckboxJudgment(
             state="uncertain",
             confidence=0.0,
             checkbox_visible=False,
+            reason=f"Failed to parse model JSON: {text[:300]}",
+        )
+
+
+def parse_scene_gate_judgment(raw: str) -> SceneGateJudgment:
+    text = (raw or "").strip()
+    if text.startswith("```json"):
+        text = text[7:]
+    if text.startswith("```"):
+        text = text[3:]
+    if text.endswith("```"):
+        text = text[:-3]
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        action = str(data.get("action", "none") or "none").strip().lower()
+        if action not in ("wait", "tap_dialogue", "tap_skip", "tap_continue", "none"):
+            action = "none"
+        return SceneGateJudgment(
+            scene_id=str(data.get("scene_id", "unknown") or "unknown"),
+            confidence=float(data.get("confidence", 0.0) or 0.0),
+            description=str(data.get("description", "") or "")[:300],
+            action=action,
+            reason=str(data.get("reason", "") or "")[:500],
+        )
+    except Exception:
+        return SceneGateJudgment(
+            scene_id="unknown",
+            confidence=0.0,
             reason=f"Failed to parse model JSON: {text[:300]}",
         )
 

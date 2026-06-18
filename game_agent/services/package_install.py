@@ -104,3 +104,22 @@ def wait_for_package_installed(
         outcome.polls,
     )
     return PackageWaitResult(ok=False, package=pkg, polls=outcome.polls)
+
+
+def verify_package_on_device(
+    adb: AdbService,
+    package_name: str,
+) -> None:
+    """安装/deploy 后确认 ``pm path`` 可见（避免脚本返回 0 但包未装上）。"""
+    pkg = (package_name or "").strip()
+    if not pkg:
+        raise RuntimeError("verify_package_on_device: empty package_name")
+    if adb.is_package_installed(pkg):
+        logger.info("安装校验: 设备已安装 %s", pkg)
+        return
+    detail = adb.shell(f"pm path {pkg}", timeout=15.0).strip() or "(empty)"
+    raise RuntimeError(
+        f"Package {pkg} is not installed on device. "
+        f"pm path output: {detail[:300]}. "
+        "Check install.log / deploy.log for adb install (Success/Failure).",
+    )

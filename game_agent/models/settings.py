@@ -344,6 +344,21 @@ class GameSection(BaseModel):
         description="单轮观察者允许的最大会话重启次数；0 表示不限制。",
     )
 
+class GameTurboPluginSection(BaseModel):
+    """GameTurbo 外部插件开关；启用后由 external-services/gameturbo 接管打包与日志。"""
+
+    enabled: bool = Field(
+        False,
+        description="为 true 时启用 GameTurbo 外部插件（bootstrap/deploy/log/Modify 重试）。",
+    )
+
+
+class ExternalServicesSection(BaseModel):
+    """可选外部服务插件集合；核心流程不依赖此处任何插件。"""
+
+    gameturbo: GameTurboPluginSection = Field(default_factory=GameTurboPluginSection)
+
+
 class GameTurboSection(BaseModel):
     """GameTurbo deploy 静态参数；gid/路径由 TaskRuntime 管理。"""
 
@@ -503,6 +518,7 @@ class AppConfig(BaseModel):
                 "repeat_compact_stage_hint_every_n_rounds",
             ):
                 agent.pop(key, None)
+            agent.pop("deliverables_dir", None)
         executor = data.get("executor")
         if isinstance(executor, dict):
             for key in ("ad_initial_wait_s", "max_foreground_retries"):
@@ -518,6 +534,13 @@ class AppConfig(BaseModel):
             gameturbo.pop("gid", None)
             gameturbo.pop("game_config_path", None)
             gameturbo.pop("source_apk", None)
+            legacy_enabled = gameturbo.pop("enabled", None)
+            if legacy_enabled is not None:
+                ext = data.setdefault("external_services", {})
+                if isinstance(ext, dict):
+                    gt = ext.setdefault("gameturbo", {})
+                    if isinstance(gt, dict) and "enabled" not in gt:
+                        gt["enabled"] = legacy_enabled
         llm = data.get("llm")
         if isinstance(llm, dict):
             for key in ("deepseek_litellm_compat", "deepseek_thinking_mode"):
@@ -573,6 +596,9 @@ class AppConfig(BaseModel):
     launch_graph: LaunchGraphSection = Field(default_factory=LaunchGraphSection)
     game: GameSection
     gameturbo: GameTurboSection = Field(default_factory=GameTurboSection)
+    external_services: ExternalServicesSection = Field(
+        default_factory=ExternalServicesSection,
+    )
     credentials: CredentialsSection = Field(default_factory=CredentialsSection)
     preprocessing: PreprocessingSection = Field(default_factory=PreprocessingSection)
     modules: ModulesSection = Field(default_factory=ModulesSection)

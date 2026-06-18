@@ -12,7 +12,7 @@ LoginProbeStage = Literal["login_form", "sub_account_select", "clear"]
 
 _SUB_ACCOUNT_PANEL_RE = re.compile(
     r"sub-?account|last\s*login|create\s*sub-?account|purchase\s*sub-?account|"
-    r"sub-?account\s*description|小号|子账号|选择账号|选择小号|选择角色",
+    r"sub-?account\s*description|小号|子账号|选择账号|选择小号|选择角色|上次登录",
     re.IGNORECASE,
 )
 
@@ -67,6 +67,10 @@ class LoginStageProbe:
         return "\n".join(lines)
 
 
+def _panel_hits(bboxes: list[OcrBbox], pattern: re.Pattern[str]) -> list[OcrBbox]:
+    return [b for b in bboxes if b.text.strip() and pattern.search(b.text.strip())]
+
+
 def _right_panel_hits(bboxes: list[OcrBbox], screen_w: int, pattern: re.Pattern[str]) -> list[OcrBbox]:
     cutoff = int(screen_w * _RIGHT_PANEL_X_RATIO)
     out: list[OcrBbox] = []
@@ -79,18 +83,21 @@ def _right_panel_hits(bboxes: list[OcrBbox], screen_w: int, pattern: re.Pattern[
     return out
 
 
-def _pick_sub_account_entry(bboxes: list[OcrBbox], screen_w: int) -> OcrBbox | None:
-    cutoff = int(screen_w * _RIGHT_PANEL_X_RATIO)
+def _pick_sub_account_entry_from(
+    bboxes: list[OcrBbox],
+    *,
+    min_cx: int = 0,
+) -> OcrBbox | None:
     candidates: list[tuple[int, OcrBbox]] = []
     for bbox in bboxes:
         text = bbox.text.strip()
-        if not text or bbox.cx < cutoff:
+        if not text or bbox.cx < min_cx:
             continue
         if _SUB_ACCOUNT_CREATE_PURCHASE_RE.search(text):
             continue
         if _SUB_ACCOUNT_ENTRY_RE.search(text):
             score = 0
-            if re.search(r"last\s*login", text, re.IGNORECASE):
+            if re.search(r"last\s*login|上次登录", text, re.IGNORECASE):
                 score += 100
             if re.search(r"sub-?account\s*\d+", text, re.IGNORECASE):
                 score += 80
@@ -101,6 +108,11 @@ def _pick_sub_account_entry(bboxes: list[OcrBbox], screen_w: int) -> OcrBbox | N
         return None
     candidates.sort(key=lambda item: (-item[0], item[1].cy))
     return candidates[0][1]
+
+
+def _pick_sub_account_entry(bboxes: list[OcrBbox], screen_w: int) -> OcrBbox | None:
+    cutoff = int(screen_w * _RIGHT_PANEL_X_RATIO)
+    return _pick_sub_account_entry_from(bboxes, min_cx=cutoff)
 
 
 def probe_login_stage(
@@ -127,6 +139,23 @@ def probe_login_stage(
             blocking=True,
             stage="sub_account_select",
             reason="sub-account panel visible but no existing entry to tap",
+        )
+
+    fullscreen_hits = _panel_hits(bboxes, _SUB_ACCOUNT_PANEL_RE)
+    if len(fullscreen_hits) >= 1:
+        entry = _pick_sub_account_entry_from(bboxes, min_cx=0)
+        if entry is not None:
+            return LoginStageProbe(
+                blocking=True,
+                stage="sub_account_select",
+                reason="fullscreen sub-account picker visible",
+                action_xy=(entry.cx, entry.cy),
+                action_label=entry.text,
+            )
+        return LoginStageProbe(
+            blocking=True,
+            stage="sub_account_select",
+            reason="fullscreen sub-account hints without tap coords",
         )
 
     login_hits = _right_panel_hits(bboxes, screen_w, _LOGIN_FORM_RE)

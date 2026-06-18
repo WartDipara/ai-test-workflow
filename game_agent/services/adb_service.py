@@ -372,6 +372,22 @@ class AdbService:
         logger.info("foreground 解析失败：所有 dumpsys 方案均未提取到组件")
         return None, None
 
+    def install_apk(self, apk_path: Path, *, timeout: float = 300.0) -> str:
+        """安装本地 APK（adb install -r）。"""
+        path = apk_path.resolve()
+        if not path.is_file():
+            return f"Refused install: APK not found: {path}"
+        r = self._run(
+            ["install", "-r", str(path)],
+            timeout=timeout,
+        )
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        combined = "\n".join(x for x in (out, err) if x)
+        if r.returncode != 0:
+            return f"Install failed (exit {r.returncode}): {combined[:800]}"
+        return f"Installed: {path.name}\n{combined[:400]}"
+
     def is_package_installed(self, package: str) -> bool:
         """设备上是否已安装指定包（pm path）。"""
         pkg = (package or "").strip()

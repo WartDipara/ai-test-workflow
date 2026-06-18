@@ -23,8 +23,10 @@ from game_agent.graphs.launch_routing import plan_route
 from game_agent.graphs.launch_limits import launch_graph_limits_from_state, seed_launch_graph_limits
 from game_agent.graphs.launch_state_store import (
     clear_failed_node,
+    completed_tree_node,
     get_last_ocr,
     increment_enter_tapped,
+    is_privacy_checked,
     mark_tree_node_done,
     mark_tree_node_failed,
     set_in_game_confirmed,
@@ -36,9 +38,16 @@ from game_agent.graphs.launch_state_store import (
 from game_agent.services.login_batch_fill import atomic_login_fill_and_submit
 from game_agent.services.login_secure_keyboard import (
     LOGIN_BLACK_SCREENCAP_HINT,
+    blackout_hint_for_state,
+    blackout_streak,
+    bump_blackout_streak,
     is_login_flow_in_progress,
-    is_login_secure_keyboard_blackout,
+    is_secure_keyboard_blackout,
+    reset_blackout_streak,
+    should_handle_secure_keyboard_blackout,
+    should_press_back_for_blackout,
     try_dismiss_login_secure_keyboard,
+    try_dismiss_secure_keyboard,
 )
 from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.services.screen_interpreter import interpret_launch_screen
@@ -55,10 +64,17 @@ from game_agent.services.blocking_overlay import (
     verify_overlay_dismissed,
 )
 from game_agent.services.game_entry_check import run_in_game_check, run_in_game_check_on_capture
+from game_agent.core.external_log import fetch_external_log_summary
 from game_agent.services.in_game_stability_watch import run_stability_check
 from game_agent.services.phase_engine import run_once as run_adaptive_phase_once
-from game_agent.services.gameturbo_log import format_latest_gameturbo_log_for_agent
 from game_agent.services.privacy_checkbox import ensure_privacy_checkbox_checked_multimodal
+from game_agent.services.download_gate import (
+    ocr_still_downloading,
+    pick_continue_button_from_ocr,
+    resolve_download_gate,
+)
+from game_agent.services.privacy_gate import resolve_privacy_gate
+from game_agent.services.sub_account_gate import resolve_sub_account_gate
 from game_agent.services.server_selector_pipeline import (
     message_indicates_e2006,
     run_full_server_selector_check,
@@ -77,6 +93,15 @@ from game_agent.services.dynamic_route_planner import (
     mark_step_attempt,
     maybe_build_dynamic_chain,
 )
+from game_agent.services.scene_classifier import classify_scene, detect_scene_transition
+from game_agent.services.scene_gate import plan_from_scene_gate, resolve_scene_gate, scene_id_from_scene_gate
+from game_agent.services.scene_strategies import (
+    apply_scene_classification,
+    is_pre_login_passive_wait,
+    plan_loading_action,
+    plan_scene_action,
+)
+from game_agent.models.scene import SceneActionPlan, SceneTransition
 from game_agent.workers.vision_worker import VisionWorker
 from game_agent.utils.in_game_hud_ocr import should_trigger_in_game_hud_check
 from game_agent.utils.ocr_util import (
@@ -88,6 +113,32 @@ from game_agent.utils.ocr_util import (
 logger = logging.getLogger(__name__)
 
 _CONTINUE_RE = re.compile(r"继续|确定|确认|retry|重试|continue|ok", re.IGNORECASE)
+
+
+def _artifact_log_root(deps: LaunchGraphDeps) -> Path:
+    if deps.artifact_root.name == "executor":
+        return deps.artifact_root.parent
+    return deps.artifact_root
+
+
+async def _load_external_log_summary(
+    deps: LaunchGraphDeps,
+    *,
+    limit: int = 80,
+) -> str:
+    return await fetch_external_log_summary(
+        deps.external_log_reader,
+        artifact_root=_artifact_log_root(deps),
+        adb=deps.adb,
+        limit=limit,
+        refresh_from_device=True,
+        include_health_hint=False,
+    )
+
+
+def _store_external_log_summary(state: LaunchGraphState, summary: str) -> None:
+    state["external_log_summary"] = summary
+    state["gameturbo_summary"] = summary
 
 
 async def _try_confirm_in_game_via_hud_ocr(
@@ -171,11 +222,10 @@ async def observe_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Laun
     finally:
         if actx is not None:
             actx.set_ocr_busy(False)
-    if is_login_flow_in_progress(state) and is_login_secure_keyboard_blackout(
-        shot,
-        bboxes,
-        ocr_summary=ocr_summary,
-    ):
+    blackout = is_secure_keyboard_blackout(shot, bboxes, ocr_summary=ocr_summary)
+    if not blackout:
+        reset_blackout_streak(state)
+    elif is_login_flow_in_progress(state):
         logger.warning(
             "[LaunchGraph:observe] login secure keyboard blackout — %s",
             LOGIN_BLACK_SCREENCAP_HINT,
@@ -202,19 +252,56 @@ async def observe_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Laun
         finally:
             if actx is not None:
                 actx.set_ocr_busy(False)
+        if not is_secure_keyboard_blackout(shot, bboxes, ocr_summary=ocr_summary):
+            reset_blackout_streak(state)
         state["recover_hint"] = f"login secure keyboard dismissed: {dismiss_msg[:300]}"
-    gameturbo = await asyncio.to_thread(
-        format_latest_gameturbo_log_for_agent,
-        deps.artifact_root.parent if deps.artifact_root.name == "executor" else deps.artifact_root,
-        deps.adb,
-        limit=80,
-        refresh_from_device=True,
-        include_health_hint=False,
-    )
+    elif should_handle_secure_keyboard_blackout(state):
+        streak = bump_blackout_streak(state)
+        hint = blackout_hint_for_state(state)
+        logger.warning(
+            "[LaunchGraph:observe] post-login secure keyboard blackout streak=%d — %s",
+            streak,
+            hint,
+        )
+        if should_press_back_for_blackout(streak):
+            dismiss_msg = await asyncio.to_thread(
+                try_dismiss_secure_keyboard,
+                deps.adb,
+                deps.app_config.executor,
+                force_press_back=True,
+            )
+            deps.adb.wait_seconds(0.5)
+            ts2 = datetime.now().strftime("%H%M%S_%f")
+            shot = deps.artifact_root / f"graph_observe_after_kb_{ts2}.png"
+            deps.adb.screencap_png(shot)
+            if actx is not None:
+                actx.set_ocr_busy(True)
+            try:
+                ocr_summary, bboxes = await asyncio.to_thread(
+                    run_ocr_frame,
+                    shot,
+                    device_w=sw,
+                    device_h=sh,
+                    worker_key=worker_key,
+                )
+            finally:
+                if actx is not None:
+                    actx.set_ocr_busy(False)
+            if not is_secure_keyboard_blackout(shot, bboxes, ocr_summary=ocr_summary):
+                reset_blackout_streak(state)
+            state["recover_hint"] = (
+                f"post-login keyboard blackout streak={streak} dismiss={dismiss_msg[:300]}"
+            )
+        elif streak == 2:
+            deps.adb.wait_seconds(2.5)
+            state["recover_hint"] = f"post-login keyboard blackout streak={streak} extra_wait"
+        else:
+            state["recover_hint"] = f"post-login keyboard blackout streak={streak} wait"
+    external_summary = await _load_external_log_summary(deps, limit=80)
     state["last_screenshot"] = str(shot.resolve())
     state["last_ocr_summary"] = ocr_summary
     state["last_bboxes"] = serialize_bboxes(bboxes)
-    state["gameturbo_summary"] = gameturbo
+    _store_external_log_summary(state, external_summary)
     return state  # type: ignore[return-value]
 
 
@@ -244,6 +331,39 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
         ocr_summary=state.get("last_ocr_summary") or "",
     )
     ocr_merged = state.get("last_ocr_summary") or ""
+    privacy_milestones_done = (
+        completed_tree_node(state, "handle_initial_privacy_dialog")
+        and is_privacy_checked(state)
+    )
+    facts = await resolve_privacy_gate(
+        facts,
+        bboxes=bboxes,
+        ocr_merged=ocr_merged,
+        screen_w=sw,
+        screen_h=sh,
+        screenshot_path=shot,
+        llm_cfg=deps.app_config.llm_multimodal,
+        round_id=deps.round_id,
+        privacy_milestones_done=privacy_milestones_done,
+    )
+    facts = await resolve_sub_account_gate(
+        facts,
+        bboxes=bboxes,
+        ocr_merged=ocr_merged,
+        screen_w=sw,
+        screen_h=sh,
+        screenshot_path=shot,
+        llm_cfg=deps.app_config.llm_multimodal,
+        round_id=deps.round_id,
+    )
+    facts = await resolve_download_gate(
+        facts,
+        bboxes=bboxes,
+        ocr_merged=ocr_merged,
+        screenshot_path=shot,
+        llm_cfg=deps.app_config.llm_multimodal,
+        round_id=deps.round_id,
+    )
     ocr_has_sub_coords = facts.sub_account_action_xy is not None
     interpret_hash = ""
     try:
@@ -290,6 +410,50 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
         facts,
         bboxes,
         ocr_summary=ocr_merged,
+    )
+    scene_cls = classify_scene(
+        facts,
+        bboxes,
+        ocr_summary=ocr_merged,
+        screen_w=sw,
+        screen_h=sh,
+        screenshot_path=shot_path,
+    )
+    scene_cls, scene_gate_judgment = await resolve_scene_gate(
+        state,
+        scene_cls,
+        facts=facts,
+        bboxes=bboxes,
+        ocr_merged=ocr_merged,
+        screen_h=sh,
+        screenshot_path=shot,
+        llm_cfg=deps.app_config.llm_multimodal,
+        round_id=deps.round_id,
+        screenshot_hash=interpret_hash,
+    )
+    if scene_gate_judgment is not None:
+        logger.info(
+            "[LaunchGraph:classify] scene_gate desc=%s action=%s (coords=ocr)",
+            scene_gate_judgment.description[:100],
+            scene_gate_judgment.action,
+        )
+    scene_transition = detect_scene_transition(
+        prev_scene_id=str(state.get("scene_id") or "unknown"),
+        prev_fingerprint=str(state.get("scene_fingerprint") or ""),
+        classification=scene_cls,
+        facts=facts,
+        ocr_summary=ocr_merged,
+        screenshot_path=shot_path,
+    )
+    apply_scene_classification(state, scene_cls, scene_transition, facts)
+    facts = facts_from_state(state)
+    logger.info(
+        "[LaunchGraph:classify] scene=%s conf=%.2f source=%s trans=%s active=%s",
+        scene_cls.scene_id,
+        scene_cls.confidence,
+        scene_cls.source,
+        scene_transition.kind,
+        state.get("scene_strategy_active"),
     )
     if await _try_confirm_in_game_via_hud_ocr(
         state,
@@ -375,13 +539,17 @@ async def handle_download_node(state: LaunchGraphState, deps: LaunchGraphDeps) -
     state = dict(state)
     node = "handle_download"
     sw, sh = deps.screen_width, deps.screen_height
-    shot_path = state.get("last_screenshot")
-    tapped = False
-    if shot_path:
-        bboxes = deserialize_bboxes(state.get("last_bboxes"))
-        if not bboxes:
-            from pathlib import Path
+    from pathlib import Path
 
+    from game_agent.models.launch_graph_state import facts_from_state
+
+    facts = facts_from_state(state)
+    shot_path = state.get("last_screenshot")
+    ocr_merged = state.get("last_ocr_summary") or ""
+    bboxes = deserialize_bboxes(state.get("last_bboxes"))
+
+    if shot_path:
+        if not bboxes:
             _, bboxes = await asyncio.to_thread(
                 run_ocr_frame,
                 Path(shot_path),
@@ -389,13 +557,26 @@ async def handle_download_node(state: LaunchGraphState, deps: LaunchGraphDeps) -
                 device_h=sh,
                 worker_key=deps.adb.device_serial,
             )
-        for bbox in bboxes:
-            if _CONTINUE_RE.search(bbox.text.strip()):
-                deps.adb.tap(bbox.cx, bbox.cy, width=sw, height=sh)
-                tapped = True
-                break
-    if not tapped:
-        deps.adb.wait_seconds(5.0)
+            ocr_merged = " ".join(b.text for b in bboxes)
+            state["last_ocr_summary"] = ocr_merged
+            state["last_bboxes"] = serialize_bboxes(bboxes)
+
+    if facts.download_continue_xy is not None:
+        x, y = facts.download_continue_xy
+        deps.adb.tap(x, y, width=sw, height=sh)
+        deps.adb.wait_seconds(1.0)
+    else:
+        picked = pick_continue_button_from_ocr(bboxes) if bboxes else None
+        if picked is not None:
+            deps.adb.tap(picked[0], picked[1], width=sw, height=sh)
+            deps.adb.wait_seconds(1.0)
+        else:
+            deps.adb.wait_seconds(4.0)
+
+    if ocr_still_downloading(ocr_merged):
+        logger.info("[LaunchGraph:download] still in progress, not marking done")
+        return state  # type: ignore[return-value]
+
     mark_tree_node_done(state, node)
     return state  # type: ignore[return-value]
 
@@ -947,6 +1128,194 @@ async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) ->
     return state  # type: ignore[return-value]
 
 
+def _execute_scene_action(
+    plan,
+    *,
+    adb,
+    sw: int,
+    sh: int,
+) -> str:
+    if plan.action == "tap_xy":
+        if plan.x <= 0 or plan.y <= 0:
+            return f"refused tap invalid ({plan.x},{plan.y})"
+        return adb.tap(plan.x, plan.y, width=sw, height=sh)
+    if plan.action == "press_back":
+        return adb.press_back()
+    if plan.action == "wait":
+        return adb.wait_seconds(plan.wait_s)
+    if plan.action == "observe":
+        return adb.wait_seconds(plan.wait_s)
+    return "no-op"
+
+
+async def scene_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
+    """场景策略单步：对话/教程/加载低成本推进，无固定点击阈值。"""
+    state = dict(state)
+    node = "scene_action"
+    scene_rounds = int(state.get("scene_rounds") or 0) + 1
+    state["scene_rounds"] = scene_rounds
+
+    sw, sh = deps.screen_width, deps.screen_height
+    if not sw or not sh:
+        sw, sh = deps.adb.touch_size()
+        deps.screen_width, deps.screen_height = sw, sh
+
+    scene_id = scene_id_from_scene_gate(
+        state,
+        fallback=str(state.get("active_scene_strategy") or state.get("scene_id") or "unknown"),
+    )
+    transition = SceneTransition(
+        kind=str(state.get("scene_transition") or "none"),  # type: ignore[arg-type]
+        reason=str(state.get("scene_transition_reason") or ""),
+        from_scene=str(state.get("scene_id") or ""),
+        to_scene=scene_id,
+    )
+
+    bboxes = deserialize_bboxes(state.get("last_bboxes"))
+    ocr_summary = str(state.get("last_ocr_summary") or "")
+    facts = facts_from_state(state)
+    confidence = float(state.get("scene_confidence") or facts.scene_confidence or 0)
+
+    shot_path = str(state.get("last_screenshot") or "")
+    live_cls = classify_scene(
+        facts,
+        bboxes,
+        ocr_summary=ocr_summary,
+        screen_w=sw,
+        screen_h=sh,
+        screenshot_path=shot_path or None,
+    )
+    if live_cls.scene_id in ("dialogue", "tutorial") and live_cls.confidence >= 0.45:
+        scene_id = live_cls.scene_id
+        confidence = live_cls.confidence
+    elif live_cls.scene_id == "loading" and live_cls.confidence >= 0.55:
+        scene_id = "loading"
+        confidence = live_cls.confidence
+
+    blackout = bool(
+        shot_path
+        and is_secure_keyboard_blackout(
+            Path(shot_path),
+            bboxes,
+            ocr_summary=ocr_summary,
+        )
+    )
+
+    if is_pre_login_passive_wait(
+        state,
+        facts,
+        scene_id=scene_id,
+        confidence=confidence,
+    ):
+        plan = plan_loading_action(transition=transition)
+        scene_id = "loading"
+    elif (vlm_plan := plan_from_scene_gate(state, scene_id=scene_id)) is not None:
+        plan = vlm_plan
+    elif (
+        scene_id == "loading"
+        and blackout
+        and should_handle_secure_keyboard_blackout(state)
+    ):
+        streak = blackout_streak(state)
+        if should_press_back_for_blackout(streak):
+            plan = SceneActionPlan(
+                action="press_back",
+                reason="loading:blackout_press_back",
+                mode="advance",
+            )
+        else:
+            wait_s = 3.0 if streak >= 2 else 2.5
+            plan = SceneActionPlan(
+                action="wait",
+                wait_s=wait_s,
+                reason=f"loading:blackout_wait_{max(streak, 1)}",
+                mode="wait_observe",
+            )
+    else:
+        plan = plan_scene_action(
+            scene_id,
+            bboxes,
+            ocr_summary=ocr_summary,
+            screen_w=sw,
+            screen_h=sh,
+            transition=transition,
+        )
+
+    exec_msg = _execute_scene_action(plan, adb=deps.adb, sw=sw, sh=sh)
+    if plan.action in ("tap_xy", "press_back"):
+        deps.adb.wait_seconds(0.8)
+    elif plan.action in ("wait", "observe"):
+        deps.adb.wait_seconds(0.2)
+
+    ts = datetime.now().strftime("%H%M%S_%f")
+    after_shot = deps.artifact_root / f"graph_scene_{scene_id}_{ts}.png"
+    deps.adb.screencap_png(after_shot)
+    actx = deps.attempt_context
+    if actx is not None:
+        actx.set_ocr_busy(True)
+    try:
+        after_ocr, after_bboxes = await asyncio.to_thread(
+            run_ocr_frame,
+            after_shot,
+            device_w=sw,
+            device_h=sh,
+            worker_key=deps.adb.device_serial,
+        )
+    finally:
+        if actx is not None:
+            actx.set_ocr_busy(False)
+
+    after_facts = classify_screen_facts(
+        after_bboxes,
+        screen_w=sw,
+        screen_h=sh,
+        ocr_summary=after_ocr,
+    )
+    after_cls = classify_scene(
+        after_facts,
+        after_bboxes,
+        ocr_summary=after_ocr,
+        screen_w=sw,
+        screen_h=sh,
+        screenshot_path=after_shot,
+    )
+    after_transition = detect_scene_transition(
+        prev_scene_id=str(state.get("scene_id") or "unknown"),
+        prev_fingerprint=str(state.get("scene_fingerprint") or ""),
+        classification=after_cls,
+        facts=after_facts,
+        ocr_summary=after_ocr,
+        screenshot_path=after_shot,
+    )
+    apply_scene_classification(state, after_cls, after_transition, after_facts)
+
+    state["last_screenshot"] = str(after_shot.resolve())
+    state["last_ocr_summary"] = after_ocr
+    state["last_bboxes"] = serialize_bboxes(after_bboxes)
+    state["facts"] = after_facts.model_dump()
+    state["scene_last_action_signature"] = plan.signature()
+    state["recover_hint"] = f"scene:{scene_id}:{plan.reason[:120]}"
+
+    logger.info(
+        "[LaunchGraph:scene] round=%d scene=%s action=%s mode=%s (%s,%s) | %s",
+        scene_rounds,
+        scene_id,
+        plan.action,
+        plan.mode,
+        plan.x,
+        plan.y,
+        exec_msg[:120],
+    )
+
+    mark_tree_node_done(
+        state,
+        node,
+        artifact=str(after_shot.resolve()),
+        evidence=f"{scene_id}:{plan.action}:{plan.reason[:120]}",
+    )
+    return state  # type: ignore[return-value]
+
+
 async def free_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
     """登录后兜底：OCR+多模态规划单步动作，推进创角/选角/加载等可变流程。"""
     state = dict(state)
@@ -1115,16 +1484,9 @@ async def recover_from_failure_node(
 ) -> LaunchGraphState:
     state = dict(state)
     node = "recover_from_failure"
-    root = deps.artifact_root.parent if deps.artifact_root.name == "executor" else deps.artifact_root
-    gameturbo = await asyncio.to_thread(
-        format_latest_gameturbo_log_for_agent,
-        root,
-        deps.adb,
-        limit=100,
-        refresh_from_device=True,
-        include_health_hint=False,
-    )
-    state["gameturbo_summary"] = gameturbo
+    root = _artifact_log_root(deps)
+    external_summary = await _load_external_log_summary(deps, limit=100)
+    _store_external_log_summary(state, external_summary)
     from game_agent.models.launch_graph_state import facts_from_state
 
     facts = facts_from_state(state)
@@ -1165,7 +1527,7 @@ async def recover_from_failure_node(
         state["last_ocr_summary"] = ocr_summary
         state["last_bboxes"] = serialize_bboxes(bboxes)
 
-        login_blackout = is_login_secure_keyboard_blackout(
+        login_blackout = is_secure_keyboard_blackout(
             shot,
             bboxes,
             ocr_summary=ocr_summary,

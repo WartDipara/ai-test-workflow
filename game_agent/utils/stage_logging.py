@@ -81,18 +81,21 @@ def install_stage_aware_logging(level: str = "INFO", *, force: bool = False) -> 
 def pipeline_stage(
     phase: str,
     *,
+    artifact_root: Path | None = None,
     gameturbo_root: Path | None = None,
     note: str = "",
+    write_external_log_marker: bool = False,
     **_: Any,
 ) -> Iterator[None]:
     """
     Bind pipeline stage for logging in the current thread/task.
-    Optionally write a gameturbo.log stage separator when gameturbo_root is set.
+    Optionally write an external plugin log stage separator when enabled.
     """
-    if gameturbo_root is not None:
+    root = artifact_root if artifact_root is not None else gameturbo_root
+    if write_external_log_marker and root is not None:
         from game_agent.services.gameturbo_log import append_gameturbo_stage_marker
 
-        append_gameturbo_stage_marker(gameturbo_root, phase, note)
+        append_gameturbo_stage_marker(root, phase, note)
 
     token = bind_pipeline_stage(phase)
     try:

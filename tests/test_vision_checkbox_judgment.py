@@ -29,6 +29,27 @@ def test_parse_privacy_checkbox_judgment_invalid_json() -> None:
     assert j.confidence == 0.0
 
 
+def test_parse_privacy_checkbox_judgment_consent_button() -> None:
+    raw = """
+    {
+      "state": "not_found",
+      "confidence": 0.9,
+      "checkbox_visible": false,
+      "reason": "uses agree button",
+      "suggested_action": "tap_consent_button",
+      "tap_x": 820,
+      "tap_y": 2150,
+      "tap_label": "同意并进入"
+    }
+    """
+    j = parse_privacy_checkbox_judgment(raw)
+    assert j.state == "not_found"
+    assert j.suggests_consent_button(min_confidence=0.55)
+    assert j.tap_x == 820
+    assert j.tap_y == 2150
+    assert j.tap_label == "同意并进入"
+
+
 def test_parse_privacy_checkbox_judgment_unknown_state() -> None:
     j = parse_privacy_checkbox_judgment(
         '{"state": "maybe", "confidence": 0.5, "checkbox_visible": false, "reason": "x"}'

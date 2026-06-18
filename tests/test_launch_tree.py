@@ -86,6 +86,20 @@ def test_dfs_checkbox_gate_before_enter() -> None:
     assert d.action == "ensure_privacy_checkbox"
 
 
+def test_dfs_checkbox_gate_before_login() -> None:
+    d = _decide(
+        facts=LaunchFacts(
+            terms_checkbox_visible=True,
+            login_blocking=True,
+            login_stage="login_form",
+        ),
+        privacy_checked=False,
+        login_done=False,
+    )
+    assert d.action == "ensure_privacy_checkbox"
+    assert d.node_id == "privacy.checkbox"
+
+
 def test_dfs_announcement_overlay_before_server() -> None:
     d = _decide(
         facts=LaunchFacts(

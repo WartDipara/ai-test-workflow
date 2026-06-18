@@ -8,16 +8,8 @@ from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.task_config import TaskConfig
 from game_agent.services.adb_service import AdbService
 from game_agent.services.device_workspace_cleanup import remove_leftover_game_installations
-from game_agent.services.gameturbo_log import (
-    ensure_gameturbo_log_for_analysis,
-    finalize_gameturbo_log,
-)
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.utils.gameturbo_log_domain_extract import (
-    DEFAULT_OUTPUT_NAME,
-    extract_domain_region_from_log,
-)
 from game_agent.utils.stage_logging import pipeline_stage
 
 logger = logging.getLogger(__name__)
@@ -25,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class FailureCleanup:
-    """失败收尾：导出 GameTurbo 日志、结束游戏进程、卸载游戏。"""
+    """失败收尾：截图/审计已由编排器处理；此处卸载游戏并触发插件清理。"""
 
     adb: AdbService
     app_config: TaskConfig
@@ -33,10 +25,12 @@ class FailureCleanup:
     audit: RunAuditLogger | None = None
 
     async def run(self, reason: str) -> None:
+        plugin_enabled = self.app_config.external_services.gameturbo.enabled
         with pipeline_stage(
             PipelinePhase.CLEANUP.value,
-            gameturbo_root=self.artifact_root,
+            artifact_root=self.artifact_root,
             note="failure cleanup start",
+            write_external_log_marker=plugin_enabled,
         ):
             await self._run_impl(reason)
 
@@ -52,67 +46,17 @@ class FailureCleanup:
                 game_config_path=str(self.app_config.runtime.game_config_path or ""),
             )
 
-        with trace_operation("cleanup", "export_gameturbo_log") as rec:
-            local_log_path = await self._export_gameturbo_log()
-            rec.ok(
-                path=str(local_log_path) if local_log_path else None,
-                exists=local_log_path.is_file() if local_log_path else False,
-            )
-        if self.audit is not None:
-            self.audit.log_phase(
-                PipelinePhase.CLEANUP.value,
-                "日志已导出",
-                local_path=str(local_log_path) if local_log_path else None,
+        if cfg.external_services.gameturbo.enabled:
+            from game_agent.external_services.gameturbo.retry.cleanup import (
+                run_gameturbo_failure_cleanup,
             )
 
-        if self.artifact_root is not None:
-            analysis_log = ensure_gameturbo_log_for_analysis(self.artifact_root)
-        else:
-            analysis_log = local_log_path
-
-        if analysis_log is not None and self.artifact_root:
-            analysis_json = self.artifact_root / DEFAULT_OUTPUT_NAME
-            try:
-                with trace_operation(
-                    "domain_extract",
-                    "extract_domain_region_from_log",
-                    log_path=str(analysis_log),
-                    output_path=str(analysis_json),
-                ) as rec:
-                    result = extract_domain_region_from_log(
-                        analysis_log,
-                        output_path=analysis_json,
-                    )
-                    rec.ok(
-                        domain_count=result.domain_count,
-                        tunnel=len(result.tunnel_domains),
-                        direct=len(result.direct_domains),
-                        unknown=len(result.unknown_domains),
-                        unmatched_pending=len(result.unmatched_pending_ips),
-                    )
-                logger.info(
-                    "域名/区域分析完成: %d 个域名, tunnel=%d direct=%d unknown=%d",
-                    result.domain_count,
-                    len(result.tunnel_domains),
-                    len(result.direct_domains),
-                    len(result.unknown_domains),
-                )
-                if self.audit is not None:
-                    self.audit.log_phase(
-                        PipelinePhase.CLEANUP.value,
-                        "域名区域分析已写入 JSON",
-                        path=str(analysis_json),
-                        domain_count=result.domain_count,
-                        non_china_domains=result.non_china_domains,
-                    )
-            except Exception as e:
-                logger.warning("域名/区域分析失败: %s", e)
-                if self.audit is not None:
-                    self.audit.log_phase(
-                        PipelinePhase.CLEANUP.value,
-                        "域名区域分析失败",
-                        error=str(e)[:500],
-                    )
+            await run_gameturbo_failure_cleanup(
+                adb=self.adb,
+                app_config=cfg,
+                artifact_root=self.artifact_root,
+                audit=self.audit,
+            )
 
         game_pkg = (cfg.runtime.package_name or "").strip()
         packages = [game_pkg] if game_pkg else []
@@ -133,9 +77,3 @@ class FailureCleanup:
 
         if self.audit is not None:
             self.audit.log_phase(PipelinePhase.CLEANUP.value, "失败收尾完成")
-
-    async def _export_gameturbo_log(self) -> Path | None:
-        if self.artifact_root is None:
-            return None
-        logger.info("归档 GameTurbo 日志（合并设备缓冲区）...")
-        return finalize_gameturbo_log(self.adb, self.artifact_root)

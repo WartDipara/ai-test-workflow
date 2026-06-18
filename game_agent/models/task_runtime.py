@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from game_agent.paths import gameturbo_merged_config_path
 from game_agent.utils.apk_util import get_apk_launch_info
-from game_agent.utils.gameturbo_bootstrap import output_apk_path
 
 
 @dataclass(slots=True)
@@ -23,19 +21,21 @@ class TaskRuntime:
     package_name: str = ""
     launch_activity: str = ""
     source_apk: Path | None = None
+    install_apk: Path | None = None
     game_config_path: Path | None = None
+    plugin_merged_config: Path | None = field(default=None, repr=False)
 
     @property
     def output_apk(self) -> Path | None:
-        if not self.gid:
-            return None
-        return output_apk_path(self.gid)
+        if self.install_apk is not None and self.install_apk.is_file():
+            return self.install_apk.resolve()
+        return None
 
     @property
     def merged_config_path(self) -> Path | None:
-        if not self.gid:
-            return None
-        return gameturbo_merged_config_path(self.gid)
+        if self.plugin_merged_config is not None and self.plugin_merged_config.is_file():
+            return self.plugin_merged_config.resolve()
+        return None
 
     def update_from_apk(self, apk_path: Path) -> None:
         info = get_apk_launch_info(apk_path)
@@ -43,6 +43,9 @@ class TaskRuntime:
             return
         self.package_name = info.package_name
         self.launch_activity = info.launch_activity
+
+    def update_install_apk(self, apk_path: Path) -> None:
+        self.install_apk = apk_path.resolve()
 
     def update_gameturbo(
         self,
@@ -54,6 +57,14 @@ class TaskRuntime:
         self.gid = gid.strip()
         self.source_apk = source_apk.resolve()
         self.game_config_path = game_config_path.resolve()
+
+    def update_plugin_merged_config(self, path: Path | None) -> None:
+        self.plugin_merged_config = path.resolve() if path is not None else None
+
+    def require_install_apk(self) -> Path:
+        if self.install_apk is None or not self.install_apk.is_file():
+            raise RuntimeError("TaskRuntime 缺少有效的 install_apk")
+        return self.install_apk.resolve()
 
     @property
     def normalized_launch_activity(self) -> str:

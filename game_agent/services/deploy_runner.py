@@ -3,8 +3,6 @@ from __future__ import annotations
 import locale
 import logging
 import shutil
-import subprocess
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,8 +10,13 @@ from game_agent.paths import REPO_ROOT
 from game_agent.services.adb_service import AdbService
 from game_agent.services.deploy_build_lock import deploy_build_locked
 from game_agent.services.install_monitor.base import BaseInstallMonitor
-from game_agent.services.install_monitor.factory import create_install_monitor
-from game_agent.services.install_monitor.result import InstallMonitorResult
+from game_agent.services.install_with_monitor import (
+    InstallMonitorSession,
+    summarize_monitor_result,
+)
+from game_agent.services.package_install import (
+    verify_package_on_device as _verify_package_on_device,
+)
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.shutdown import ShutdownRequested, is_shutdown_requested
 from game_agent.services.subprocess_tree import popen_communicate_poll
@@ -69,37 +72,8 @@ def verify_package_on_device(
     *,
     serial: str | None = None,
 ) -> None:
-    """deploy.sh 返回 0 后仍须确认 pm path（install 失败时脚本可能未报错）。"""
-    pkg = (package_name or "").strip()
-    if not pkg:
-        raise RuntimeError("verify_package_on_device: empty package_name")
-    adb = AdbService(serial)
-    if adb.is_package_installed(pkg):
-        logger.info("deploy 后校验: 设备已安装 %s", pkg)
-        return
-    detail = adb.shell(f"pm path {pkg}", timeout=15.0).strip() or "(empty)"
-    raise RuntimeError(
-        f"deploy.sh exited 0 but package {pkg} is not installed on device. "
-        f"pm path output: {detail[:300]}. "
-        "Check deploy.log for adb install (Success/Failure)."
-    )
-
-
-def _run_monitor_thread(
-    monitor: BaseInstallMonitor,
-    adb: AdbService,
-    stop_event: threading.Event,
-    shot_dir: Path | None,
-    result_holder: list[InstallMonitorResult],
-) -> None:
-    try:
-        monitor.monitor_install(adb, stop_event, shot_dir)
-    except Exception as e:
-        monitor.result.thread_crashed = True
-        monitor.record_error(f"thread_crash: {e}")
-        logger.exception("安装监控线程异常退出")
-    finally:
-        result_holder.append(monitor.result)
+    """Deprecated wrapper — prefer package_install.verify_package_on_device(adb, pkg)."""
+    _verify_package_on_device(AdbService(serial), package_name)
 
 
 def run_deploy(
@@ -139,20 +113,13 @@ def run_deploy(
     log_path = (artifact_root / log_filename) if artifact_root else None
     logger.info("执行 GameTurbo deploy: %s", " ".join(cmd))
 
-    if install_monitor is None:
-        install_monitor = create_install_monitor(AdbService(serial))
-
-    stop_event = threading.Event()
-    shot_dir = (artifact_root / "install_monitor") if artifact_root else None
-    if shot_dir is not None:
-        shot_dir.mkdir(parents=True, exist_ok=True)
-    monitor_results: list[InstallMonitorResult] = []
-    monitor_thread = threading.Thread(
-        target=_run_monitor_thread,
-        args=(install_monitor, AdbService(serial), stop_event, shot_dir, monitor_results),
-        daemon=True,
-        name="install_monitor",
+    adb = AdbService(serial)
+    monitor_session = InstallMonitorSession.start(
+        adb,
+        artifact_root=artifact_root,
+        install_monitor=install_monitor,
     )
+    install_monitor = monitor_session.monitor
 
     with trace_operation(
         "deploy",
@@ -161,30 +128,13 @@ def run_deploy(
         command=cmd,
         cwd=str(ANDROID_DIR),
     ) as rec:
-        monitor_thread.start()
-        popen_result = None
-        try:
-            with deploy_build_locked():
-                popen_result = popen_communicate_poll(
-                    cmd,
-                    cwd=str(ANDROID_DIR),
-                    timeout_s=timeout_s,
-                    should_stop=is_shutdown_requested,
-                    stream_output=True,
-                    stream_prefix="[deploy]",
-                )
-        finally:
-            stop_event.set()
-            monitor_thread.join(timeout=15)
-            if monitor_thread.is_alive():
-                logger.warning("安装监控线程在 15s 内未结束")
-
-        monitor_summary = ""
-        if monitor_results:
-            monitor_summary = monitor_results[0].summary()
-            logger.info("安装监控汇总: %s", monitor_summary)
-        elif install_monitor.result.polls or install_monitor.result.errors:
-            monitor_summary = install_monitor.result.summary()
+        popen_result = monitor_session.run_while(
+            lambda: _run_deploy_subprocess(cmd, timeout_s=timeout_s),
+        )
+        monitor_summary = summarize_monitor_result(
+            install_monitor,
+            monitor_session._results,
+        )
 
         assert popen_result is not None
         if popen_result.shutdown:
@@ -260,7 +210,7 @@ def run_deploy(
 
         if expected_package:
             try:
-                verify_package_on_device(expected_package, serial=serial)
+                _verify_package_on_device(adb, expected_package)
             except RuntimeError as e:
                 if monitor_summary:
                     raise RuntimeError(f"{e} | install_monitor: {monitor_summary}") from e
@@ -281,3 +231,15 @@ def run_deploy(
         install_monitor_summary=monitor_summary,
         merged_config_path=merged_final,
     )
+
+
+def _run_deploy_subprocess(cmd: list[str], *, timeout_s: float):
+    with deploy_build_locked():
+        return popen_communicate_poll(
+            cmd,
+            cwd=str(ANDROID_DIR),
+            timeout_s=timeout_s,
+            should_stop=is_shutdown_requested,
+            stream_output=True,
+            stream_prefix="[deploy]",
+        )

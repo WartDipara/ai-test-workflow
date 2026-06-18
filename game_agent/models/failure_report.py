@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AttemptFailureInsight(BaseModel):
@@ -21,7 +21,11 @@ class FailureDiagnosisReport(BaseModel):
     overall_verdict: str = Field("", description="最可能的失败类型/根因归类")
     confidence: Literal["high", "medium", "low"] = "medium"
     attempts: list[AttemptFailureInsight] = Field(default_factory=list)
-    gameturbo_log_analysis: str = Field("", description="结合完整/长日志的分析")
+    external_log_analysis: str = Field("", description="外部插件日志分析")
+    gameturbo_log_analysis: str = Field(
+        "",
+        description="兼容字段，与 external_log_analysis 同步",
+    )
     domain_and_routing_analysis: str = Field("", description="tunnel/direct/区域/ pending IP 等")
     screen_and_game_flow_analysis: str = Field("", description="黑屏、登录、超时、弹窗等")
     config_assessment: str = Field("", description="当前游戏 JSON 配置可能的问题")
@@ -41,6 +45,27 @@ class FailureDiagnosisReport(BaseModel):
         default_factory=list,
         description="证据不足、需补采的信息",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_external_log_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        ext = data.get("external_log_analysis")
+        legacy = data.get("gameturbo_log_analysis")
+        if ext and not legacy:
+            data["gameturbo_log_analysis"] = ext
+        elif legacy and not ext:
+            data["external_log_analysis"] = legacy
+        return data
+
+    @model_validator(mode="after")
+    def _mirror_external_log_fields(self) -> FailureDiagnosisReport:
+        if self.external_log_analysis and not self.gameturbo_log_analysis:
+            self.gameturbo_log_analysis = self.external_log_analysis
+        elif self.gameturbo_log_analysis and not self.external_log_analysis:
+            self.external_log_analysis = self.gameturbo_log_analysis
+        return self
 
     def to_markdown(self, *, gid: str, task_id: str, last_reason: str) -> str:
         lines = [
@@ -92,9 +117,9 @@ class FailureDiagnosisReport(BaseModel):
 
         lines.extend(
             [
-                "## GameTurbo log analysis",
+                "## External log analysis",
                 "",
-                self.gameturbo_log_analysis or "(none)",
+                self.external_log_analysis or self.gameturbo_log_analysis or "(none)",
                 "",
                 "## Domain and routing",
                 "",
@@ -146,7 +171,11 @@ class AttemptRoundDiagnosis(BaseModel):
     immediate_verdict: str = Field("", description="本轮最可能原因归类")
     confidence: Literal["high", "medium", "low"] = "medium"
     log_highlights: list[str] = Field(default_factory=list, description="3-8 条关键日志原文")
-    gameturbo_log_analysis: str = Field("", description="本轮 GameTurbo 日志分析")
+    external_log_analysis: str = Field("", description="本轮外部插件日志分析")
+    gameturbo_log_analysis: str = Field(
+        "",
+        description="兼容字段，与 external_log_analysis 同步",
+    )
     domain_and_routing_analysis: str = Field("", description="域名/隧道/直连/区域")
     screen_and_game_flow_analysis: str = Field("", description="画面与流程")
     config_assessment: str = Field("", description="配置问题评估")
@@ -160,6 +189,27 @@ class AttemptRoundDiagnosis(BaseModel):
         description="下一轮重试前或人工介入建议",
     )
     evidence_gaps: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_round_external_log_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        ext = data.get("external_log_analysis")
+        legacy = data.get("gameturbo_log_analysis")
+        if ext and not legacy:
+            data["gameturbo_log_analysis"] = ext
+        elif legacy and not ext:
+            data["external_log_analysis"] = legacy
+        return data
+
+    @model_validator(mode="after")
+    def _mirror_round_external_log_fields(self) -> AttemptRoundDiagnosis:
+        if self.external_log_analysis and not self.gameturbo_log_analysis:
+            self.gameturbo_log_analysis = self.external_log_analysis
+        elif self.gameturbo_log_analysis and not self.external_log_analysis:
+            self.external_log_analysis = self.gameturbo_log_analysis
+        return self
 
     def to_markdown(
         self,
@@ -203,9 +253,9 @@ class AttemptRoundDiagnosis(BaseModel):
         lines.extend(
             [
                 "",
-                "## GameTurbo log",
+                "## External log",
                 "",
-                self.gameturbo_log_analysis or "(none)",
+                self.external_log_analysis or self.gameturbo_log_analysis or "(none)",
                 "",
                 "## Domain and routing",
                 "",

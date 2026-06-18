@@ -25,6 +25,7 @@ ACTION_TO_TREE_NODE: dict[str, str] = {
     "adaptive_phase": "post_login.adaptive",
     "tap_enter_game": "enter.tap",
     "dynamic_action": "dynamic.explore",
+    "scene_action": "scene.explore",
     "free": "free.explore",
     "recover_from_failure": "recover_from_failure",
 }

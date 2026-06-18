@@ -19,7 +19,10 @@ from game_agent.models.launch_graph_state import (
     LaunchRouteTarget,
     facts_from_state,
 )
+from game_agent.graphs.static_priority import blocks_scene_routing
 from game_agent.services.dynamic_route_planner import has_active_dynamic_chain
+from game_agent.models.scene import SCENE_STRATEGY_IDS
+from game_agent.services.scene_strategies import is_pre_login_passive_wait
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +55,42 @@ def _adaptive_phase_failed(state: LaunchGraphState) -> bool:
     return bool(isinstance(bucket, dict) and bucket.get("failed"))
 
 
+def should_route_scene(state: LaunchGraphState, facts: LaunchFacts) -> bool:
+    """场景策略：对话/教程/加载等连续推进，优先于 adaptive/dynamic/free。"""
+    if state.get("in_game_confirmed"):
+        return False
+    if state.get("in_game_entry_passed"):
+        return False
+    if facts.login_blocking or facts.sub_account_blocking:
+        return False
+    if facts.initial_privacy_dialog:
+        return False
+    if blocks_scene_routing(state, facts):
+        return False
+    scene_id = str(state.get("scene_id") or facts.scene_id or "")
+    confidence = float(state.get("scene_confidence") or facts.scene_confidence or 0)
+    if is_pre_login_passive_wait(
+        state,
+        facts,
+        scene_id=scene_id,
+        confidence=confidence,
+    ):
+        return True
+    if not is_login_done(state):
+        return False
+    if state.get("scene_strategy_active"):
+        active = str(state.get("active_scene_strategy") or state.get("scene_id") or "")
+        if active in SCENE_STRATEGY_IDS:
+            return True
+    if scene_id in SCENE_STRATEGY_IDS and confidence >= 0.55:
+        return True
+    return False
+
+
 def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     """登录后可变 UI：由 AI 阶段模板处理，优先于 dynamic/check_in_game。"""
+    if should_route_scene(state, facts):
+        return False
     if not is_login_done(state):
         return False
     if state.get("in_game_confirmed"):
@@ -87,6 +124,8 @@ def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
 def should_route_dynamic(state: LaunchGraphState) -> bool:
     """动态链仍有待执行步骤。"""
     limits = launch_graph_limits_from_state(state)
+    if should_route_scene(state, facts_from_state(state)):
+        return False
     if should_route_adaptive(state, facts_from_state(state)):
         return False
     if state.get("in_game_entry_passed") and not state.get("in_game_confirmed"):
@@ -114,6 +153,8 @@ def should_route_free(
     if state.get("in_game_entry_passed"):
         return False
     if should_route_adaptive(state, facts):
+        return False
+    if should_route_scene(state, facts):
         return False
     if should_route_dynamic(state):
         return False
@@ -173,6 +214,14 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
         dfs_action = decision.action
         if dfs_action in _STATIC_BLOCKING_ACTIONS:
             target = dfs_action
+        elif should_route_scene(state, facts):
+            target = "scene_action"
+            logger.info(
+                "[LaunchGraph:route] scene_enter id=%s conf=%.2f strategy=%s",
+                state.get("scene_id"),
+                float(state.get("scene_confidence") or 0),
+                state.get("active_scene_strategy"),
+            )
         elif should_route_adaptive(state, facts):
             target = "adaptive_phase"
             logger.info(

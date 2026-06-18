@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from game_agent.models.run_failure import classify_failure
 from game_agent.services.gameturbo_log import (
@@ -10,6 +13,7 @@ from game_agent.services.gameturbo_log import (
 )
 from game_agent.services.gameturbo_log_health import assess_gameturbo_log_health
 from game_agent.controllers.network_anomaly_coordinator import (
+    NetworkAnomalyCoordinator,
     format_confirmed_network_anomaly,
     format_confirmed_vision_ocr_anomaly,
 )
@@ -150,6 +154,25 @@ def test_legacy_observer_message_still_retryable() -> None:
 
 def test_parse_percent_from_progress_text() -> None:
     assert parse_percent_from_progress_text("45%") == 45
+
+
+def test_network_anomaly_ocr_poll_only_frequent_for_download_stages(tmp_path: Path) -> None:
+    cfg = SimpleNamespace(
+        network_anomaly=SimpleNamespace(use_ocr_poll=True, poll_interval_s=5.0),
+    )
+    coord = NetworkAnomalyCoordinator(
+        adb=MagicMock(),
+        app_config=cfg,  # type: ignore[arg-type]
+        artifact_root=tmp_path,
+    )
+
+    assert coord._should_run_ocr_poll("resource_download") is True
+    assert coord._should_run_ocr_poll("loading") is True
+
+    assert coord._should_run_ocr_poll("character_creation") is True
+    assert coord._should_run_ocr_poll("character_creation") is False
+    coord._last_passive_ocr_monotonic -= 31.0
+    assert coord._should_run_ocr_poll("character_creation") is True
 
 
 def test_tail_gameturbo_log_lines(tmp_path) -> None:
