@@ -6,6 +6,7 @@ import logging
 import re
 
 from game_agent.graphs.launch_tree import TreeTrace, launch_dfs_next
+from game_agent.graphs.launch_limits import launch_graph_limits_from_state
 from game_agent.graphs.launch_state_store import (
     is_login_done,
     is_privacy_checked,
@@ -13,11 +14,6 @@ from game_agent.graphs.launch_state_store import (
 )
 from game_agent.graphs.state_tree import StateTreeDecision
 from game_agent.models.launch_graph_state import (
-    MAX_DYNAMIC_NO_PROGRESS,
-    MAX_DYNAMIC_ROUNDS,
-    MAX_FREE_NO_PROGRESS_ROUNDS,
-    MAX_FREE_ROUNDS,
-    MAX_NODE_ATTEMPTS,
     LaunchFacts,
     LaunchGraphState,
     LaunchRouteTarget,
@@ -50,6 +46,12 @@ def _check_in_game_failed(state: LaunchGraphState) -> bool:
     return "enter.check_in_game" in failed or "check_in_game" in failed
 
 
+def _adaptive_phase_failed(state: LaunchGraphState) -> bool:
+    failed = state.get("failed_nodes") or {}
+    bucket = failed.get("adaptive_phase")
+    return bool(isinstance(bucket, dict) and bucket.get("failed"))
+
+
 def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     """登录后可变 UI：由 AI 阶段模板处理，优先于 dynamic/check_in_game。"""
     if not is_login_done(state):
@@ -59,6 +61,11 @@ def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     if state.get("in_game_entry_passed"):
         return False
     if state.get("adaptive_flow_done"):
+        return False
+    limits = launch_graph_limits_from_state(state)
+    if int(state.get("adaptive_rounds") or 0) >= limits.max_adaptive_rounds:
+        return False
+    if _adaptive_phase_failed(state):
         return False
     if facts.login_blocking or facts.sub_account_blocking:
         return False
@@ -79,15 +86,16 @@ def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
 
 def should_route_dynamic(state: LaunchGraphState) -> bool:
     """动态链仍有待执行步骤。"""
+    limits = launch_graph_limits_from_state(state)
     if should_route_adaptive(state, facts_from_state(state)):
         return False
     if state.get("in_game_entry_passed") and not state.get("in_game_confirmed"):
         return False
     if state.get("dynamic_failed"):
         return False
-    if int(state.get("dynamic_rounds") or 0) >= MAX_DYNAMIC_ROUNDS:
+    if int(state.get("dynamic_rounds") or 0) >= limits.max_dynamic_rounds:
         return False
-    if int(state.get("dynamic_no_progress") or 0) >= MAX_DYNAMIC_NO_PROGRESS:
+    if int(state.get("dynamic_no_progress") or 0) >= limits.max_dynamic_no_progress:
         return False
     return has_active_dynamic_chain(state)
 
@@ -98,6 +106,7 @@ def should_route_free(
     decision: StateTreeDecision[LaunchRouteTarget],
 ) -> bool:
     """登录完成后、仍未进游戏时，是否进入 free 兜底节点。"""
+    limits = launch_graph_limits_from_state(state)
     if not is_login_done(state):
         return False
     if state.get("in_game_confirmed"):
@@ -108,9 +117,9 @@ def should_route_free(
         return False
     if should_route_dynamic(state):
         return False
-    if int(state.get("free_rounds") or 0) >= MAX_FREE_ROUNDS:
+    if int(state.get("free_rounds") or 0) >= limits.max_free_rounds:
         return False
-    if int(state.get("free_no_progress_rounds") or 0) >= MAX_FREE_NO_PROGRESS_ROUNDS:
+    if int(state.get("free_no_progress_rounds") or 0) >= limits.max_free_no_progress_rounds:
         return False
     if facts.login_blocking or facts.sub_account_blocking:
         return False
@@ -146,6 +155,7 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
     elif state.get("in_game_confirmed"):
         target = "end"
     else:
+        limits = launch_graph_limits_from_state(state)
         logger.info(
             "[LaunchGraph:route] login_flags account_filled=%s password_filled=%s "
             "login_submitted=%s login_done=%s",
@@ -191,7 +201,7 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
                 decision.reason[:120],
                 int(state.get("free_rounds") or 0),
             )
-        elif node_attempts(state, "recover_from_failure") >= MAX_NODE_ATTEMPTS:
+        elif node_attempts(state, "recover_from_failure") >= limits.max_node_attempts:
             target = "end"
         else:
             target = "recover_from_failure"

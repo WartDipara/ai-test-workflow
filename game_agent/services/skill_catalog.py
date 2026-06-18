@@ -61,8 +61,3 @@ def read_repo_skill(skill_id: str, *, max_chars: int = 48_000) -> str:
     if len(text) > max_chars:
         return text[:max_chars] + "\n…[skill truncated; prefer live OCR/tools]"
     return text
-
-
-def read_login_flow_guide(*, max_chars: int = 24_000) -> str:
-    """兼容：等同 read_repo_skill('game_launch_ocr')。"""
-    return read_repo_skill("game_launch_ocr", max_chars=max_chars)

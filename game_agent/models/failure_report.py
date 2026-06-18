@@ -44,96 +44,96 @@ class FailureDiagnosisReport(BaseModel):
 
     def to_markdown(self, *, gid: str, task_id: str, last_reason: str) -> str:
         lines = [
-            "# GameTurbo 自动化测试失败诊断报告（AI）",
+            "# GameTurbo Automated Test Failure Report (AI)",
             "",
             f"- **gid**: {gid}",
             f"- **task_id**: {task_id}",
-            f"- **置信度**: {self.confidence}",
-            f"- **编排器最后记录**: {last_reason}",
+            f"- **confidence**: {self.confidence}",
+            f"- **orchestrator last reason**: {last_reason}",
             "",
-            "## 执行摘要",
+            "## Executive summary",
             "",
-            self.executive_summary or "（无）",
+            self.executive_summary or "(none)",
             "",
-            "## 总体判断",
+            "## Overall verdict",
             "",
-            self.overall_verdict or "（无）",
+            self.overall_verdict or "(none)",
             "",
-            "## 分轮次情况",
+            "## Per-attempt summary",
             "",
         ]
         if not self.attempts:
-            lines.append("（无分轮数据）\n")
+            lines.append("(no per-attempt data)\n")
         for item in self.attempts:
             lines.extend(
                 [
-                    f"### 第 {item.attempt} 轮",
+                    f"### Attempt {item.attempt}",
                     "",
-                    f"- **阶段**: {item.failure_stage or 'unknown'}",
-                    f"- **触发原因**: {item.immediate_trigger or '（无）'}",
+                    f"- **stage**: {item.failure_stage or 'unknown'}",
+                    f"- **trigger**: {item.immediate_trigger or '(none)'}",
                     "",
-                    "**日志要点**",
+                    "**Log highlights**",
                     "",
                 ],
             )
             if item.log_highlights:
                 lines.extend(f"- {line}" for line in item.log_highlights)
             else:
-                lines.append("- （无）")
+                lines.append("- (none)")
             lines.extend(
                 [
                     "",
-                    f"**画面**: {item.screen_summary or '（无）'}",
+                    f"**Screen**: {item.screen_summary or '(none)'}",
                     "",
-                    f"**域名/路由**: {item.domain_summary or '（无）'}",
+                    f"**Domain/routing**: {item.domain_summary or '(none)'}",
                     "",
                 ],
             )
 
         lines.extend(
             [
-                "## GameTurbo 日志分析",
+                "## GameTurbo log analysis",
                 "",
-                self.gameturbo_log_analysis or "（无）",
+                self.gameturbo_log_analysis or "(none)",
                 "",
-                "## 域名与路由",
+                "## Domain and routing",
                 "",
-                self.domain_and_routing_analysis or "（无）",
+                self.domain_and_routing_analysis or "(none)",
                 "",
-                "## 画面与游戏流程",
+                "## Screen and game flow",
                 "",
-                self.screen_and_game_flow_analysis or "（无）",
+                self.screen_and_game_flow_analysis or "(none)",
                 "",
-                "## 配置评估",
+                "## Config assessment",
                 "",
-                self.config_assessment or "（无）",
+                self.config_assessment or "(none)",
                 "",
-                "## 建议人工排查步骤",
+                "## Recommended manual triage steps",
                 "",
             ],
         )
         if self.human_triage_steps:
             lines.extend(f"{i}. {step}" for i, step in enumerate(self.human_triage_steps, 1))
         else:
-            lines.append("（无）")
+            lines.append("(none)")
 
-        lines.extend(["", "## 建议配置修改（供人工）", ""])
+        lines.extend(["", "## Suggested config changes (manual)", ""])
         if self.suggested_config_changes:
             lines.extend(f"- {item}" for item in self.suggested_config_changes)
         else:
-            lines.append("- （无）")
+            lines.append("- (none)")
 
-        lines.extend(["", "## 非配置类问题", ""])
+        lines.extend(["", "## Non-config issues", ""])
         if self.non_config_issues:
             lines.extend(f"- {item}" for item in self.non_config_issues)
         else:
-            lines.append("- （无）")
+            lines.append("- (none)")
 
-        lines.extend(["", "## 证据缺口", ""])
+        lines.extend(["", "## Evidence gaps", ""])
         if self.evidence_gaps:
             lines.extend(f"- {item}" for item in self.evidence_gaps)
         else:
-            lines.append("- （无）")
+            lines.append("- (none)")
 
         return "\n".join(lines) + "\n"
 
@@ -169,75 +169,79 @@ class AttemptRoundDiagnosis(BaseModel):
         reason: str,
         will_retry: bool,
     ) -> str:
-        next_hint = "编排器将自动进入下一轮重试" if will_retry else "此为最后一轮或已关闭重试"
+        next_hint = (
+            "Orchestrator will auto-retry after this round"
+            if will_retry
+            else "Final attempt or retries disabled"
+        )
         lines = [
-            "# 本轮失败诊断报告（AI）",
+            "# Attempt Failure Report (AI)",
             "",
-            f"- **第 {attempt} 轮**",
+            f"- **attempt**: {attempt}",
             f"- **gid**: {gid}",
-            f"- **触发原因**: {reason}",
-            f"- **后续**: {next_hint}",
-            f"- **置信度**: {self.confidence}",
-            f"- **阶段**: {self.failure_stage or 'unknown'}",
+            f"- **trigger reason**: {reason}",
+            f"- **next**: {next_hint}",
+            f"- **confidence**: {self.confidence}",
+            f"- **stage**: {self.failure_stage or 'unknown'}",
             "",
-            "## 本轮摘要",
+            "## Round summary",
             "",
-            self.round_summary or "（无）",
+            self.round_summary or "(none)",
             "",
-            "## 判断",
+            "## Verdict",
             "",
-            self.immediate_verdict or "（无）",
+            self.immediate_verdict or "(none)",
             "",
-            "## 日志要点",
+            "## Log highlights",
             "",
         ]
         if self.log_highlights:
             lines.extend(f"- {line}" for line in self.log_highlights)
         else:
-            lines.append("- （无）")
+            lines.append("- (none)")
 
         lines.extend(
             [
                 "",
-                "## GameTurbo 日志",
+                "## GameTurbo log",
                 "",
-                self.gameturbo_log_analysis or "（无）",
+                self.gameturbo_log_analysis or "(none)",
                 "",
-                "## 域名与路由",
+                "## Domain and routing",
                 "",
-                self.domain_and_routing_analysis or "（无）",
+                self.domain_and_routing_analysis or "(none)",
                 "",
-                "## 画面与流程",
+                "## Screen and flow",
                 "",
-                self.screen_and_game_flow_analysis or "（无）",
+                self.screen_and_game_flow_analysis or "(none)",
                 "",
-                "## 配置评估",
+                "## Config assessment",
                 "",
-                self.config_assessment or "（无）",
+                self.config_assessment or "(none)",
                 "",
-                "## Modify 阶段说明",
+                "## Modify stage notes",
                 "",
-                self.modify_stage_notes or "（未执行或未写入补丁）",
+                self.modify_stage_notes or "(not run or no patch written)",
                 "",
-                "## 建议操作",
+                "## Suggested actions",
                 "",
             ],
         )
         if self.suggested_actions:
             lines.extend(f"- {item}" for item in self.suggested_actions)
         else:
-            lines.append("- （无）")
+            lines.append("- (none)")
 
-        lines.extend(["", "## 人工排查步骤", ""])
+        lines.extend(["", "## Manual triage steps", ""])
         if self.human_triage_steps:
             lines.extend(f"{i}. {step}" for i, step in enumerate(self.human_triage_steps, 1))
         else:
-            lines.append("（无）")
+            lines.append("(none)")
 
-        lines.extend(["", "## 证据缺口", ""])
+        lines.extend(["", "## Evidence gaps", ""])
         if self.evidence_gaps:
             lines.extend(f"- {item}" for item in self.evidence_gaps)
         else:
-            lines.append("- （无）")
+            lines.append("(none)")
 
         return "\n".join(lines) + "\n"

@@ -136,6 +136,89 @@ class MolmopointSection(BaseModel):
         return self.enabled and bool((self.base_url or "").strip())
 
 
+class LaunchGraphSection(BaseModel):
+    """LangGraph 进游戏流程：轮次上限与无进展熔断（可在 settings.yaml 手动调参）。"""
+
+    max_node_attempts: int = Field(
+        3,
+        ge=1,
+        le=20,
+        description="静态节点（登录、隐私等）及 recover_from_failure 最大尝试次数。",
+    )
+    max_graph_iterations: int = Field(
+        120,
+        ge=20,
+        le=500,
+        description="classify_screen 外层循环最大轮次，防止整图死循环。",
+    )
+    max_free_rounds: int = Field(
+        8,
+        ge=1,
+        le=50,
+        description="free 兜底节点最大轮次。",
+    )
+    max_free_no_progress_rounds: int = Field(
+        3,
+        ge=1,
+        le=20,
+        description="free 连续无 UI 进展轮次上限。",
+    )
+    max_free_same_action: int = Field(
+        2,
+        ge=1,
+        le=10,
+        description="free 连续相同 tap 动作后强制 wait 的阈值。",
+    )
+    max_dynamic_rounds: int = Field(
+        8,
+        ge=1,
+        le=50,
+        description="dynamic_action 启发式链最大轮次。",
+    )
+    max_dynamic_no_progress: int = Field(
+        3,
+        ge=1,
+        le=20,
+        description="dynamic 连续无屏幕指纹变化轮次上限。",
+    )
+    max_dynamic_step_attempts: int = Field(
+        2,
+        ge=1,
+        le=10,
+        description="dynamic 链中单步最大重试次数。",
+    )
+    max_stability_observe_rounds: int = Field(
+        16,
+        ge=4,
+        le=60,
+        description="stability_observe 最大轮次。",
+    )
+    max_adaptive_rounds: int = Field(
+        12,
+        ge=1,
+        le=50,
+        description="adaptive_phase 单轮子图最大轮次。",
+    )
+    max_adaptive_no_progress: int = Field(
+        3,
+        ge=1,
+        le=20,
+        description="adaptive 连续无进展/重复 phase 轮次上限。",
+    )
+    max_adaptive_replan: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="adaptive stall 后允许 replan 次数，耗尽则失败退出。",
+    )
+    adaptive_min_confidence: float = Field(
+        0.55,
+        ge=0.0,
+        le=1.0,
+        description="adaptive tap/press_back 最低置信度，低于则降级为 wait。",
+    )
+
+
 class ExecutorSection(BaseModel):
     """LangGraph 进游戏流程：开局等待与登录填表参数。"""
 
@@ -487,6 +570,7 @@ class AppConfig(BaseModel):
     ocr: OcrSection = Field(default_factory=OcrSection)
     molmopoint: MolmopointSection = Field(default_factory=MolmopointSection)
     executor: ExecutorSection = Field(default_factory=ExecutorSection)
+    launch_graph: LaunchGraphSection = Field(default_factory=LaunchGraphSection)
     game: GameSection
     gameturbo: GameTurboSection = Field(default_factory=GameTurboSection)
     credentials: CredentialsSection = Field(default_factory=CredentialsSection)

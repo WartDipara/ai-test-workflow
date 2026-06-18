@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 
 from game_agent.graphs.launch_deps import LaunchGraphDeps
 from game_agent.graphs.launch_facts import (
@@ -19,6 +20,7 @@ from game_agent.graphs.launch_facts import (
     needs_sync_interpretation,
 )
 from game_agent.graphs.launch_routing import plan_route
+from game_agent.graphs.launch_limits import launch_graph_limits_from_state, seed_launch_graph_limits
 from game_agent.graphs.launch_state_store import (
     clear_failed_node,
     get_last_ocr,
@@ -42,14 +44,6 @@ from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.services.screen_interpreter import interpret_launch_screen
 from game_agent.services.node_verifier import verify_stage_exit
 from game_agent.models.launch_graph_state import (
-    MAX_DYNAMIC_NO_PROGRESS,
-    MAX_DYNAMIC_ROUNDS,
-    MAX_DYNAMIC_STEP_ATTEMPTS,
-    MAX_FREE_NO_PROGRESS_ROUNDS,
-    MAX_FREE_ROUNDS,
-    MAX_FREE_SAME_ACTION,
-    MAX_GRAPH_ITERATIONS,
-    MAX_STABILITY_OBSERVE_ROUNDS,
     LaunchGraphState,
     facts_from_state,
 )
@@ -96,8 +90,53 @@ logger = logging.getLogger(__name__)
 _CONTINUE_RE = re.compile(r"继续|确定|确认|retry|重试|continue|ok", re.IGNORECASE)
 
 
+async def _try_confirm_in_game_via_hud_ocr(
+    state: LaunchGraphState,
+    deps: LaunchGraphDeps,
+    *,
+    ocr_summary: str,
+    shot_path: Path,
+    round_id: int,
+    source: str,
+) -> bool:
+    """OCR HUD hit → multimodal in-game check. Returns True if entry passed."""
+    if state.get("in_game_entry_passed") or state.get("in_game_confirmed"):
+        return False
+    if not state.get("login_done"):
+        return False
+    trigger, hud_hits = should_trigger_in_game_hud_check(ocr_summary)
+    if not trigger:
+        return False
+    actx = deps.attempt_context
+    entry_result = await run_in_game_check_on_capture(
+        shot_path=shot_path,
+        ocr_summary=ocr_summary,
+        cfg=deps.app_config,
+        run_state=deps.run_state,
+        audit=deps.audit,
+        round_id=round_id,
+        sessions_restarted=actx.session_restarts if actx else 0,
+        session_index=actx.get_session_index() if actx else 1,
+        confirm_needed=1,
+        provisional=True,
+    )
+    if not entry_result.confirmed:
+        return False
+    state["in_game_entry_passed"] = True
+    state["free_in_game_ocr_hits"] = hud_hits
+    logger.info(
+        "[LaunchGraph:%s] HUD trigger confirmed, route stability_observe | %s",
+        source,
+        hud_hits,
+    )
+    return True
+
+
 async def observe_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
     state = dict(state)
+    if not state.get("launch_graph_limits"):
+        seed_launch_graph_limits(state, deps.app_config)
+    limits = launch_graph_limits_from_state(state)
     if deps.vision_queue is not None:
         state = deps.vision_queue.merge_if_ready(state)
     if deps.attempt_context is not None and deps.attempt_context.should_stop_executor():
@@ -106,9 +145,9 @@ async def observe_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Laun
         state["terminal_error"] = reason[:2000]
         return state  # type: ignore[return-value]
     state["iteration"] = int(state.get("iteration") or 0) + 1
-    if state["iteration"] >= MAX_GRAPH_ITERATIONS:
+    if state["iteration"] >= limits.max_graph_iterations:
         state["finished"] = True
-        state["terminal_error"] = f"launch graph iteration limit ({MAX_GRAPH_ITERATIONS})"
+        state["terminal_error"] = f"launch graph iteration limit ({limits.max_graph_iterations})"
         return state  # type: ignore[return-value]
     actx = deps.attempt_context
     if actx is not None:
@@ -187,7 +226,6 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
         state["facts"] = {}
         plan_route(state)
         return state  # type: ignore[return-value]
-    from pathlib import Path
 
     shot = Path(shot_path)
     bboxes = deserialize_bboxes(state.get("last_bboxes"))
@@ -226,6 +264,7 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
             facts,
             interp,
             ocr_has_sub_account_coords=ocr_has_sub_coords,
+            ocr_merged=ocr_merged,
         )
         if interpret_hash:
             state["interpret_screenshot_hash"] = interpret_hash
@@ -252,6 +291,16 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
         bboxes,
         ocr_summary=ocr_merged,
     )
+    if await _try_confirm_in_game_via_hud_ocr(
+        state,
+        deps,
+        ocr_summary=ocr_merged,
+        shot_path=shot,
+        round_id=int(state.get("iteration") or 0),
+        source="classify",
+    ):
+        plan_route(state)
+        return state  # type: ignore[return-value]
     plan_route(state)
     return state  # type: ignore[return-value]
 
@@ -622,6 +671,25 @@ async def check_in_game_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> 
         state["in_game_entry_passed"] = True
         mark_tree_node_done(state, node, evidence=result.message[:500])
         logger.info("[LaunchGraph:check_in_game] provisional entry passed, route stability_observe")
+    elif result.judgment is not None and (
+        result.ocr_creation_hits
+        or result.judgment.stage == "character_creation"
+        or "character_creation" in (result.judgment.blockers or [])
+    ):
+        from game_agent.models.launch_graph_state import facts_from_state
+
+        facts = facts_from_state(state)
+        state["facts"] = facts.model_copy(
+            update={"character_creation_blocking": True},
+        ).model_dump()
+        mark_tree_node_done(
+            state,
+            node,
+            evidence=(result.message or "character_creation, continue flow")[:500],
+        )
+        logger.info(
+            "[LaunchGraph:check_in_game] not in game (character_creation), route adaptive/dynamic",
+        )
     else:
         mark_tree_node_failed(state, node, result.message[:500])
     return state  # type: ignore[return-value]
@@ -638,8 +706,9 @@ async def stability_observe_node(state: LaunchGraphState, deps: LaunchGraphDeps)
 
     stability_rounds = int(state.get("stability_rounds") or 0) + 1
     state["stability_rounds"] = stability_rounds
-    if stability_rounds > MAX_STABILITY_OBSERVE_ROUNDS:
-        err = f"stability max rounds ({MAX_STABILITY_OBSERVE_ROUNDS})"
+    limits = launch_graph_limits_from_state(state)
+    if stability_rounds > limits.max_stability_observe_rounds:
+        err = f"stability max rounds ({limits.max_stability_observe_rounds})"
         mark_tree_node_failed(state, node, err)
         state["finished"] = True
         state["terminal_error"] = err
@@ -772,6 +841,7 @@ async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) ->
     """执行动态子树链当前步骤（attempt 内有序链表）。"""
     state = dict(state)
     node = "dynamic_action"
+    limits = launch_graph_limits_from_state(state)
     step = get_current_step(state)
     if step is None:
         mark_tree_node_failed(state, node, "no active dynamic step")
@@ -780,15 +850,15 @@ async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) ->
 
     dynamic_rounds = int(state.get("dynamic_rounds") or 0) + 1
     state["dynamic_rounds"] = dynamic_rounds
-    if dynamic_rounds > MAX_DYNAMIC_ROUNDS:
-        mark_tree_node_failed(state, node, f"dynamic max rounds ({MAX_DYNAMIC_ROUNDS})")
+    if dynamic_rounds > limits.max_dynamic_rounds:
+        mark_tree_node_failed(state, node, f"dynamic max rounds ({limits.max_dynamic_rounds})")
         clear_dynamic_chain(state, failed=True)
-        logger.warning("[LaunchGraph:dynamic] dynamic_exit max_rounds=%d", MAX_DYNAMIC_ROUNDS)
+        logger.warning("[LaunchGraph:dynamic] dynamic_exit max_rounds=%d", limits.max_dynamic_rounds)
         return state  # type: ignore[return-value]
 
     no_progress = int(state.get("dynamic_no_progress") or 0)
-    if no_progress >= MAX_DYNAMIC_NO_PROGRESS:
-        mark_tree_node_failed(state, node, f"dynamic no progress ({MAX_DYNAMIC_NO_PROGRESS})")
+    if no_progress >= limits.max_dynamic_no_progress:
+        mark_tree_node_failed(state, node, f"dynamic no progress ({limits.max_dynamic_no_progress})")
         clear_dynamic_chain(state, failed=True)
         logger.warning("[LaunchGraph:dynamic] dynamic_exit no_progress=%d", no_progress)
         return state  # type: ignore[return-value]
@@ -842,7 +912,7 @@ async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) ->
         mark_step_attempt(state, step, done=False)
         state["dynamic_no_progress"] = no_progress + 1
         cur = get_current_step(state)
-        if cur is not None and cur.attempts >= MAX_DYNAMIC_STEP_ATTEMPTS:
+        if cur is not None and cur.attempts >= limits.max_dynamic_step_attempts:
             logger.warning(
                 "[LaunchGraph:dynamic] step_failed id=%s attempts=%d, clearing chain",
                 step.id,
@@ -881,18 +951,19 @@ async def free_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGra
     """登录后兜底：OCR+多模态规划单步动作，推进创角/选角/加载等可变流程。"""
     state = dict(state)
     node = "free"
+    limits = launch_graph_limits_from_state(state)
     free_rounds = int(state.get("free_rounds") or 0) + 1
     state["free_rounds"] = free_rounds
 
-    if free_rounds > MAX_FREE_ROUNDS:
-        mark_tree_node_failed(state, node, f"free max rounds ({MAX_FREE_ROUNDS})")
-        state["recover_hint"] = f"free exhausted after {MAX_FREE_ROUNDS} rounds"
-        logger.warning("[LaunchGraph:free] free_exit max_rounds=%d", MAX_FREE_ROUNDS)
+    if free_rounds > limits.max_free_rounds:
+        mark_tree_node_failed(state, node, f"free max rounds ({limits.max_free_rounds})")
+        state["recover_hint"] = f"free exhausted after {limits.max_free_rounds} rounds"
+        logger.warning("[LaunchGraph:free] free_exit max_rounds=%d", limits.max_free_rounds)
         return state  # type: ignore[return-value]
 
     no_progress = int(state.get("free_no_progress_rounds") or 0)
-    if no_progress >= MAX_FREE_NO_PROGRESS_ROUNDS:
-        mark_tree_node_failed(state, node, f"free no progress ({MAX_FREE_NO_PROGRESS_ROUNDS})")
+    if no_progress >= limits.max_free_no_progress_rounds:
+        mark_tree_node_failed(state, node, f"free no progress ({limits.max_free_no_progress_rounds})")
         state["recover_hint"] = "free stalled without UI progress"
         logger.warning("[LaunchGraph:free] free_exit no_progress=%d", no_progress)
         return state  # type: ignore[return-value]
@@ -927,35 +998,22 @@ async def free_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGra
     state["last_ocr_summary"] = ocr_summary
     state["last_bboxes"] = serialize_bboxes(bboxes)
 
-    trigger, hud_hits = should_trigger_in_game_hud_check(ocr_summary)
-    if trigger:
-        entry_result = await run_in_game_check_on_capture(
-            shot_path=shot,
-            ocr_summary=ocr_summary,
-            cfg=deps.app_config,
-            run_state=deps.run_state,
-            audit=deps.audit,
-            round_id=free_rounds,
-            sessions_restarted=actx.session_restarts if actx else 0,
-            session_index=actx.get_session_index() if actx else 1,
-            confirm_needed=1,
-            provisional=True,
+    if await _try_confirm_in_game_via_hud_ocr(
+        state,
+        deps,
+        ocr_summary=ocr_summary,
+        shot_path=shot,
+        round_id=free_rounds,
+        source="free",
+    ):
+        mark_tree_node_done(
+            state,
+            node,
+            artifact=str(shot.resolve()),
+            evidence=f"hud_trigger:{','.join(state.get('free_in_game_ocr_hits') or [])}",
         )
-        if entry_result.confirmed:
-            state["in_game_entry_passed"] = True
-            state["free_in_game_ocr_hits"] = hud_hits
-            mark_tree_node_done(
-                state,
-                node,
-                artifact=str(shot.resolve()),
-                evidence=f"hud_trigger:{','.join(hud_hits)}",
-            )
-            state["recover_hint"] = f"free:in_game_entry_passed:{','.join(hud_hits)}"
-            logger.info(
-                "[LaunchGraph:free] HUD trigger confirmed, route stability_observe | %s",
-                hud_hits,
-            )
-            return state  # type: ignore[return-value]
+        state["recover_hint"] = f"free:in_game_entry_passed:{','.join(state.get('free_in_game_ocr_hits') or [])}"
+        return state  # type: ignore[return-value]
 
     prior_sig = str(state.get("free_last_action_signature") or "")
     same_streak = int(state.get("free_same_action_streak") or 0)
@@ -980,7 +1038,7 @@ async def free_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGra
         same_streak = 1
     state["free_same_action_streak"] = same_streak
 
-    if same_streak >= MAX_FREE_SAME_ACTION and plan.action in ("tap_xy", "tap_text"):
+    if same_streak >= limits.max_free_same_action and plan.action in ("tap_xy", "tap_text"):
         logger.info(
             "[LaunchGraph:free] same action x%d, switch to wait | %s",
             same_streak,

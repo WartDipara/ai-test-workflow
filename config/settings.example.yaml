@@ -53,6 +53,22 @@ executor:
   credential_fill_max_distance_px: 150    # 节点中心与 OCR 点击点最大允许距离
   credential_fill_retry_on_verify_fail: true
 
+# LangGraph 进游戏：轮次上限与无进展熔断（省略则使用下列默认值）
+launch_graph:
+  max_node_attempts: 3
+  max_graph_iterations: 120
+  max_free_rounds: 8
+  max_free_no_progress_rounds: 3
+  max_free_same_action: 2
+  max_dynamic_rounds: 8
+  max_dynamic_no_progress: 3
+  max_dynamic_step_attempts: 2
+  max_stability_observe_rounds: 16
+  max_adaptive_rounds: 12
+  max_adaptive_no_progress: 3
+  max_adaptive_replan: 3
+  adaptive_min_confidence: 0.55
+
 game:
   # 包名/启动 Activity 由 TaskRuntime 从 APK 解析，勿写入本文件
   timeout_s: 1200.0

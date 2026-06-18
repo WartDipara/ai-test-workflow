@@ -40,4 +40,4 @@ Executor **不**在运行时加载 skill；文档供人工排障与 AI 分析 Mo
 
 | 名称 | 说明 |
 |------|------|
-| `read_login_flow_guide` | 等同 `read_repo_skill("game_launch_ocr")` |
+| `read_repo_skill("game_launch_ocr")` | LangGraph 进游戏排障文档 |

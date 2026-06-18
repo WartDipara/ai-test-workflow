@@ -83,3 +83,22 @@ def test_merge_announcement_and_character_creation() -> None:
         ScreenInterpretation(stage="character_creation", blocking=True),
     )
     assert cc.character_creation_blocking is True
+
+
+def test_merge_remaps_sub_account_to_character_select_when_enter_world() -> None:
+    ocr = "LV.3 休假初学者 Warrior Enter World Click to Create Role"
+    facts = LaunchFacts(classify_reason=ocr)
+    interp = ScreenInterpretation(
+        stage="sub_account_select",
+        blocking=True,
+        tap_target=TapTarget(x=207, y=1278, label="LV.3 休假初学者"),
+        completion_signals=["Enter World"],
+    )
+    merged = merge_interpretation_into_facts(
+        facts,
+        interp,
+        ocr_merged=ocr,
+    )
+    assert merged.character_creation_blocking is True
+    assert merged.sub_account_blocking is False
+    assert merged.sub_account_action_xy is None

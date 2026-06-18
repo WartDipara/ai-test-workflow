@@ -336,11 +336,12 @@ tests/                      # pytest 单元测试
 # 全量
 python -m pytest tests/ -v
 
-# 单个文件
-python -m pytest tests/test_privacy_checkbox.py -v
+# 单个文件（checkbox / OCR，首次较慢）
+python -m pytest tests/test_checkbox_local_image.py -v
+python -m pytest tests/test_vision_checkbox_judgment.py -v
 
 # 单个用例
-python -m pytest tests/test_privacy_checkbox.py::test_roi_mean_abs_diff_detects_checked_on_fixture -v
+python -m pytest tests/test_checkbox_local_image.py::test_privacy_checkbox_locate_tap_alignment_on_image -v
 
 # 静态检查
 ruff check game_agent tests

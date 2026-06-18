@@ -10,7 +10,7 @@ from game_agent.models.vision_tool_result import VisionToolErrorCode, format_vis
 from game_agent.modules.run_context import AttemptContext
 from game_agent.services.adb_service import AdbService
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.utils.ocr_util import extract_text_with_bounds
+from game_agent.utils.ocr_util import extract_text_with_bounds, run_ocr_frame
 from game_agent.workers.vision_worker import VisionWorker
 
 logger = logging.getLogger(__name__)
@@ -147,4 +147,114 @@ async def run_analyze_screen(
     return format_vision_tool_response(
         error_code=VisionToolErrorCode.OK,
         data=data,
+    )
+
+
+async def run_dismiss_blank_modal(
+    *,
+    adb: AdbService,
+    cfg: AppConfig,
+    artifact_root: Path,
+    round_id: int,
+    reason: str = "",
+    attempt_context: AttemptContext | None = None,
+    audit: RunAuditLogger | None = None,
+) -> str:
+    """
+    Tool: dismiss a tap-blank-to-close modal using OCR + geometry (no LLM coords).
+    """
+    ts = datetime.now().strftime("%H%M%S_%f")
+    shot_path = artifact_root / f"dismiss_blank_{round_id:03d}_{ts}.png"
+    try:
+        adb.screencap_png(shot_path)
+    except Exception as e:
+        return format_vision_tool_response(
+            error_code=VisionToolErrorCode.API_ERROR,
+            error_message=f"screencap failed: {e}",
+        )
+
+    try:
+        dw, dh = adb.touch_size()
+        ocr_summary, bboxes = run_ocr_frame(
+            shot_path,
+            device_w=dw,
+            device_h=dh,
+            worker_key=adb.device_serial,
+        )
+    except Exception as e:
+        return format_vision_tool_response(
+            error_code=VisionToolErrorCode.OCR_FAILED,
+            error_message=str(e)[:500],
+            data={"screenshot": str(shot_path)},
+        )
+
+    from game_agent.models.phase_template import PhaseSpec
+    from game_agent.services.dismiss_blank_modal import (
+        execute_dismiss_blank_modal,
+        ocr_indicates_blank_dismiss,
+        plan_blank_area_dismiss,
+    )
+
+    plan = plan_blank_area_dismiss(
+        ocr_summary=ocr_summary,
+        bboxes=bboxes,
+        screen_w=dw,
+        screen_h=dh,
+    )
+    spec = PhaseSpec(action="dismiss_blank", phase_id="dismiss_blank_tool")
+    exec_msg, executed = execute_dismiss_blank_modal(
+        spec,
+        adb=adb,
+        sw=dw,
+        sh=dh,
+        ocr_summary=ocr_summary,
+        bboxes=bboxes,
+    )
+    if not executed:
+        return format_vision_tool_response(
+            error_code=VisionToolErrorCode.PARSE_ERROR,
+            error_message=exec_msg,
+            data={"screenshot": str(shot_path), "ocr_preview": ocr_summary[:800]},
+        )
+
+    adb.wait_seconds(0.8)
+    after_path = artifact_root / f"dismiss_blank_after_{round_id:03d}_{ts}.png"
+    adb.screencap_png(after_path)
+    try:
+        after_ocr, _ = run_ocr_frame(
+            after_path,
+            device_w=dw,
+            device_h=dh,
+            worker_key=adb.device_serial,
+        )
+    except Exception:
+        after_ocr = ""
+
+    hint_gone = plan is not None and not ocr_indicates_blank_dismiss(after_ocr)
+
+    if audit is not None:
+        audit.log_observer(
+            kind="dismiss_blank_modal",
+            message=reason[:200] or (plan.reason if plan else exec_msg[:120]),
+            round_id=round_id,
+            extra={
+                "tap": [plan.x, plan.y] if plan else [],
+                "method": plan.method if plan else "fallback",
+                "screenshot": str(shot_path),
+            },
+        )
+
+    return format_vision_tool_response(
+        error_code=VisionToolErrorCode.OK,
+        data={
+            "screenshot": str(shot_path),
+            "screenshot_after": str(after_path),
+            "tap_x": plan.x if plan else 0,
+            "tap_y": plan.y if plan else 0,
+            "method": plan.method if plan else "spec_fallback",
+            "hint_text": plan.hint_text if plan else "",
+            "hint_gone": hint_gone,
+            "exec_message": exec_msg[:200],
+            "ocr_preview": ocr_summary[:800],
+        },
     )

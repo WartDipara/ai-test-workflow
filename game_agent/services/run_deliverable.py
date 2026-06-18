@@ -161,7 +161,7 @@ def publish_failure_deliverable(
             "last_reason": last_reason[:4000],
             "attempts": attempt_summaries,
             "finished_at": datetime.now(tz=UTC).isoformat(),
-            "note": "未产出游戏配置文件；请优先查看 failure_report.md，其次 attempts/ 下各轮日志。",
+            "note": "No game config produced. See failure_report.md first, then logs under attempts/.",
             "failure_report_md": str((deliverable.root / "failure_report.md").resolve())
             if ai_report is not None
             else None,
@@ -169,18 +169,18 @@ def publish_failure_deliverable(
     )
 
     summary_lines = [
-        "# 测试失败摘要",
+        "# Test failure summary",
         "",
         f"- gid: {deliverable.gid}",
         f"- task_id: {deliverable.task_id}",
-        f"- 尝试次数: {len(attempt_artifact_roots)} / {max_retries}",
-        f"- 最后原因: {last_reason}",
+        f"- attempts: {len(attempt_artifact_roots)} / {max_retries}",
+        f"- last reason: {last_reason}",
         "",
-        "## 各轮产物",
+        "## Attempt artifacts",
     ]
     for item in attempt_summaries:
         summary_lines.append(
-            f"- 第 {item['retry']} 轮: {item['output_dir']}",
+            f"- attempt {item['retry']}: {item['output_dir']}",
         )
     (deliverable.root / "failure_summary.md").write_text(
         "\n".join(summary_lines) + "\n",

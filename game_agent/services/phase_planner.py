@@ -47,7 +47,7 @@ def parse_phase_spec_raw(raw: str) -> PhaseSpec | None:
     except (TypeError, ValueError):
         confidence = 0.0
     action = str(data.get("action", "none") or "none").strip().lower()
-    if action not in ("tap_xy", "wait", "press_back", "none"):
+    if action not in ("tap_xy", "wait", "press_back", "dismiss_blank", "none"):
         action = "none"
     try:
         x = int(data.get("x", 0) or 0)

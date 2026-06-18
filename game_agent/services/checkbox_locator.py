@@ -521,23 +521,3 @@ def locate_privacy_checkbox(
     )
 
 
-def locate_checkbox_via_ocr(
-    bboxes: list[OcrBbox],
-    screen_width: int,
-    screen_height: int,
-    step: int = 0,
-) -> tuple[int, int] | None:
-    """兼容旧调用：返回 (cx, cy)。"""
-    result = locate_privacy_checkbox(
-        bboxes,
-        screen_width,
-        screen_height,
-        step=step,
-    )
-    if result is None:
-        return None
-    return result.cx, result.cy
-
-
-# 兼容 agent 旧 import
-_TERMS_PATTERNS = (_TERMS_WEAK,)

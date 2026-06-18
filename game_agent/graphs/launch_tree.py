@@ -11,6 +11,7 @@ from game_agent.graphs.launch_state_store import (
     is_sub_account_selected,
     node_attempts,
 )
+from game_agent.graphs.launch_limits import launch_graph_limits_from_state
 from game_agent.models.launch_graph_state import (
     LaunchFacts,
     LaunchGraphState,
@@ -75,6 +76,12 @@ def _check_in_game_failed(s: LaunchGraphState) -> bool:
     return "enter.check_in_game" in failed or "check_in_game" in failed
 
 
+def _adaptive_phase_failed(s: LaunchGraphState) -> bool:
+    failed = s.get("failed_nodes") or {}
+    bucket = failed.get("adaptive_phase")
+    return bool(isinstance(bucket, dict) and bucket.get("failed"))
+
+
 def _needs_adaptive_phase(s: LaunchGraphState, f: LaunchFacts) -> bool:
     if not is_login_done(s):
         return False
@@ -83,6 +90,11 @@ def _needs_adaptive_phase(s: LaunchGraphState, f: LaunchFacts) -> bool:
     if s.get("in_game_entry_passed"):
         return False
     if s.get("adaptive_flow_done"):
+        return False
+    limits = launch_graph_limits_from_state(s)
+    if int(s.get("adaptive_rounds") or 0) >= limits.max_adaptive_rounds:
+        return False
+    if _adaptive_phase_failed(s):
         return False
     if f.login_blocking or f.sub_account_blocking:
         return False

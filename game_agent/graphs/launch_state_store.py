@@ -11,7 +11,7 @@ from game_agent.models.launch_graph_state import (
     node_attempts as _raw_node_attempts,
 )
 
-# LangGraph action → DFS 状态树 node.id（max_attempts / completed_nodes 统一用 tree id）
+# LangGraph action → DFS 状态树 node.id
 ACTION_TO_TREE_NODE: dict[str, str] = {
     "handle_initial_privacy_dialog": "privacy.initial_dialog",
     "atomic_login": "atomic_login",
@@ -31,7 +31,7 @@ ACTION_TO_TREE_NODE: dict[str, str] = {
 
 TREE_NODE_TO_ACTION: dict[str, str] = {v: k for k, v in ACTION_TO_TREE_NODE.items()}
 
-# 历史 completed_nodes 可能用 action 名写入，查找 attempts 时兼容
+# completed_nodes 可能存 action 名，查找 attempts 时做映射
 _LEGACY_NODE_ALIASES: dict[str, tuple[str, ...]] = {
     "privacy.initial_dialog": ("handle_initial_privacy_dialog",),
     "login.select_sub_account": ("select_sub_account",),

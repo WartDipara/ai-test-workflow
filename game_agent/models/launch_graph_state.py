@@ -24,19 +24,6 @@ LaunchRouteTarget = Literal[
     "end",
 ]
 
-MAX_NODE_ATTEMPTS = 3
-MAX_GRAPH_ITERATIONS = 120
-MAX_FREE_ROUNDS = 8
-MAX_FREE_NO_PROGRESS_ROUNDS = 3
-MAX_FREE_SAME_ACTION = 2
-MAX_DYNAMIC_ROUNDS = 8
-MAX_DYNAMIC_NO_PROGRESS = 3
-MAX_DYNAMIC_STEP_ATTEMPTS = 2
-MAX_STABILITY_OBSERVE_ROUNDS = 16
-MAX_ADAPTIVE_ROUNDS = 12
-MAX_ADAPTIVE_NO_PROGRESS = 3
-
-
 class LaunchNodeStatus(BaseModel):
     """单个图节点执行记录。"""
 
@@ -145,6 +132,7 @@ class LaunchGraphState(TypedDict, total=False):
     phase_entry_fingerprint: str
     phase_last_fingerprint: str
     phase_replan_count: int
+    launch_graph_limits: dict[str, Any]
 
 
 def empty_launch_graph_state() -> LaunchGraphState:
@@ -207,6 +195,7 @@ def empty_launch_graph_state() -> LaunchGraphState:
         phase_entry_fingerprint="",
         phase_last_fingerprint="",
         phase_replan_count=0,
+        launch_graph_limits={},
     )
 
 

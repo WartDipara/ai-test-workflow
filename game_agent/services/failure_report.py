@@ -202,6 +202,7 @@ Requirements:
 4. modify_stage_notes: if ai_patch_report non-empty, what changed and worth verifying next round
 5. suggested_actions: concrete next steps for retry or humans
 6. evidence_gaps: what is still missing
+7. Write all string fields in English
 
 Analyze **this attempt only** — not a multi-attempt executive summary.
 """
@@ -290,6 +291,7 @@ Output FailureDiagnosisReport:
 10. suggested_config_changes: manual direct_patterns/port_rules only (not default_action; cautious on direct)
 11. non_config_issues: scripts/device/game if not config
 12. evidence_gaps: missing logs/screenshots to conclude
+13. Write all string fields in English
 
 Final failure report for humans — no empty "retry will fix it" claims.
 """

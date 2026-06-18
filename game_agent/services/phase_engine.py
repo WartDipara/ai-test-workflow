@@ -7,8 +7,9 @@ import logging
 from datetime import datetime
 
 from game_agent.graphs.launch_deps import LaunchGraphDeps
-from game_agent.models.launch_graph_state import LaunchGraphState
+from game_agent.models.launch_graph_state import LaunchGraphState, facts_from_state
 from game_agent.models.phase_template import PhaseSpec, compute_phase_fingerprint
+from game_agent.models.settings import LaunchGraphSection
 from game_agent.services.adaptive_tree import (
     DecideOutcomeKind,
     adaptive_tree_trace,
@@ -25,16 +26,16 @@ from game_agent.services.adaptive_tree import (
     materialize_tree_node,
 )
 from game_agent.services.phase_completion import evaluate_phase_complete, execute_phase_action
+from game_agent.services.dismiss_blank_modal import execute_dismiss_blank_modal
 from game_agent.services.phase_planner import plan_phase_spec
-from game_agent.utils.ocr_util import run_ocr_frame, serialize_bboxes
+from game_agent.utils.ocr_util import deserialize_bboxes, run_ocr_frame, serialize_bboxes
 from game_agent.workers.vision_worker import VisionWorker
 
 logger = logging.getLogger(__name__)
 
-MAX_ADAPTIVE_ROUNDS = 12
-MAX_ADAPTIVE_NO_PROGRESS = 3
-MAX_ADAPTIVE_REPLAN = 3
-ADAPTIVE_MIN_CONFIDENCE = 0.55
+
+def _launch_limits(deps: LaunchGraphDeps) -> LaunchGraphSection:
+    return deps.app_config.launch_graph
 
 
 async def _capture_ocr(
@@ -97,6 +98,7 @@ async def _run_think_materialize(
     ocr_summary: str,
     rounds: int,
 ) -> LaunchGraphState:
+    limits = _launch_limits(deps)
     stall = int(state.get("adaptive_no_progress") or 0)
     stall_hint = ""
     if stall >= 1:
@@ -118,7 +120,11 @@ async def _run_think_materialize(
         state["recover_hint"] = "adaptive plan parse failed"
         return state  # type: ignore[return-value]
 
-    outcome = decide_phase_spec(state, planned, min_confidence=ADAPTIVE_MIN_CONFIDENCE)
+    outcome = decide_phase_spec(
+        state,
+        planned,
+        min_confidence=limits.adaptive_min_confidence,
+    )
 
     if outcome.kind == DecideOutcomeKind.FLOW_DONE:
         mark_adaptive_flow_done(state, evidence=outcome.spec.reason[:500] if outcome.spec else "adaptive skip")
@@ -135,10 +141,10 @@ async def _run_think_materialize(
                 message=outcome.reason[:200],
                 round_id=rounds,
             )
-        if int(state.get("adaptive_no_progress") or 0) >= MAX_ADAPTIVE_NO_PROGRESS:
+        if int(state.get("adaptive_no_progress") or 0) >= limits.max_adaptive_no_progress:
             state["phase_replan_count"] = int(state.get("phase_replan_count") or 0) + 1
             state["adaptive_no_progress"] = 0
-            if int(state["phase_replan_count"]) >= MAX_ADAPTIVE_REPLAN:
+            if int(state["phase_replan_count"]) >= limits.max_adaptive_replan:
                 mark_adaptive_parent_failed(state, "adaptive replan exhausted")
                 state["recover_hint"] = "adaptive stalled, fallback free"
         return state  # type: ignore[return-value]
@@ -183,6 +189,7 @@ async def _run_act_verify(
     sh: int,
     actx,
 ) -> LaunchGraphState:
+    limits = _launch_limits(deps)
     active = get_active_tree_node(state)
     spec = get_active_spec(state)
     if active is None or spec is None:
@@ -190,8 +197,20 @@ async def _run_act_verify(
         return state  # type: ignore[return-value]
 
     entry_fp = active.entry_fingerprint or str(state.get("phase_entry_fingerprint") or "")
-    exec_msg, action_executed = execute_phase_action(spec, adb=deps.adb, sw=sw, sh=sh)
-    if spec.action in ("tap_xy", "press_back") and action_executed:
+    if spec.action == "dismiss_blank":
+        facts = facts_from_state(state)
+        exec_msg, action_executed = execute_dismiss_blank_modal(
+            spec,
+            adb=deps.adb,
+            sw=sw,
+            sh=sh,
+            ocr_summary=str(state.get("last_ocr_summary") or ""),
+            bboxes=deserialize_bboxes(state.get("last_bboxes")),
+            enter_cta_xy=facts.enter_cta_xy,
+        )
+    else:
+        exec_msg, action_executed = execute_phase_action(spec, adb=deps.adb, sw=sw, sh=sh)
+    if spec.action in ("tap_xy", "press_back", "dismiss_blank") and action_executed:
         deps.adb.wait_seconds(0.8)
     elif spec.action == "wait" and action_executed:
         deps.adb.wait_seconds(0.2)
@@ -249,7 +268,7 @@ async def _run_act_verify(
     else:
         state["adaptive_no_progress"] = 0
 
-    if int(state.get("adaptive_no_progress") or 0) >= MAX_ADAPTIVE_NO_PROGRESS:
+    if int(state.get("adaptive_no_progress") or 0) >= limits.max_adaptive_no_progress:
         fail_active_tree_node(state, reason=f"stall on {active.node_id}")
         state["phase_replan_count"] = int(state.get("phase_replan_count") or 0) + 1
         state["adaptive_no_progress"] = 0
@@ -260,7 +279,7 @@ async def _run_act_verify(
                 message=active.node_id,
                 round_id=rounds,
             )
-        if int(state["phase_replan_count"]) >= MAX_ADAPTIVE_REPLAN:
+        if int(state["phase_replan_count"]) >= limits.max_adaptive_replan:
             mark_adaptive_parent_failed(state, "adaptive replan exhausted")
             state["recover_hint"] = "adaptive stalled, fallback free"
             return state  # type: ignore[return-value]
@@ -273,12 +292,16 @@ async def _run_act_verify(
 async def run_once(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
     """adaptive_phase 单轮：有 active 则 act→verify，否则 think→decide→materialize。"""
     state = dict(state)
+    limits = _launch_limits(deps)
     actx = deps.attempt_context
+
+    if state.get("adaptive_flow_done"):
+        return state  # type: ignore[return-value]
 
     rounds = int(state.get("adaptive_rounds") or 0) + 1
     state["adaptive_rounds"] = rounds
-    if rounds > MAX_ADAPTIVE_ROUNDS:
-        err = f"adaptive max rounds ({MAX_ADAPTIVE_ROUNDS})"
+    if rounds > limits.max_adaptive_rounds:
+        err = f"adaptive max rounds ({limits.max_adaptive_rounds})"
         mark_adaptive_parent_failed(state, err)
         state["recover_hint"] = err
         logger.warning("[PhaseEngine] %s", err)

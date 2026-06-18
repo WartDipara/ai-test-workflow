@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-ActionKind = Literal["tap_xy", "wait", "press_back", "none"]
+ActionKind = Literal["tap_xy", "wait", "press_back", "dismiss_blank", "none"]
 CompletionKind = Literal[
     "fingerprint_change",
     "ocr_contains",

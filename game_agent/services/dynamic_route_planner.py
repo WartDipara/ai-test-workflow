@@ -113,6 +113,21 @@ def build_dynamic_chain_heuristic(
                 reason="tap enter world after character selected",
             ),
         )
+    elif enter and (
+        facts.character_creation_blocking
+        or _CHAR_SLOT_RE.search(merged)
+    ):
+        steps.append(
+            DynamicActionStep(
+                id="enter_world",
+                action="tap_xy",
+                x=enter.cx,
+                y=enter.cy,
+                target_text=enter.text.strip(),
+                label="enter_world",
+                reason="tap enter world on character select screen",
+            ),
+        )
     elif enter:
         steps.append(
             DynamicActionStep(

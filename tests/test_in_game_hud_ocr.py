@@ -27,3 +27,12 @@ def test_should_trigger_with_hud_only() -> None:
     assert ok
     assert "任务" in hits
     assert "Inventory" in hits
+
+
+def test_match_english_hud_role_mall_case_insensitive() -> None:
+    hits = match_in_game_hud_ocr("role  skills  guild  mall  forging")
+    assert "Role" in hits
+    assert "Skills" in hits
+    assert "Guild" in hits
+    assert "Mall" in hits
+    assert "Forging" in hits

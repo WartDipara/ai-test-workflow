@@ -125,7 +125,7 @@ def decide_phase_spec(state: LaunchGraphState, spec: PhaseSpec, *, min_confidenc
             reason=f"phase already done: {node_id}",
         )
 
-    if spec.action not in ("tap_xy", "wait", "press_back", "none"):
+    if spec.action not in ("tap_xy", "wait", "press_back", "dismiss_blank", "none"):
         downgraded = spec.model_copy(update={"action": "none", "confidence": 0.0})
         return DecideOutcome(
             kind=DecideOutcomeKind.ACCEPT,
@@ -264,3 +264,4 @@ def mark_adaptive_parent_failed(state: LaunchGraphState, error: str) -> None:
     from game_agent.graphs.launch_state_store import mark_tree_node_failed
 
     mark_tree_node_failed(state, "adaptive_phase", error)
+    mark_adaptive_flow_done(state, evidence=error[:500])

@@ -77,9 +77,27 @@ _SUB_ACCOUNT_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _CHARACTER_HINT_RE = re.compile(
-    r"创角|创建角色|选择职业|Click\s*to\s*Create|Create\s*Role|Enter\s*World|进入世界",
+    r"创角|创建角色|选择职业|Click\s*to\s*Create|Create\s*Role|Enter\s*World|进入世界|LV\.",
     re.IGNORECASE,
 )
+_ENTER_WORLD_OCR_RE = re.compile(r"Enter\s*World|进入世界", re.IGNORECASE)
+
+
+def _looks_like_character_select_screen(
+    interp: ScreenInterpretation,
+    *,
+    ocr_merged: str = "",
+) -> bool:
+    """选角界面常被误判为 sub_account_select；用 OCR/信号纠偏。"""
+    merged = ocr_merged or ""
+    signals = " ".join(interp.completion_signals or [])
+    tap_label = interp.tap_target.label if interp.tap_target else ""
+    blob = f"{merged} {signals} {tap_label}"
+    if _ENTER_WORLD_OCR_RE.search(blob) and _CHARACTER_HINT_RE.search(blob):
+        return True
+    if re.search(r"LV\.\d", blob, re.IGNORECASE) and _ENTER_WORLD_OCR_RE.search(blob):
+        return True
+    return False
 
 
 def classify_screen_facts(
@@ -209,6 +227,7 @@ def merge_interpretation_into_facts(
     interp: ScreenInterpretation,
     *,
     ocr_has_sub_account_coords: bool = False,
+    ocr_merged: str = "",
 ) -> LaunchFacts:
     """
     将 ScreenInterpreter 结果合并进 LaunchFacts。
@@ -231,13 +250,20 @@ def merge_interpretation_into_facts(
     tap_label = tap.label if tap else ""
 
     if stage in ("sub_account_select", "sub_account"):
-        if interp.blocking:
+        if _looks_like_character_select_screen(interp, ocr_merged=ocr_merged):
+            updates["character_creation_blocking"] = True
+            updates["sub_account_blocking"] = False
+            updates["login_stage"] = "clear"
+            if tap_xy is not None:
+                updates.pop("sub_account_action_xy", None)
+                updates.pop("sub_account_label", None)
+        elif interp.blocking:
             updates["sub_account_blocking"] = True
             updates["login_stage"] = "sub_account_select"
-        if tap_xy is not None and not ocr_has_sub_account_coords:
-            updates["sub_account_action_xy"] = tap_xy
-            if tap_label:
-                updates["sub_account_label"] = tap_label
+            if tap_xy is not None and not ocr_has_sub_account_coords:
+                updates["sub_account_action_xy"] = tap_xy
+                if tap_label:
+                    updates["sub_account_label"] = tap_label
 
     elif stage == "login":
         if interp.blocking and not facts.sub_account_blocking:

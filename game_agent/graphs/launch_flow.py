@@ -30,6 +30,7 @@ from game_agent.graphs.launch_nodes import (
     dynamic_action_node,
 )
 from game_agent.graphs.launch_routing import consume_planned_route
+from game_agent.graphs.launch_limits import seed_launch_graph_limits
 from game_agent.models.launch_graph_state import LaunchGraphState, empty_launch_graph_state
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
@@ -242,6 +243,7 @@ async def run_launch_graph_async(
 
     graph = build_launch_graph(deps)
     state: LaunchGraphState = empty_launch_graph_state()
+    seed_launch_graph_limits(state, app_config)
     state["privacy_checked"] = run_state.privacy_checkbox_tapped
     state["server_checked"] = run_state.server_checked
 

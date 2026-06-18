@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import logging
-
-from game_agent.models.run_state import RunState
 from game_agent.services.adb_service import AdbService
-
-logger = logging.getLogger(__name__)
 
 
 def is_game_running(adb: AdbService, game_package: str) -> bool:
@@ -52,20 +47,3 @@ def package_primary_pid_changed(
     if last_primary is None or current_primary is None:
         return False
     return last_primary != current_primary
-
-
-def mark_game_process_detected(
-    run_state: RunState,
-    *,
-    game_package: str,
-    reason: str,
-) -> None:
-    """Milestone only: process is up; executor continues until check_in_game confirms."""
-    run_state.game_started = True
-    if not run_state.note:
-        run_state.note = reason[:2000]
-    logger.info("Game process detected (%s): %s", game_package, reason)
-
-
-# Backward-compatible alias
-mark_game_started = mark_game_process_detected

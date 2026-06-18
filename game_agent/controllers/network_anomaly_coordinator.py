@@ -29,7 +29,7 @@ def format_confirmed_network_anomaly(
     screen_reason: str,
     ui_stage: str = "",
 ) -> str:
-    """兼容旧测试：双通道日志+画面格式。"""
+    """双通道日志+画面异常文案。"""
     stage_note = f" ui_stage={ui_stage}" if ui_stage else ""
     return (
         "Observer network anomaly confirmed (log + screen):"

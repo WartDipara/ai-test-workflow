@@ -107,3 +107,40 @@ def test_dfs_adaptive_before_check_in_game() -> None:
     decision = launch_dfs_next(state, facts)
     assert decision.action == "adaptive_phase"
     assert decision.node_id == "post_login.adaptive"
+
+
+def test_should_not_route_adaptive_when_rounds_exhausted() -> None:
+    state = empty_launch_graph_state()
+    state["login_done"] = True
+    state["adaptive_rounds"] = 12
+    state["launch_graph_limits"] = {"max_adaptive_rounds": 12}
+    facts = LaunchFacts(character_creation_blocking=True)
+    assert should_route_adaptive(state, facts) is False
+
+
+def test_should_not_route_adaptive_when_parent_failed() -> None:
+    state = empty_launch_graph_state()
+    state["login_done"] = True
+    state["adaptive_flow_done"] = True
+    state["failed_nodes"] = {
+        "adaptive_phase": {"node": "adaptive_phase", "failed": True, "attempts": 1},
+    }
+    facts = LaunchFacts(character_creation_blocking=True)
+    assert should_route_adaptive(state, facts) is False
+
+
+def test_plan_route_check_in_game_after_adaptive_exhausted() -> None:
+    state = empty_launch_graph_state()
+    state["login_done"] = True
+    state["privacy_checked"] = True
+    state["server_checked"] = True
+    state["enter_tapped_count"] = 1
+    state["adaptive_flow_done"] = True
+    state["adaptive_rounds"] = 13
+    state["failed_nodes"] = {
+        "adaptive_phase": {"node": "adaptive_phase", "failed": True, "attempts": 1},
+        "enter.check_in_game": {"node": "enter.check_in_game", "failed": True, "attempts": 1},
+    }
+    state["facts"] = LaunchFacts(enter_cta_visible=False).model_dump()
+    target = plan_route(state)
+    assert target in ("check_in_game", "free", "stability_observe")

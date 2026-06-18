@@ -465,7 +465,3 @@ async def run_server_selector_check_async(
         taps_used=max_taps,
         panel_opened=False,
     )
-
-
-# 兼容旧测试 import
-server_panel_opened = server_list_panel_opened

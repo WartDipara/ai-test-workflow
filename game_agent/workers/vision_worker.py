@@ -206,8 +206,8 @@ Do NOT reuse any phase_id listed under Completed phases. Pick a new slug for the
 
 Otherwise set flow_active=true and fill:
 - phase_id: short slug (english, e.g. list_pick, confirm_next, dismiss_popup)
-- phase_label: human label in screen language (e.g. 职业选择)
-- action: tap_xy | wait | press_back | none
+- phase_label: short English label (e.g. class_select, dismiss_popup)
+- action: tap_xy | wait | press_back | dismiss_blank | none
 - x,y: tap coordinates (device space); 0 if not tapping
 - wait_s: 1.5-4.0 if action=wait else optional after tap
 - target_text: button/list label if any
@@ -216,6 +216,7 @@ Otherwise set flow_active=true and fill:
 - confidence: 0.0-1.0
 
 Patterns (abstract):
+- If UI says tap blank area to close (e.g. 点击空白处关闭), use action=dismiss_blank with x=0 y=0 (engine runs dismiss tool)
 - Vertical list pick then animation then forward button → first phase tap list item + wait; later phase tap forward/下一步/Next
 - Character slot then enter world → tap slot then enter CTA (may be handled elsewhere; still plan if you see it)
 - If screen is loading only, use action=wait with complete.kind=always_after_wait
@@ -226,7 +227,7 @@ JSON only (no markdown fence):
   "flow_active": bool,
   "phase_id": "slug",
   "phase_label": "label",
-  "action": "tap_xy|wait|press_back|none",
+  "action": "tap_xy|wait|press_back|dismiss_blank|none",
   "x": 0,
   "y": 0,
   "wait_s": 2.0,
@@ -537,7 +538,7 @@ JSON only (no markdown fence):
                 judgment.model_dump(),
                 summary="game_entry judgment full",
             )
-            log_full_text(logger, prefix, raw, summary="game_entry raw_model_output")
+            log_full_text(logger, prefix, raw)
             if ocr_creation_hits and judgment.in_game_main:
                 judgment = judgment.model_copy(
                     update={
