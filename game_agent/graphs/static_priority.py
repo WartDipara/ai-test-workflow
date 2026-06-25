@@ -10,11 +10,21 @@ from game_agent.graphs.launch_state_store import (
     is_sub_account_selected,
 )
 from game_agent.models.launch_graph_state import LaunchFacts, LaunchGraphState
+from game_agent.services.privacy_gate import privacy_modal_still_open
+
+
+def _privacy_milestone_pending(state: LaunchGraphState, facts: LaunchFacts) -> bool:
+    if completed_tree_node(state, "handle_initial_privacy_dialog"):
+        return False
+    ocr = str(state.get("last_ocr_summary") or "")
+    if facts.initial_privacy_dialog or facts.agree_button_xy is not None:
+        return True
+    return privacy_modal_still_open(ocr)
 
 
 def has_pending_static_work(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     """存在未完成的静态业务里程碑时，scene 不得抢路由。"""
-    if facts.initial_privacy_dialog:
+    if _privacy_milestone_pending(state, facts):
         return True
     if facts.login_blocking:
         return True

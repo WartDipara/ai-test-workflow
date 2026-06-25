@@ -189,6 +189,25 @@ def completed_tree_node(state: LaunchGraphState, action: str) -> bool:
     return False
 
 
+def clear_completed_node(state: LaunchGraphState, action: str) -> None:
+    key = tree_node_id_for_action(action)
+    completed = dict(state.get("completed_nodes") or {})
+    completed.pop(key, None)
+    for alias in _LEGACY_NODE_ALIASES.get(key, ()):
+        completed.pop(alias, None)
+    state["completed_nodes"] = completed
+
+
+def reset_login_progress(state: LaunchGraphState, *, evidence: str = "") -> None:
+    state["account_filled"] = False
+    state["password_filled"] = False
+    state["login_submitted"] = False
+    state["login_done"] = False
+    clear_completed_node(state, "atomic_login")
+    if evidence:
+        state["recover_hint"] = evidence[:500]
+
+
 def clear_failed_node(state: LaunchGraphState, action: str) -> None:
     key = tree_node_id_for_action(action)
     failed = dict(state.get("failed_nodes") or {})

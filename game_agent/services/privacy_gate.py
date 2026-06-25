@@ -30,6 +30,21 @@ def ocr_has_privacy_context(ocr_merged: str) -> bool:
     return bool(_PRIVACY_TERMS_RE.search(ocr_merged or ""))
 
 
+def privacy_modal_still_open(ocr_merged: str) -> bool:
+    """
+    冷启动全屏隐私/适龄弹窗是否仍在（底部 同意+不同意 同行）。
+    政策正文里的「隐私政策」字样在弹窗关闭后仍可能存在，不能用于验收。
+    """
+    merged = ocr_merged or ""
+    has_disagree = bool(_DISAGREE_RE.search(merged))
+    has_agree = bool(re.search(r"同意", merged))
+    if has_disagree and has_agree:
+        return True
+    if re.search(r"适龄提示", merged) and has_agree and has_disagree:
+        return True
+    return False
+
+
 def should_invoke_privacy_gate_vlm(
     facts: LaunchFacts,
     *,
@@ -39,10 +54,14 @@ def should_invoke_privacy_gate_vlm(
     """OCR 出现隐私/协议文字且隐私里程碑未完成时，同步调 VLM 裁决分支。"""
     if facts.login_blocking or facts.sub_account_blocking:
         return False
-    if facts.download_visible:
-        return False
     if privacy_milestones_done:
         return False
+    # 仅真实下载进度场景跳过 PrivacyGate；隐私屏上的「更新日期」不应阻断
+    if facts.download_visible and facts.download_in_progress:
+        from game_agent.services.download_gate import ocr_has_clear_download_progress
+
+        if ocr_has_clear_download_progress(ocr_merged):
+            return False
     return ocr_has_privacy_context(ocr_merged)
 
 
@@ -55,6 +74,11 @@ def pick_consent_button_from_ocr(bboxes: list[OcrBbox]) -> tuple[int, int, str] 
         if _MODAL_CONSENT_RE.search(text):
             candidates.append((bbox.cy, bbox))
     if not candidates:
+        for bbox in bboxes:
+            text = (bbox.text or "").strip()
+            if text in ("同意", "Agree", "Accept", "接受", "确认"):
+                candidates.append((bbox.cy, bbox))
+    if not candidates:
         return None
     best = max(candidates, key=lambda item: item[0])[1]
     return best.cx, best.cy, best.text.strip()
@@ -66,6 +90,7 @@ def merge_privacy_gate_judgment(
     *,
     bboxes: list[OcrBbox],
     min_confidence: float = _GATE_MIN_CONFIDENCE,
+    privacy_milestones_done: bool = False,
 ) -> LaunchFacts:
     reason = facts.classify_reason
     gate_note = (
@@ -115,6 +140,17 @@ def merge_privacy_gate_judgment(
             },
         )
 
+    # VLM 超时/解析失败：里程碑未完成时保留已有 modal 坐标，避免误入 scene
+    if not privacy_milestones_done and (
+        facts.initial_privacy_dialog or facts.agree_button_xy is not None
+    ):
+        return facts.model_copy(
+            update={
+                "privacy_gate_kind": "unknown",
+                "classify_reason": reason,
+            },
+        )
+
     return facts.model_copy(
         update={
             "privacy_gate_kind": "unknown",
@@ -125,8 +161,20 @@ def merge_privacy_gate_judgment(
     )
 
 
-def privacy_gate_vlm_unavailable(facts: LaunchFacts) -> LaunchFacts:
+def privacy_gate_vlm_unavailable(
+    facts: LaunchFacts,
+    *,
+    privacy_milestones_done: bool = False,
+) -> LaunchFacts:
     """VLM 不可用时保守降级：不猜测隐私分支。"""
+    if not privacy_milestones_done and (
+        facts.initial_privacy_dialog or facts.agree_button_xy is not None
+    ):
+        return facts.model_copy(
+            update={
+                "privacy_gate_kind": "unknown",
+            },
+        )
     return facts.model_copy(
         update={
             "privacy_gate_kind": "unknown",
@@ -161,7 +209,10 @@ async def resolve_privacy_gate(
 
     if llm_cfg is None:
         logger.warning("[PrivacyGate] privacy context detected but llm_multimodal unavailable")
-        return privacy_gate_vlm_unavailable(facts)
+        return privacy_gate_vlm_unavailable(
+            facts,
+            privacy_milestones_done=privacy_milestones_done,
+        )
 
     vision = VisionWorker(llm_cfg)
     judgment = await vision.judge_privacy_gate(
@@ -169,7 +220,12 @@ async def resolve_privacy_gate(
         ocr_summary=ocr_merged,
         round_id=round_id,
     )
-    merged = merge_privacy_gate_judgment(facts, judgment, bboxes=bboxes)
+    merged = merge_privacy_gate_judgment(
+        facts,
+        judgment,
+        bboxes=bboxes,
+        privacy_milestones_done=privacy_milestones_done,
+    )
     logger.info(
         "[PrivacyGate] resolved gate=%s modal=%s checkbox=%s agree=%s",
         merged.privacy_gate_kind,

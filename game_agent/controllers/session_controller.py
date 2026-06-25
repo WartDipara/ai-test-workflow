@@ -11,15 +11,11 @@ from game_agent.models.settings import AppConfig
 from game_agent.modules.observer_session.state import ObserverSessionState
 from game_agent.modules.run_context import AttemptContext
 from game_agent.services.adb_service import AdbService
+from game_agent.services.external_log_base import ExternalLogCollector
 from game_agent.services.game_launch import (
     get_package_pids,
     package_primary_pid_changed,
     primary_package_pid,
-)
-from game_agent.services.gameturbo_log import (
-    bootstrap_gameturbo_log,
-    clear_device_logcat,
-    rotate_gameturbo_log,
 )
 from game_agent.services.run_audit_log import RunAuditLogger
 
@@ -40,6 +36,7 @@ class SessionCoordinator:
     audit: RunAuditLogger | None = None
     log_monitor: LogMonitor | None = None
     attempt_context: AttemptContext | None = None
+    log_collector: ExternalLogCollector | None = None
 
     async def watch(self, stop_event: asyncio.Event) -> str | None:
         """
@@ -138,17 +135,22 @@ class SessionCoordinator:
             reason[:300],
         )
 
-        archived = rotate_gameturbo_log(self.artifact_root, session_index=idx_before)
+        archived = (
+            self.log_collector.rotate_log(self.artifact_root, session_index=idx_before)
+            if self.log_collector is not None
+            else None
+        )
         if archived is not None:
             logger.info("[SessionCoordinator] 已归档日志 %s", archived.name)
 
-        if cfg.game.clear_logcat_on_session_restart:
+        if cfg.game.clear_logcat_on_session_restart and self.log_collector is not None:
             try:
-                clear_device_logcat(self.adb)
+                self.log_collector.clear_device_logcat(self.adb)
             except Exception as e:
                 logger.warning("[SessionCoordinator] logcat -c 失败: %s", e)
 
-        bootstrap_gameturbo_log(self.adb, self.artifact_root)
+        if self.log_collector is not None:
+            self.log_collector.bootstrap_log(self.adb, self.artifact_root)
 
         if self.log_monitor is not None:
             await self.log_monitor.restart_session()

@@ -4,6 +4,8 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.task_config import TaskConfig
 from game_agent.services.adb_service import AdbService
@@ -11,6 +13,10 @@ from game_agent.services.device_workspace_cleanup import remove_leftover_game_in
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.utils.stage_logging import pipeline_stage
+
+if TYPE_CHECKING:
+    from game_agent.external_services.manager import ExternalServiceManager
+    from game_agent.models.settings import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +29,7 @@ class FailureCleanup:
     app_config: TaskConfig
     artifact_root: Path | None
     audit: RunAuditLogger | None = None
+    external_services: ExternalServiceManager | None = None
 
     async def run(self, reason: str) -> None:
         plugin_enabled = self.app_config.external_services.gameturbo.enabled
@@ -46,7 +53,14 @@ class FailureCleanup:
                 game_config_path=str(self.app_config.runtime.game_config_path or ""),
             )
 
-        if cfg.external_services.gameturbo.enabled:
+        if self.external_services is not None:
+            await self.external_services.run_plugin_failure_cleanup(
+                adb=self.adb,
+                app_config=self.app_config,
+                artifact_root=self.artifact_root,
+                audit=self.audit,
+            )
+        elif cfg.external_services.gameturbo.enabled:
             from game_agent.external_services.gameturbo.retry.cleanup import (
                 run_gameturbo_failure_cleanup,
             )

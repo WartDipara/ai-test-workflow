@@ -10,26 +10,26 @@ from game_agent.exceptions import (
     ConfigPatchRejectedError,
     DeployPhaseError,
 )
-from game_agent.models.gameturbo_config import GameTurboConfigPatch
+from game_agent.external_services.gameturbo.models.config import GameTurboConfigPatch
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.task_config import TaskConfig
-from game_agent.modules.retry.analysis import AnalysisAgent
-from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry
+from game_agent.external_services.gameturbo.retry.analysis import AnalysisAgent
+from game_agent.external_services.gameturbo.retry.deploy_retry import run_deploy_with_ai_retry
 from game_agent.services.adb_service import AdbService
-from game_agent.services.gameturbo_config_retry import (
+from game_agent.external_services.gameturbo.config_retry import (
     infer_blocked_stage,
     prepare_modify_stage,
     record_patch_applied,
 )
-from game_agent.services.gameturbo_log import ensure_gameturbo_log_for_analysis
+from game_agent.external_services.gameturbo.log import ensure_gameturbo_log_for_analysis
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.utils.gameturbo_bootstrap import output_apk_path
-from game_agent.utils.gameturbo_config_apply import (
+from game_agent.external_services.gameturbo.bootstrap import output_apk_path
+from game_agent.external_services.gameturbo.config.apply import (
     ConfigApplyResult,
     apply_gameturbo_config_patch,
 )
-from game_agent.utils.gameturbo_log_domain_extract import (
+from game_agent.external_services.gameturbo.log.domain_extract import (
     DEFAULT_OUTPUT_NAME,
     extract_domain_region_from_log,
     load_domain_region_analysis_json,

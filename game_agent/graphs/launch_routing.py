@@ -7,8 +7,14 @@ import re
 
 from game_agent.graphs.launch_tree import TreeTrace, launch_dfs_next
 from game_agent.graphs.launch_limits import launch_graph_limits_from_state
+from game_agent.graphs.launch_phase import (
+    is_login_active,
+    is_post_login,
+    is_pre_login_scene_allowed,
+    reconcile_action_frames,
+    reconcile_login_state,
+)
 from game_agent.graphs.launch_state_store import (
-    is_login_done,
     is_privacy_checked,
     node_attempts,
 )
@@ -61,11 +67,13 @@ def should_route_scene(state: LaunchGraphState, facts: LaunchFacts) -> bool:
         return False
     if state.get("in_game_entry_passed"):
         return False
-    if facts.login_blocking or facts.sub_account_blocking:
+    if facts.sub_account_blocking:
         return False
     if facts.initial_privacy_dialog:
         return False
     if blocks_scene_routing(state, facts):
+        return False
+    if is_login_active(state, facts):
         return False
     scene_id = str(state.get("scene_id") or facts.scene_id or "")
     confidence = float(state.get("scene_confidence") or facts.scene_confidence or 0)
@@ -76,7 +84,14 @@ def should_route_scene(state: LaunchGraphState, facts: LaunchFacts) -> bool:
         confidence=confidence,
     ):
         return True
-    if not is_login_done(state):
+    if is_pre_login_scene_allowed(
+        state,
+        facts,
+        scene_id=scene_id,
+        confidence=confidence,
+    ):
+        return True
+    if not is_post_login(state, facts):
         return False
     if state.get("scene_strategy_active"):
         active = str(state.get("active_scene_strategy") or state.get("scene_id") or "")
@@ -91,7 +106,9 @@ def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     """登录后可变 UI：由 AI 阶段模板处理，优先于 dynamic/check_in_game。"""
     if should_route_scene(state, facts):
         return False
-    if not is_login_done(state):
+    if not is_post_login(state, facts):
+        return False
+    if is_login_active(state, facts):
         return False
     if state.get("in_game_confirmed"):
         return False
@@ -124,9 +141,12 @@ def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
 def should_route_dynamic(state: LaunchGraphState) -> bool:
     """动态链仍有待执行步骤。"""
     limits = launch_graph_limits_from_state(state)
-    if should_route_scene(state, facts_from_state(state)):
+    facts = facts_from_state(state)
+    if not is_post_login(state, facts):
         return False
-    if should_route_adaptive(state, facts_from_state(state)):
+    if is_login_active(state, facts):
+        return False
+    if should_route_scene(state, facts):
         return False
     if state.get("in_game_entry_passed") and not state.get("in_game_confirmed"):
         return False
@@ -146,7 +166,9 @@ def should_route_free(
 ) -> bool:
     """登录完成后、仍未进游戏时，是否进入 free 兜底节点。"""
     limits = launch_graph_limits_from_state(state)
-    if not is_login_done(state):
+    if not is_post_login(state, facts):
+        return False
+    if is_login_active(state, facts):
         return False
     if state.get("in_game_confirmed"):
         return False
@@ -206,6 +228,8 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
             state.get("login_done"),
         )
         facts = facts_from_state(state)
+        reconcile_login_state(state, facts)
+        facts = reconcile_action_frames(state, facts)
         trace = TreeTrace()
         decision = launch_dfs_next(state, facts, trace=trace)
         state["current_tree_node"] = decision.node_id
@@ -222,19 +246,20 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
                 float(state.get("scene_confidence") or 0),
                 state.get("active_scene_strategy"),
             )
+        elif should_route_dynamic(state):
+            target = "dynamic_action"
+            logger.info(
+                "[LaunchGraph:route] behavior_chain_enter cursor=%d rounds=%d replans=%d",
+                int(state.get("dynamic_cursor") or 0),
+                int(state.get("dynamic_rounds") or 0),
+                int(state.get("dynamic_replan_count") or 0),
+            )
         elif should_route_adaptive(state, facts):
             target = "adaptive_phase"
             logger.info(
                 "[LaunchGraph:route] adaptive_enter rounds=%d registry=%d",
                 int(state.get("adaptive_rounds") or 0),
                 len(state.get("phase_registry") or []),
-            )
-        elif should_route_dynamic(state):
-            target = "dynamic_action"
-            logger.info(
-                "[LaunchGraph:route] dynamic_enter cursor=%d rounds=%d",
-                int(state.get("dynamic_cursor") or 0),
-                int(state.get("dynamic_rounds") or 0),
             )
         elif dfs_action == "check_in_game":
             # Keep original convergence loop: after login/static steps, always re-check in-game.

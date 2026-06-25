@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from game_agent.services import deploy_runner
+from game_agent.external_services.gameturbo.deploy import runner as deploy_runner
 
 
 def test_run_deploy_queue_mode_command(tmp_path: Path) -> None:

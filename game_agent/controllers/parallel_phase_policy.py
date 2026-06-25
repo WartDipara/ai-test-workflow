@@ -9,15 +9,19 @@ def should_signal_parallel_timeout_fatal(
     phase_ok: bool,
     in_game_signaled: bool,
     executor_in_game_confirmed: bool | None,
+    in_game_play_active: bool = False,
 ) -> bool:
     """
     是否应对并行阶段发出 timeout fatal。
 
     已成功（phase_ok / 成功信号 / executor 已确认）时不得因 timeout 判失败。
+    游戏内试玩进行中时不应因 launch 阶段超时而失败。
     """
     if phase_ok or in_game_signaled:
         return False
     if executor_in_game_confirmed:
+        return False
+    if in_game_play_active:
         return False
     return timed_out
 
@@ -29,6 +33,7 @@ def should_return_parallel_timeout_failure(
     in_game_signaled: bool,
     executor_in_game_confirmed: bool | None,
     executor_enabled: bool,
+    in_game_play_active: bool = False,
 ) -> bool:
     """是否向 orchestrator 返回 parallel timeout 失败文案。"""
     if not executor_enabled:
@@ -38,4 +43,5 @@ def should_return_parallel_timeout_failure(
         phase_ok=phase_ok,
         in_game_signaled=in_game_signaled,
         executor_in_game_confirmed=executor_in_game_confirmed,
+        in_game_play_active=in_game_play_active,
     )

@@ -15,13 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 class XiaomiInstallMonitor(BaseInstallMonitor):
-    """
-    小米/Redmi/POCO 设备安装监控。
-    小米在 adb install 时会从底部弹出一个限时 10 秒的安全提示，
-    需要点击 Install 按钮才能继续安装。
-    优先使用 uiautomator2（无障碍）点击按钮，更可靠。
-    """
-
     _BRAND_PATTERN = re.compile(r"xiaomi|redmi|poco")
 
     def brand_pattern(self) -> re.Pattern[str]:
@@ -70,8 +63,7 @@ class XiaomiInstallMonitor(BaseInstallMonitor):
         )
 
     def _u2_click_install(self, d: u2.Device) -> bool:
-        """通过 uiautomator2 查找 Install/安装 按钮并点击。"""
-        for text in ("Install", "install", "INSTALL", "安装"):
+        for text in ("Install", "install", "INSTALL", "安装","继续安装","繼續安裝"):
             try:
                 btn = d(text=text)
                 if btn.exists(timeout=0.5):
@@ -90,7 +82,6 @@ class XiaomiInstallMonitor(BaseInstallMonitor):
         shot_dir: Path,
         poll_interval_s: float = 1.0,
     ) -> None:
-        """uiautomator2 不可用时的回退方案：OCR + adb input tap。"""
         logger.info("install monitor 使用回退方案: OCR+adb tap")
         while not stop_event.is_set():
             self.record_poll()

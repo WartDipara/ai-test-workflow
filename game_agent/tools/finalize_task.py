@@ -1,13 +1,3 @@
-"""
-任务收尾：归档 logs/、生成 final_logs.log（仅执行流）、清理 artifacts/retry_*。
-
-编排器在任务成功或最终失败时会自动调用；也可手动执行：
-
-  python -m game_agent.tools.finalize_task \\
-    --deliverable run_outputs/16173_20260528_120000 \\
-    --artifacts artifacts/retry_1_20260528_100000 [...]
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -81,6 +71,10 @@ def main() -> int:
         else Path("artifacts").resolve()
     )
 
+    cfg = None
+    if args.config.is_file():
+        cfg = load_app_config(args.config)
+
     outcome = finalize_task_deliverable(
         deliverable,
         success=args.success,
@@ -92,6 +86,7 @@ def main() -> int:
         preprocessing_enabled=False,
         cleanup_artifacts=not args.no_cleanup,
         artifacts_dir=artifacts_dir,
+        app_config=cfg,
     )
     print(f"final_logs: {outcome.final_log_path}")
     print(f"execution_manifest: {outcome.execution_manifest_path}")

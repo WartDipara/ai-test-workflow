@@ -36,3 +36,9 @@ def test_match_english_hud_role_mall_case_insensitive() -> None:
     assert "Guild" in hits
     assert "Mall" in hits
     assert "Forging" in hits
+
+
+def test_email_does_not_trigger_mail_marker() -> None:
+    ok, hits = should_trigger_in_game_hud_check("email address login form")
+    assert not ok
+    assert hits == []

@@ -11,7 +11,9 @@ from game_agent.graphs.launch_state_store import (
     is_sub_account_selected,
     node_attempts,
 )
+from game_agent.graphs.launch_phase import is_login_active
 from game_agent.graphs.launch_limits import launch_graph_limits_from_state
+from game_agent.services.privacy_gate import privacy_modal_still_open
 from game_agent.models.launch_graph_state import (
     LaunchFacts,
     LaunchGraphState,
@@ -24,18 +26,25 @@ def _attempts(state: LaunchGraphState, node_id: str) -> int:
 
 
 def _initial_privacy_active(s: LaunchGraphState, f: LaunchFacts) -> bool:
-    """弹窗事实仍在，但节点已成功处理则不再阻塞后续流程。"""
-    if not f.initial_privacy_dialog:
+    """弹窗里程碑未完成前保持 DFS 选中；不依赖 VLM 超时后易失的 facts 位。"""
+    if completed_tree_node(s, "handle_initial_privacy_dialog"):
         return False
-    return not completed_tree_node(s, "handle_initial_privacy_dialog")
+    if f.initial_privacy_dialog or f.agree_button_xy is not None:
+        return True
+    ocr = str(s.get("last_ocr_summary") or "")
+    return privacy_modal_still_open(ocr)
 
 
 def _login_blocking(s: LaunchGraphState, f: LaunchFacts) -> bool:
     """OCR 识别不到登录页时（如安全键盘黑屏），仍凭状态位留在登录子树。"""
+    if completed_tree_node(s, "select_sub_account") or is_sub_account_selected(s):
+        return False
+    if is_login_done(s) and f.login_stage != "login_form" and not f.login_blocking:
+        return False
+    if is_login_active(s, f):
+        return True
     if is_login_done(s):
         return False
-    if f.login_blocking:
-        return True
     if s.get("login_submitted"):
         return False
     if s.get("account_filled") or s.get("password_filled"):
@@ -60,7 +69,7 @@ def _can_tap_enter(s: LaunchGraphState, f: LaunchFacts) -> bool:
         return False
     if f.character_creation_blocking:
         return False
-    if not f.enter_cta_visible or f.enter_cta_xy is None:
+    if not f.enter_cta_visible:
         return False
     if f.login_blocking or f.sub_account_blocking:
         return False
@@ -124,8 +133,6 @@ def _should_check_in_game(s: LaunchGraphState, f: LaunchFacts) -> bool:
         return False
     if int(s.get("enter_tapped_count") or 0) < 1:
         return False
-    if f.enter_cta_visible and f.enter_cta_xy is not None:
-        return False
     if f.login_blocking or f.sub_account_blocking:
         return False
     if f.terms_checkbox_visible and not is_privacy_checked(s):
@@ -138,7 +145,15 @@ def _should_check_in_game(s: LaunchGraphState, f: LaunchFacts) -> bool:
 
 
 def _should_stability_observe(s: LaunchGraphState, _f: LaunchFacts) -> bool:
-    return bool(s.get("in_game_entry_passed")) and not bool(s.get("in_game_confirmed"))
+    if s.get("in_game_confirmed"):
+        return False
+    return bool(s.get("in_game_entry_passed")) and not bool(s.get("stability_observe_complete"))
+
+
+def _should_in_game_agent(s: LaunchGraphState, _f: LaunchFacts) -> bool:
+    if s.get("in_game_confirmed"):
+        return False
+    return bool(s.get("stability_observe_complete")) and not bool(s.get("in_game_agent_done"))
 
 
 LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = StateTreeNode(
@@ -165,7 +180,7 @@ LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = S
             id="atomic_login",
             action="atomic_login",
             guard=_login_blocking,
-            done=lambda s: is_login_done(s),
+            done=lambda s: completed_tree_node(s, "atomic_login"),
             max_attempts=3,
         ),
         StateTreeNode(
@@ -178,7 +193,7 @@ LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = S
         StateTreeNode(
             id="download.handle",
             action="handle_download",
-            guard=lambda _s, f: bool(f.download_visible),
+            guard=lambda s, f: bool(f.download_visible) and not bool(s.get("in_game_entry_passed")),
             done=lambda s: completed_tree_node(s, "handle_download"),
             max_attempts=3,
         ),
@@ -219,8 +234,15 @@ LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = S
             id="enter.stability_observe",
             action="stability_observe",
             guard=_should_stability_observe,
-            done=lambda s: bool(s.get("in_game_confirmed")),
+            done=lambda s: bool(s.get("stability_observe_complete")),
             max_attempts=16,
+        ),
+        StateTreeNode(
+            id="enter.in_game_agent",
+            action="in_game_agent",
+            guard=_should_in_game_agent,
+            done=lambda s: bool(s.get("in_game_agent_done") or s.get("in_game_confirmed")),
+            max_attempts=500,
         ),
         StateTreeNode(
             id="enter.tap",

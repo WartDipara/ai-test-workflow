@@ -26,6 +26,7 @@ from game_agent.graphs.launch_nodes import (
     recover_from_failure_node,
     select_sub_account_node,
     stability_observe_node,
+    in_game_agent_node,
     tap_enter_game_node,
     free_node,
     dynamic_action_node,
@@ -54,6 +55,7 @@ _ACTION_NODES = (
     "tap_enter_game",
     "check_in_game",
     "stability_observe",
+    "in_game_agent",
     "adaptive_phase",
     "dynamic_action",
     "scene_action",
@@ -101,6 +103,9 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     async def _stability(state: LaunchGraphState) -> LaunchGraphState:
         return await stability_observe_node(state, deps)
 
+    async def _in_game_agent(state: LaunchGraphState) -> LaunchGraphState:
+        return await in_game_agent_node(state, deps)
+
     async def _adaptive(state: LaunchGraphState) -> LaunchGraphState:
         return await adaptive_phase_node(state, deps)
 
@@ -135,6 +140,7 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     workflow.add_node("tap_enter_game", _enter)
     workflow.add_node("check_in_game", _in_game)
     workflow.add_node("stability_observe", _stability)
+    workflow.add_node("in_game_agent", _in_game_agent)
     workflow.add_node("adaptive_phase", _adaptive)
     workflow.add_node("dynamic_action", _dynamic)
     workflow.add_node("scene_action", _scene)
@@ -168,7 +174,9 @@ def _sync_run_state_from_graph(run_state: RunState, graph_state: LaunchGraphStat
     run_state.server_checked = bool(graph_state.get("server_checked"))
     run_state.in_game_confirmed = bool(graph_state.get("in_game_confirmed"))
     run_state.finished = bool(graph_state.get("finished")) or bool(graph_state.get("terminal_error"))
-    run_state.success = bool(graph_state.get("in_game_confirmed"))
+    run_state.success = bool(
+        graph_state.get("in_game_play_completed") or graph_state.get("in_game_confirmed")
+    )
     if graph_state.get("terminal_error"):
         run_state.note = str(graph_state["terminal_error"])[:2000]
         run_state.last_error = run_state.note

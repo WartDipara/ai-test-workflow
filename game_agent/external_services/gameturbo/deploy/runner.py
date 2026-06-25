@@ -6,7 +6,11 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from game_agent.paths import REPO_ROOT
+from game_agent.external_services.gameturbo.bootstrap import (
+    finalize_merged_config_after_deploy,
+    resolve_merged_config_deploy_path,
+)
+from game_agent.external_services.gameturbo.paths import GAMETURBO_NATIVE_DIR
 from game_agent.services.adb_service import AdbService
 from game_agent.services.deploy_build_lock import deploy_build_locked
 from game_agent.services.install_monitor.base import BaseInstallMonitor
@@ -20,14 +24,10 @@ from game_agent.services.package_install import (
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.shutdown import ShutdownRequested, is_shutdown_requested
 from game_agent.services.subprocess_tree import popen_communicate_poll
-from game_agent.utils.gameturbo_bootstrap import (
-    finalize_merged_config_after_deploy,
-    resolve_merged_config_deploy_path,
-)
 
 logger = logging.getLogger(__name__)
 
-ANDROID_DIR = REPO_ROOT / "GameTurbo-Native" / "client" / "android"
+ANDROID_DIR = GAMETURBO_NATIVE_DIR / "client" / "android"
 DEPLOY_SCRIPT = ANDROID_DIR / "deploy.sh"
 
 

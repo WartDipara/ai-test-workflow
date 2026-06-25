@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from game_agent.modules.preprocessing.preprocessor import PreprocessResult
+from game_agent.external_services.manager import (
+    ExecutionLogArchivePlan,
+    ExternalServiceManager,
+    core_execution_log_archive_plan,
+)
+from game_agent.models.settings import AppConfig
 from game_agent.services.execution_log_bundle import (
     archive_attempt_logs,
     build_final_logs,
@@ -159,6 +165,7 @@ def finalize_task_deliverable(
     cleanup_artifacts: bool = True,
     artifacts_dir: Path | None = None,
     modules_summary: dict[str, Any] | None = None,
+    app_config: AppConfig | None = None,
 ) -> TaskFinalizeResult:
     """
     1. 归档完整执行日志到 logs/、分析报告到 reports/
@@ -171,7 +178,16 @@ def finalize_task_deliverable(
     journal = TaskRunJournal(deliverable.root)
     journal.log("finalize", "start", success=success)
 
-    archives = archive_attempt_logs(deliverable.root, attempt_records)
+    archive_plan = (
+        ExternalServiceManager(app_config).execution_log_archive_plan()
+        if app_config is not None
+        else core_execution_log_archive_plan()
+    )
+    archives = archive_attempt_logs(
+        deliverable.root,
+        attempt_records,
+        archive_plan=archive_plan,
+    )
 
     final_path = build_final_logs(
         deliverable,
@@ -183,6 +199,7 @@ def finalize_task_deliverable(
         preprocess_record=preprocess_record,
         preprocessing_enabled=preprocessing_enabled,
         archives=archives,
+        archive_plan=archive_plan,
     )
 
     removed: list[str] = []

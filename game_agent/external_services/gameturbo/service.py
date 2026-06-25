@@ -14,11 +14,13 @@ from game_agent.external_services.context import ServiceContext
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.run_failure import RunFailure
 from game_agent.models.task_runtime import TaskRuntimeRegistry
-from game_agent.services.gameturbo_log import (
+from game_agent.external_services.gameturbo.log import (
+    GAMETURBO_LOG_COLLECTOR,
     bootstrap_gameturbo_log,
     clear_device_logcat,
     finalize_gameturbo_log,
 )
+from game_agent.services.external_log_base import ExternalLogCollector
 from game_agent.utils.apk_util import get_apk_launch_info
 from game_agent.core.apk_staging import parse_gid_from_apk_name, resolve_task_gid
 from game_agent.external_services.gameturbo.bootstrap import (
@@ -186,7 +188,9 @@ class GameTurboExternalService(ExternalService):
                 )
             else:
                 logger.info("缺少 deploy 产物，开始 GameTurbo deploy gid=%s", gid)
-            from game_agent.modules.retry.deploy_retry import run_deploy_with_ai_retry_sync
+            from game_agent.external_services.gameturbo.retry.deploy_retry import (
+                run_deploy_with_ai_retry_sync,
+            )
 
             deploy_result = run_deploy_with_ai_retry_sync(
                 ctx.app_config,
@@ -233,6 +237,11 @@ class GameTurboExternalService(ExternalService):
     async def after_parallel_phase(self, ctx: ServiceContext) -> None:
         if ctx.app_config.modules.log_monitor:
             finalize_gameturbo_log(ctx.adb, ctx.artifact_root)
+
+    def log_collector(self, ctx: ServiceContext) -> ExternalLogCollector | None:
+        if not ctx.app_config.modules.log_monitor:
+            return None
+        return GAMETURBO_LOG_COLLECTOR
 
     async def on_failure(
         self,

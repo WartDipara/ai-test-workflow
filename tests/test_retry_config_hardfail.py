@@ -12,11 +12,14 @@ from game_agent.exceptions import (
     ConfigPatchLlmError,
     ConfigPatchRejectedError,
 )
-from game_agent.models.gameturbo_config import GameTurboConfigPatch
+from game_agent.external_services.gameturbo.models.config import GameTurboConfigPatch
 from game_agent.models.run_failure import ErrorCode, classify_failure
-from game_agent.modules.retry.analysis import AnalysisAgent
-from game_agent.modules.retry.retry_config import RetryConfigHandler, _patch_has_actionable_changes
-from game_agent.utils.gameturbo_config_apply import ConfigApplyResult
+from game_agent.external_services.gameturbo.retry.analysis import AnalysisAgent
+from game_agent.external_services.gameturbo.retry.modify import (
+    RetryConfigHandler,
+    _patch_has_actionable_changes,
+)
+from game_agent.external_services.gameturbo.config.apply import ConfigApplyResult
 
 
 def test_classify_config_patch_llm_error_non_retryable() -> None:
@@ -138,8 +141,8 @@ def test_retry_config_fails_on_empty_patch(tmp_path: Path) -> None:
                 "_invoke_ai_patch_once",
                 new=AsyncMock(return_value=empty_patch),
             ),
-            patch("game_agent.modules.retry.retry_config.prepare_modify_stage") as prep,
-            patch("game_agent.modules.retry.retry_config.run_deploy_with_ai_retry", new=AsyncMock()),
+            patch("game_agent.external_services.gameturbo.retry.modify.prepare_modify_stage") as prep,
+            patch("game_agent.external_services.gameturbo.retry.modify.run_deploy_with_ai_retry", new=AsyncMock()),
         ):
             prep.return_value = (deliverable / "before.json", None)
             with pytest.raises(ConfigPatchRejectedError) as exc_info:
@@ -196,11 +199,11 @@ def test_retry_config_fails_when_apply_unchanged(tmp_path: Path) -> None:
                 return_value={"tunnel_domains": []},
             ),
             patch(
-                "game_agent.modules.retry.retry_config.apply_gameturbo_config_patch",
+                "game_agent.external_services.gameturbo.retry.modify.apply_gameturbo_config_patch",
                 return_value=ConfigApplyResult(path=game_cfg, changed=False, summary=[]),
             ),
-            patch("game_agent.modules.retry.retry_config.prepare_modify_stage") as prep,
-            patch("game_agent.modules.retry.retry_config.run_deploy_with_ai_retry", new=AsyncMock()),
+            patch("game_agent.external_services.gameturbo.retry.modify.prepare_modify_stage") as prep,
+            patch("game_agent.external_services.gameturbo.retry.modify.run_deploy_with_ai_retry", new=AsyncMock()),
         ):
             prep.return_value = (deliverable / "before.json", None)
             with pytest.raises(ConfigPatchGenerationError) as exc_info:
@@ -339,16 +342,16 @@ def test_retry_config_deploys_after_valid_patch(tmp_path: Path) -> None:
                 return_value={"tunnel_domains": []},
             ),
             patch(
-                "game_agent.modules.retry.retry_config.apply_gameturbo_config_patch",
+                "game_agent.external_services.gameturbo.retry.modify.apply_gameturbo_config_patch",
                 return_value=ConfigApplyResult(
                     path=game_cfg,
                     changed=True,
                     summary=["direct_patterns: added 1 pattern(s)"],
                 ),
             ),
-            patch("game_agent.modules.retry.retry_config.prepare_modify_stage") as prep,
-            patch("game_agent.modules.retry.retry_config.record_patch_applied"),
-            patch("game_agent.modules.retry.retry_config.run_deploy_with_ai_retry", deploy_mock),
+            patch("game_agent.external_services.gameturbo.retry.modify.prepare_modify_stage") as prep,
+            patch("game_agent.external_services.gameturbo.retry.modify.record_patch_applied"),
+            patch("game_agent.external_services.gameturbo.retry.modify.run_deploy_with_ai_retry", deploy_mock),
         ):
             prep.return_value = (deliverable / "before.json", None)
             await handler.run(1, "Network anomaly confirmed")

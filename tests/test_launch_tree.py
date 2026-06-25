@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from game_agent.graphs.launch_tree import LAUNCH_TREE, launch_dfs_next
+from game_agent.graphs.launch_tree import LAUNCH_TREE, _login_blocking, launch_dfs_next
 from game_agent.graphs.state_tree import TreeTrace, dfs_next_action
 from game_agent.graphs.launch_state_store import mark_tree_node_failed, node_attempts
 from game_agent.models.launch_graph_state import (
@@ -128,7 +128,7 @@ def test_dfs_server_check_blocked_by_announcement() -> None:
     assert d.action == "dismiss_blocking_overlay"
 
 
-def test_dfs_tap_enter_before_check_in_game_when_cta_visible() -> None:
+def test_dfs_check_in_game_after_enter_tap_even_if_cta_visible() -> None:
     d = _decide(
         facts=LaunchFacts(
             enter_cta_visible=True,
@@ -139,7 +139,7 @@ def test_dfs_tap_enter_before_check_in_game_when_cta_visible() -> None:
         server_checked=True,
         enter_tapped_count=1,
     )
-    assert d.action == "tap_enter_game"
+    assert d.action == "check_in_game"
 
 
 def test_dfs_check_in_game_when_enter_tapped_and_no_cta() -> None:
@@ -165,6 +165,23 @@ def test_dfs_stability_observe_after_entry_passed() -> None:
     )
     assert d.action == "stability_observe"
     assert d.node_id == "enter.stability_observe"
+
+
+def test_dfs_in_game_agent_after_stability_complete() -> None:
+    d = _decide(
+        facts=LaunchFacts(enter_cta_visible=False),
+        privacy_checked=True,
+        login_done=True,
+        server_checked=True,
+        enter_tapped_count=1,
+        in_game_entry_passed=True,
+        stability_observe_complete=True,
+        in_game_agent_started_at=1.0,
+        in_game_agent_deadline=999999.0,
+        in_game_confirmed=False,
+    )
+    assert d.action == "in_game_agent"
+    assert d.node_id == "enter.in_game_agent"
 
 
 def test_dfs_skips_done_privacy_dialog() -> None:
@@ -229,3 +246,20 @@ def test_generic_dfs_trace() -> None:
     )
     assert "launch.root" in trace.visited
     assert trace.selected_node == "atomic_login"
+
+
+def test_login_blocking_false_after_sub_account_completed() -> None:
+    from game_agent.graphs.launch_state_store import mark_tree_node_done
+
+    state = _state(
+        facts=LaunchFacts(
+            enter_cta_visible=True,
+            login_stage="clear",
+            login_blocking=False,
+        ),
+        login_done=False,
+        account_filled=True,
+    )
+    mark_tree_node_done(state, "select_sub_account")
+    facts = LaunchFacts.model_validate(state["facts"])
+    assert _login_blocking(state, facts) is False

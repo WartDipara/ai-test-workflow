@@ -7,15 +7,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from game_agent.models.failure_report import FailureDiagnosisReport
+from game_agent.models.settings import AppConfig
 from game_agent.services.failure_report import (
     ATTEMPT_FAILURE_REPORT_JSON,
     ATTEMPT_FAILURE_REPORT_MD,
 )
-from game_agent.utils.gameturbo_log_domain_extract import DEFAULT_OUTPUT_NAME
 
-_DELIVERABLE_FILES = (
-    "gameturbo.log",
-    DEFAULT_OUTPUT_NAME,
+_CORE_DELIVERABLE_FILES = (
     "ai_analysis_report.txt",
     ATTEMPT_FAILURE_REPORT_MD,
     ATTEMPT_FAILURE_REPORT_JSON,
@@ -23,6 +21,29 @@ _DELIVERABLE_FILES = (
     "deploy.log",
     "pipeline_trace.jsonl",
 )
+
+
+def build_in_game_play_summary(graph_state: dict | None) -> dict | None:
+    if not graph_state:
+        return None
+    if not graph_state.get("in_game_play_completed") and not graph_state.get("in_game_confirmed"):
+        return None
+    duration = graph_state.get("in_game_play_duration_s")
+    if duration is None:
+        duration = 0
+    return {
+        "mode": str(graph_state.get("in_game_mode") or "smoke"),
+        "duration_s": int(duration),
+        "rounds": int(
+            graph_state.get("in_game_play_rounds") or graph_state.get("in_game_agent_rounds") or 0
+        ),
+        "chains_built": int(graph_state.get("in_game_play_chains_built") or 0),
+        "steps_executed": int(graph_state.get("in_game_play_steps_executed") or 0),
+        "replans": int(graph_state.get("in_game_behavior_replan_count") or 0),
+        "completed": bool(
+            graph_state.get("in_game_play_completed") or graph_state.get("in_game_confirmed")
+        ),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +84,14 @@ def _copy_tree_if_exists(src: Path, dst: Path) -> None:
         shutil.copytree(src, dst)
 
 
+def _resolve_failure_deliverable_files(app_config: AppConfig | None) -> tuple[str, ...]:
+    if app_config is None:
+        return _CORE_DELIVERABLE_FILES
+    from game_agent.external_services.manager import ExternalServiceManager
+
+    return ExternalServiceManager(app_config).failure_deliverable_files()
+
+
 def publish_core_success_deliverable(
     deliverable: RunDeliverablePaths,
     *,
@@ -75,25 +104,29 @@ def publish_core_success_deliverable(
     in_game_confirmed: bool = True,
     session_restarts: int = 0,
     external_services: dict | None = None,
+    in_game_play: dict | None = None,
 ) -> None:
     """成功：核心测试结果（是否进入游戏），不依赖 GameTurbo merged config。"""
+    payload: dict = {
+        "success": True,
+        "gid": deliverable.gid,
+        "task_id": deliverable.task_id,
+        "winning_retry": winning_retry,
+        "total_attempts": total_attempts,
+        "package_name": package_name,
+        "source_apk": str(source_apk.resolve()) if source_apk else None,
+        "install_apk": str(install_apk.resolve()) if install_apk else None,
+        "in_game_confirmed": in_game_confirmed,
+        "winning_artifact": str(winning_artifact_root.resolve()),
+        "session_restarts": session_restarts,
+        "external_services": external_services or {},
+        "finished_at": datetime.now(tz=UTC).isoformat(),
+    }
+    if in_game_play:
+        payload["in_game_play"] = in_game_play
     _write_json(
         deliverable.root / "result.json",
-        {
-            "success": True,
-            "gid": deliverable.gid,
-            "task_id": deliverable.task_id,
-            "winning_retry": winning_retry,
-            "total_attempts": total_attempts,
-            "package_name": package_name,
-            "source_apk": str(source_apk.resolve()) if source_apk else None,
-            "install_apk": str(install_apk.resolve()) if install_apk else None,
-            "in_game_confirmed": in_game_confirmed,
-            "winning_artifact": str(winning_artifact_root.resolve()),
-            "session_restarts": session_restarts,
-            "external_services": external_services or {},
-            "finished_at": datetime.now(tz=UTC).isoformat(),
-        },
+        payload,
     )
 
 
@@ -139,8 +172,27 @@ def publish_failure_deliverable(
     max_retries: int,
     ai_report: FailureDiagnosisReport | None = None,
     error_code: str = "",
+    app_config: AppConfig | None = None,
 ) -> None:
     """失败：仅产出失败说明与各轮关联日志，不复制游戏配置 JSON。"""
+    from game_agent.external_services.gameturbo.deliverables import (
+        DEFAULT_OUTPUT_NAME,
+        GAMETURBO_LOG_NAME,
+    )
+    from game_agent.external_services.manager import ExternalServiceManager
+
+    deliverable_files = _resolve_failure_deliverable_files(app_config)
+    session_log_glob = (
+        ExternalServiceManager(app_config).failure_session_log_glob()
+        if app_config is not None
+        else None
+    )
+    gameturbo_enabled = (
+        ExternalServiceManager(app_config).gameturbo_enabled()
+        if app_config is not None
+        else False
+    )
+
     attempts_dir = deliverable.root / "attempts"
     attempts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -150,7 +202,7 @@ def publish_failure_deliverable(
         attempt_dst = attempts_dir / attempt_name
         attempt_dst.mkdir(parents=True, exist_ok=True)
 
-        for filename in _DELIVERABLE_FILES:
+        for filename in deliverable_files:
             _copy_if_exists(artifact_root / filename, attempt_dst / filename)
 
         audit_src = artifact_root / "audit"
@@ -165,22 +217,25 @@ def publish_failure_deliverable(
             _copy_if_exists(png, attempt_dst / png.name)
         for png in sorted(artifact_root.glob("entry_detect*.png")):
             _copy_if_exists(png, attempt_dst / png.name)
-        for log in sorted(artifact_root.glob("gameturbo_session_*.log")):
-            _copy_if_exists(log, attempt_dst / log.name)
+        if session_log_glob:
+            for log in sorted(artifact_root.glob(session_log_glob)):
+                _copy_if_exists(log, attempt_dst / log.name)
 
-        attempt_summaries.append(
-            {
-                "retry": retry_no,
-                "artifact": str(artifact_root.resolve()),
-                "output_dir": str(attempt_dst.resolve()),
-                "has_gameturbo_log": (artifact_root / "gameturbo.log").is_file(),
-                "has_domain_analysis": (artifact_root / DEFAULT_OUTPUT_NAME).is_file(),
-                "has_ai_report": (artifact_root / "ai_analysis_report.txt").is_file(),
-                "has_attempt_failure_report": (
-                    artifact_root / ATTEMPT_FAILURE_REPORT_MD
-                ).is_file(),
-            },
-        )
+        summary: dict = {
+            "retry": retry_no,
+            "artifact": str(artifact_root.resolve()),
+            "output_dir": str(attempt_dst.resolve()),
+            "has_ai_report": (artifact_root / "ai_analysis_report.txt").is_file(),
+            "has_attempt_failure_report": (
+                artifact_root / ATTEMPT_FAILURE_REPORT_MD
+            ).is_file(),
+        }
+        if gameturbo_enabled:
+            summary["has_gameturbo_log"] = (artifact_root / GAMETURBO_LOG_NAME).is_file()
+            summary["has_domain_analysis"] = (
+                artifact_root / DEFAULT_OUTPUT_NAME
+            ).is_file()
+        attempt_summaries.append(summary)
 
     _write_json(
         deliverable.root / "result.json",

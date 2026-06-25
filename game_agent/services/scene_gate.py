@@ -101,7 +101,10 @@ async def resolve_scene_gate(
     llm_cfg,
     round_id: int = 0,
     screenshot_hash: str = "",
+    skip_vlm: bool = False,
 ) -> tuple[SceneClassification, SceneGateJudgment | None]:
+    if skip_vlm:
+        return rule_cls, None
     if not should_invoke_scene_gate_vlm(state, facts, rule_classification=rule_cls):
         return rule_cls, None
 

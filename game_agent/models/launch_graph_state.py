@@ -17,6 +17,7 @@ LaunchRouteTarget = Literal[
     "tap_enter_game",
     "check_in_game",
     "stability_observe",
+    "in_game_agent",
     "adaptive_phase",
     "dynamic_action",
     "scene_action",
@@ -128,10 +129,36 @@ class LaunchGraphState(TypedDict, total=False):
     dynamic_no_progress: int
     dynamic_last_fingerprint: str
     dynamic_failed: bool
+    dynamic_failure_trace: list[dict[str, Any]]
+    dynamic_replan_count: int
+    dynamic_last_failed_step_id: str
     stability_observe_started_at: float
     stability_observe_deadline: float
     stability_last_check_at: float
     stability_rounds: int
+    stability_observe_complete: bool
+    in_game_agent_started_at: float
+    in_game_agent_deadline: float
+    in_game_agent_rounds: int
+    in_game_agent_last_action_signature: str
+    in_game_agent_last_action_at: float
+    in_game_agent_same_action_streak: int
+    in_game_agent_done: bool
+    in_game_play_started_at: float
+    in_game_play_deadline: float
+    in_game_play_completed: bool
+    in_game_play_failed_reason: str
+    in_game_play_rounds: int
+    in_game_play_chains_built: int
+    in_game_play_steps_executed: int
+    llm_cache_hash: str
+    in_game_behavior_chain: list[dict[str, Any]]
+    in_game_behavior_cursor: int
+    in_game_behavior_no_progress: int
+    in_game_behavior_last_fingerprint: str
+    in_game_behavior_failure_trace: list[dict[str, Any]]
+    in_game_behavior_replan_count: int
+    in_game_behavior_last_failed_step_id: str
     free_in_game_ocr_hits: list[str]
     adaptive_flow_done: bool
     adaptive_rounds: int
@@ -161,6 +188,9 @@ class LaunchGraphState(TypedDict, total=False):
     scene_gate_confidence: float
     scene_gate_description: str
     scene_gate_action: str
+    last_game_entry_judgment: dict[str, Any]
+    action_failure_trace: list[dict[str, Any]]
+    last_reflection: dict[str, Any]
 
 
 def empty_launch_graph_state() -> LaunchGraphState:
@@ -209,10 +239,36 @@ def empty_launch_graph_state() -> LaunchGraphState:
         dynamic_no_progress=0,
         dynamic_last_fingerprint="",
         dynamic_failed=False,
+        dynamic_failure_trace=[],
+        dynamic_replan_count=0,
+        dynamic_last_failed_step_id="",
         stability_observe_started_at=0.0,
         stability_observe_deadline=0.0,
         stability_last_check_at=0.0,
         stability_rounds=0,
+        stability_observe_complete=False,
+        in_game_agent_started_at=0.0,
+        in_game_agent_deadline=0.0,
+        in_game_agent_rounds=0,
+        in_game_agent_last_action_signature="",
+        in_game_agent_last_action_at=0.0,
+        in_game_agent_same_action_streak=0,
+        in_game_agent_done=False,
+        in_game_play_started_at=0.0,
+        in_game_play_deadline=0.0,
+        in_game_play_completed=False,
+        in_game_play_failed_reason="",
+        in_game_play_rounds=0,
+        in_game_play_chains_built=0,
+        in_game_play_steps_executed=0,
+        llm_cache_hash="",
+        in_game_behavior_chain=[],
+        in_game_behavior_cursor=0,
+        in_game_behavior_no_progress=0,
+        in_game_behavior_last_fingerprint="",
+        in_game_behavior_failure_trace=[],
+        in_game_behavior_replan_count=0,
+        in_game_behavior_last_failed_step_id="",
         free_in_game_ocr_hits=[],
         adaptive_flow_done=False,
         adaptive_rounds=0,
@@ -242,6 +298,8 @@ def empty_launch_graph_state() -> LaunchGraphState:
         scene_gate_confidence=0.0,
         scene_gate_description="",
         scene_gate_action="",
+        action_failure_trace=[],
+        last_reflection={},
     )
 
 

@@ -6,6 +6,7 @@ import re
 
 from game_agent.graphs.launch_state_store import completed_tree_node, is_login_done
 from game_agent.graphs.static_priority import has_pending_static_work
+from game_agent.graphs.launch_phase import is_pre_login_scene_allowed
 from game_agent.models.launch_graph_state import LaunchFacts, LaunchGraphState
 from game_agent.models.scene import (
     SCENE_STRATEGY_IDS,
@@ -221,6 +222,13 @@ def should_activate_scene_strategy(
     facts: LaunchFacts,
 ) -> bool:
     if is_pre_login_passive_wait(
+        state,
+        facts,
+        scene_id=classification.scene_id,
+        confidence=classification.confidence,
+    ):
+        return True
+    if is_pre_login_scene_allowed(
         state,
         facts,
         scene_id=classification.scene_id,

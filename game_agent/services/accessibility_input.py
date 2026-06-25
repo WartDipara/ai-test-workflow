@@ -343,63 +343,216 @@ def _focused_editable(device: Any) -> Any | None:
     return None
 
 
-def _clear_editable_field(target: Any, device: Any) -> None:
+def _clear_editable_field(target: Any, device: Any, *, aggressive: bool = False) -> None:
     """
-    写入前清空输入框，避免重试或再次 fill 时叠在旧内容后面。
-    顺序：clear_text → set_text('', clear=True) → 焦点上批量 DEL（兼容安全键盘）。
+    写入前清空输入框。默认仅用无障碍 clear/setText；仅在仍非空时用少量 DEL 兜底。
     """
     if hasattr(target, "clear_text"):
         try:
             target.clear_text()
-            time.sleep(0.06)
+            time.sleep(0.05)
         except Exception as e:
             logger.debug("clear_text: %s", e)
 
     if hasattr(target, "set_text"):
         try:
             target.set_text("")
-            time.sleep(0.06)
+            time.sleep(0.05)
         except Exception as e:
             logger.debug("set_text empty: %s", e)
 
-    try:
-        target.click()
-        time.sleep(0.08)
-    except Exception:
-        pass
+    if _read_editable_text(target):
+        try:
+            target.click()
+            time.sleep(0.06)
+        except Exception:
+            pass
+
+    remaining = _read_editable_text(target)
+    if not remaining and not aggressive:
+        return
+
+    # 安全键盘等场景：无障碍清空无效时，按已有文本长度有限次删除（避免 96 次 DEL 长时间「删空」）
+    delete_budget = min(max(len(remaining) + 4, 8), 24) if remaining else (8 if aggressive else 0)
+    if delete_budget <= 0:
+        return
 
     try:
         device.shell("input keyevent 123")  # MOVE_END
-        for _ in range(48):
+        for _ in range(delete_budget):
             device.shell("input keyevent 67")  # DEL
-        device.shell("input keyevent 122")  # MOVE_HOME
-        for _ in range(48):
-            device.shell("input keyevent 112")  # FORWARD_DEL
-        time.sleep(0.06)
+        time.sleep(0.04)
     except Exception as e:
         logger.debug("keyevent clear: %s", e)
 
 
-def _set_text_replace(target: Any, text: str) -> None:
-    """uiautomator2 部分版本不支持 set_text(..., clear=)；先清空再写入。"""
-    if hasattr(target, "clear_text"):
-        target.clear_text()
-    elif hasattr(target, "set_text"):
-        target.set_text("")
+def _set_text_replace(target: Any, device: Any, text: str) -> None:
+    """直接 set_text（多数机型会整框替换）。"""
     if hasattr(target, "set_text"):
         target.set_text(text)
+        return
+    if hasattr(target, "clear_text"):
+        target.clear_text()
+        device.send_keys(text)
+        return
+    device.send_keys(text)
+
+
+def _clear_editable_field_u2(target: Any) -> None:
+    """仅用 uiautomator2 清空输入框（登录填表路径，不发 DEL）。"""
+    if hasattr(target, "clear_text"):
+        try:
+            target.clear_text()
+        except Exception as e:
+            logger.debug("clear_text: %s", e)
+    if hasattr(target, "set_text"):
+        try:
+            target.set_text("")
+        except Exception as e:
+            logger.debug("set_text empty: %s", e)
+
+
+def fill_edit_text_u2(target: Any, device: Any, text: str) -> None:
+    """先清空栏位再写入，统一走 uiautomator2 set_text。"""
+    _clear_editable_field_u2(target)
+    if hasattr(target, "set_text"):
+        target.set_text(text)
+        return
+    device.send_keys(text)
+
+
+def press_enter_key(device: Any, *, settle_s: float = 0.25) -> str:
+    """单次 Enter（IME 下一项 / 提交）。"""
+    return _press_enter_submit(device, settle_s)
+
+
+def fill_login_with_enter_flow(
+    serial: str | None,
+    *,
+    account_xy: tuple[int, int] | None,
+    username: str,
+    password: str,
+    width: int,
+    height: int,
+    settle_s: float = 0.25,
+    submit_via_enter: bool = False,
+) -> tuple[bool, str]:
+    """
+    标准登录：点账号框 → 清空并填账号 → Enter 跳密码 → 清空并填密码。
+    submit_via_enter=True 时再 Enter 提交；atomic_login 由 submit_login_after_password 单独提交。
+    输入统一经 uiautomator2（先 clear_text 再 set_text）；不依赖密码框 OCR。
+    """
+    if not username.strip():
+        return False, "username empty"
+    if not password:
+        return False, "password empty"
+
+    device = _connect_u2(serial)
+    key = serial or "__default__"
+    wait = max(0.12, min(float(settle_s), 0.5))
+    parts: list[str] = []
+
+    edits = _enumerate_edits(device)
+    if not edits and account_xy is None:
+        return False, "no visible EditText on login form"
+
+    if account_xy is not None:
+        ax, ay = account_xy
+        if not (0 <= ax < width and 0 <= ay < height):
+            return False, f"account coords ({ax},{ay}) outside {width}x{height}"
+        account_el, pick, click_x, click_y = _pick_credential_edit(
+            device, ax, ay, "username",
+        )
+        if account_el is None:
+            if not edits:
+                return False, "no account EditText"
+            account_el, click_x, click_y, _b = edits[0]
+            pick = "first-edit-fallback"
+    else:
+        account_el, click_x, click_y, _b = edits[0]
+        pick = "first-edit"
+
+    try:
+        account_el.click()
+    except Exception:
+        device.click(click_x, click_y)
+    time.sleep(wait)
+
+    focused = _focused_editable(device)
+    if focused is not None:
+        account_el = focused
+        pick = f"{pick}+focused"
+
+    fill_edit_text_u2(account_el, device, username)
+    try:
+        ucx, ucy, _ = _node_center_distance(account_el, click_x, click_y)
+        _last_username_center[key] = (ucx, ucy)
+    except Exception:
+        _last_username_center[key] = (click_x, click_y)
+    parts.append(f"account via {pick}")
+
+    time.sleep(wait)
+    parts.append(f"ENTER next-field: {press_enter_key(device, settle_s=wait)}")
+
+    time.sleep(wait)
+    pwd_el = _focused_editable(device)
+    username_center = _last_username_center.get(key)
+    if pwd_el is not None and username_center is not None:
+        pcx, pcy, _ = _node_center_distance(pwd_el, click_x, click_y)
+        if _center_too_close(pcx, pcy, username_center, threshold=_SAME_FIELD_CENTER_PX):
+            pwd_el = None
+
+    pwd_pick = "focused-after-enter"
+    if pwd_el is None:
+        hint_x = click_x
+        hint_y = click_y + _MIN_PASSWORD_BELOW_USERNAME_PX
+        if username_center is not None:
+            hint_x, hint_y = username_center[0], username_center[1] + _MIN_PASSWORD_BELOW_USERNAME_PX
+        pwd_el, pwd_pick, px, py = _pick_credential_edit(
+            device,
+            hint_x,
+            hint_y,
+            "password",
+            username_center=username_center,
+        )
+        if pwd_el is None:
+            return False, "password field not found after ENTER; " + " | ".join(parts)
+        try:
+            pwd_el.click()
+        except Exception:
+            device.click(px, py)
+        time.sleep(wait)
+        pwd_pick = f"{pwd_pick}@({px},{py})"
+
+    fill_edit_text_u2(pwd_el, device, password)
+    try:
+        pcx, pcy, _ = _node_center_distance(pwd_el, click_x, click_y)
+        _last_password_center[key] = (pcx, pcy)
+    except Exception:
+        pass
+    parts.append(f"password via {pwd_pick}")
+
+    if submit_via_enter:
+        time.sleep(wait)
+        parts.append(f"ENTER submit: {press_enter_key(device, settle_s=wait)}")
+
+    return True, " | ".join(parts)
 
 
 def _apply_set_text(target: Any, device: Any, text: str, pick: str) -> tuple[str, str | None]:
+    current = _read_editable_text(target)
+    if current == text or (current and current.lower() == text.lower()):
+        return f"{pick}+skip-unchanged", None
+
     _clear_editable_field(target, device)
     if _read_editable_text(target):
-        _clear_editable_field(target, device)
+        _clear_editable_field(target, device, aggressive=True)
 
     try:
         if hasattr(target, "set_text") or hasattr(target, "clear_text"):
-            _set_text_replace(target, text)
+            _set_text_replace(target, device, text)
             return pick, None
-        _clear_editable_field(target, device)
+        _clear_editable_field(target, device, aggressive=True)
         device.send_keys(text)
         return f"{pick}+send_keys", None
     except Exception as e:
@@ -461,6 +614,43 @@ def fill_credential_via_accessibility(
                 pick = f"{pick}+focused"
         except Exception:
             pass
+
+    existing = _read_editable_text(target)
+    if existing == text or (existing and existing.lower() == text.lower()):
+        parts = [
+            f"Skipped {field_label} fill — field already contains expected value "
+            f"({pick}).",
+        ]
+        if is_username:
+            try:
+                ucx, ucy, _ = _node_center_distance(target, click_x, click_y)
+                _last_username_center[key] = (ucx, ucy)
+            except Exception:
+                pass
+        elif not is_username:
+            try:
+                pcx, pcy, _ = _node_center_distance(target, click_x, click_y)
+                _last_password_center[key] = (pcx, pcy)
+            except Exception:
+                pass
+        if verify_after_fill:
+            passed, verify_block = verify_credential_node(
+                target,
+                text,
+                field_label=field_label,
+                tap_x=click_x,
+                tap_y=click_y,
+                max_center_distance_px=max_center_distance_px,
+                pick=pick,
+                username_center=_last_username_center.get(key) if not is_username else None,
+            )
+            parts.append(verify_block)
+            if not passed:
+                parts.append(
+                    "Action: re-OCR login screen → confirm field centers → fill again "
+                    "or verify_credential_field."
+                )
+        return "\n".join(parts)
 
     pick, err = _apply_set_text(target, device, text, pick)
     if err:
@@ -525,7 +715,7 @@ def fill_credential_via_accessibility(
                 except Exception:
                     device.click(click_x, click_y)
                     time.sleep(0.12)
-        _clear_editable_field(target, device)
+        _clear_editable_field(target, device, aggressive=True)
         pick2, err2 = _apply_set_text(target, device, text, f"{pick}+retry")
         if err2:
             parts.append(err2)
@@ -627,7 +817,7 @@ def fill_password_via_accessibility(
 
 from game_agent.services.login_form_ocr import is_compound_login_label, is_standalone_login_label
 
-_LOGIN_SEARCH_HINTS = ("登录", "Login", "LOG IN")
+_LOGIN_SEARCH_HINTS = ("登录", "Login", "LOG IN", "Sign in", "SIGN IN")
 
 
 def _node_label_text(info: dict[str, Any]) -> str:

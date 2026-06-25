@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from game_agent.models.gameturbo_config import GameTurboConfigPatch
-from game_agent.utils.gameturbo_config_apply import ConfigApplyResult
+from game_agent.external_services.gameturbo.models.config import GameTurboConfigPatch
+from game_agent.external_services.gameturbo.config.apply import ConfigApplyResult
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +43,7 @@ def _backup_dir(deliverable_root: Path) -> Path:
     return d
 
 
-def _config_basename(game_config_path: Path) -> str:
-    return game_config_path.name
-
-
-def ensure_baseline_copy(
-    game_config_path: Path,
-    deliverable_root: Path,
-) -> Path:
-    """任务首次 Modify 前复制一份基线到 run_outputs。"""
+def ensure_baseline_copy(game_config_path: Path, deliverable_root: Path) -> Path:
     dst = _backup_dir(deliverable_root) / BASELINE_NAME
     if not dst.is_file():
         shutil.copy2(game_config_path, dst)
@@ -73,12 +65,6 @@ def restore_before_new_patch(
     *,
     failed_attempt: int,
 ) -> str | None:
-    """
-    第 2+ 次游戏尝试失败后的 Modify：先撤销上一轮补丁，再提新补丁。
-    - failed_attempt=1（即将为 attempt 2 打补丁）：无上一轮补丁，不恢复。
-    - failed_attempt=2：恢复 before_attempt_2（第 1 次 Modify 打补丁前的基线）。
-    - failed_attempt=3：恢复 before_attempt_3（第 2 次 Modify 打补丁前快照），以此类推。
-    """
     if failed_attempt < 2:
         return None
 
@@ -90,7 +76,7 @@ def restore_before_new_patch(
         else:
             logger.warning(
                 "[ConfigRetry] 无 before_attempt_%d 或基线，跳过恢复",
-                next_attempt,
+                failed_attempt,
             )
             return None
 
@@ -110,7 +96,6 @@ def backup_config_before_patch(
     next_attempt: int,
     artifact_root: Path | None = None,
 ) -> Path:
-    """打补丁前备份当前配置到 run_outputs（及本轮 artifact 副本）。"""
     ensure_baseline_copy(game_config_path, deliverable_root)
     dst = backup_path_for_next_attempt(deliverable_root, next_attempt)
     shutil.copy2(game_config_path, dst)
@@ -216,10 +201,6 @@ def prepare_modify_stage(
     artifact_root: Path | None,
     blocked_stage_hint: str = "",
 ) -> tuple[Path, str | None]:
-    """
-    Modify 入口：必要时恢复 → 备份待改文件。
-    返回 (backup_before_path, restored_from_path_or_none)。
-    """
     next_attempt = failed_attempt + 1
     restored = restore_before_new_patch(
         game_config_path,

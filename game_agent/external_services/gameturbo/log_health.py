@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-from game_agent.services.gameturbo_log_anomaly import is_fatal_gameturbo_log_line
+from game_agent.external_services.gameturbo.log_anomaly import is_fatal_gameturbo_log_line
+from game_agent.services.external_log_base import LogHealthVerdict
 
 _PRE_GAME_INIT_STAGES = frozenset({
     "privacy",
@@ -16,13 +15,6 @@ _PRE_GAME_INIT_STAGES = frozenset({
 
 def _is_pre_game_init_stage(stage: str) -> bool:
     return (stage or "").strip().lower() in _PRE_GAME_INIT_STAGES
-
-
-@dataclass(frozen=True, slots=True)
-class LogHealthVerdict:
-    suspect: bool
-    reason: str
-    markers: tuple[str, ...] = ()
 
 
 def _meaningful_lines(log_text: str) -> list[str]:
@@ -41,7 +33,6 @@ def assess_gameturbo_log_health(
     min_lines: int = 15,
     ui_stage: str = "",
 ) -> LogHealthVerdict:
-    """扫描已归档的 GameTurbo 日志，输出日志通道 suspect 判定。"""
     stage = (ui_stage or "").strip().lower()
     lines = _meaningful_lines(log_text)
     if not lines:
@@ -72,7 +63,6 @@ def assess_gameturbo_log_health(
 
     if len(lines) < min_lines:
         return LogHealthVerdict(False, "", ())
-
     if pre_init:
         return LogHealthVerdict(False, "", ())
 

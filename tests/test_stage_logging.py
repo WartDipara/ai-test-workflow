@@ -5,7 +5,7 @@ from io import StringIO
 from pathlib import Path
 
 from game_agent.models.pipeline_phase import PipelinePhase
-from game_agent.services.gameturbo_log import (
+from game_agent.external_services.gameturbo.log import (
     append_gameturbo_stage_marker,
     gameturbo_log_dedup_key,
     gameturbo_log_path,

@@ -9,12 +9,16 @@ from pydantic_ai import Agent
 from game_agent.exceptions import ConfigPatchGenerationError, ConfigPatchLlmError
 from game_agent.models.deploy_recovery import DeployRecoveryPatch
 from game_agent.models.failure_report import AttemptRoundDiagnosis, FailureDiagnosisReport
-from game_agent.models.gameturbo_config import GameTurboConfigPatch
+from game_agent.external_services.gameturbo.models.config import GameTurboConfigPatch
 from game_agent.models.settings import DeepSeekSection, LLMSection
 from game_agent.services.llm_service import build_llm_model
 from game_agent.services.pipeline_trace import trace_operation
-from game_agent.utils.gameturbo_log_domain_extract import format_domain_analysis_for_ai
-from game_agent.utils.gameturbo_log_skill import gameturbo_log_baseline_prompt_block
+from game_agent.external_services.gameturbo.log.domain_extract import (
+    format_domain_analysis_for_ai,
+)
+from game_agent.external_services.gameturbo.retry.prompts import (
+    gameturbo_log_baseline_prompt_block,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +124,8 @@ Do not suggest changing _platform, default_action, tunnel_patterns (invalid at d
         current_config_block = json.dumps(current_config, ensure_ascii=False, indent=2)
 
         domain_priority_note = (
-            "[Mandatory] Domain/region analysis below is from game_agent.utils.gameturbo_log_domain_extract, "
+            "[Mandatory] Domain/region analysis below is from "
+            "game_agent.external_services.gameturbo.log.domain_extract, "
             "aligned with GameTurbo-Native/extract_domain_region_from_log.sh + check_target_stability.py. "
             "direct_patterns: prefer direct_domains when sure they are resource/CDN/channel/SDK; "
             "no bulk direct for unknown_domains. "

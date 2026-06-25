@@ -14,11 +14,9 @@ ExternalLogReader = Callable[..., str]
 
 
 def resolve_external_log_reader(cfg: AppConfig) -> ExternalLogReader | None:
-    if not cfg.external_services.gameturbo.enabled:
-        return None
-    from game_agent.services.gameturbo_log import format_latest_gameturbo_log_for_agent
+    from game_agent.external_services.manager import ExternalServiceManager
 
-    return format_latest_gameturbo_log_for_agent
+    return ExternalServiceManager(cfg).resolve_log_reader()
 
 
 async def fetch_external_log_summary(

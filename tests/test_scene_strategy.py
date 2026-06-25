@@ -255,6 +255,16 @@ def test_should_route_scene_before_adaptive() -> None:
     assert plan_route(state) == "scene_action"
 
 
+def test_pre_login_dialogue_routes_scene() -> None:
+    state = empty_launch_graph_state()
+    state["scene_id"] = "dialogue"
+    state["scene_confidence"] = 0.7
+    state["facts"] = LaunchFacts(scene_id="dialogue", scene_confidence=0.7).model_dump()
+    facts = LaunchFacts(scene_id="dialogue", scene_confidence=0.7)
+    assert should_route_scene(state, facts) is True
+    assert plan_route(state) == "scene_action"
+
+
 def test_apply_scene_classification_activates_dialogue() -> None:
     state = empty_launch_graph_state()
     state["login_done"] = True
@@ -324,12 +334,12 @@ def test_loading_active_before_login() -> None:
     assert plan_route(state) == "scene_action"
 
 
-def test_dialogue_not_active_before_login() -> None:
+def test_dialogue_active_before_login_when_no_login_form() -> None:
     state = empty_launch_graph_state()
     state["login_done"] = False
     facts = LaunchFacts()
     cls = SceneClassification(scene_id="dialogue", confidence=0.72, evidence="narrative")
-    assert should_activate_scene_strategy(state, cls, facts) is False
+    assert should_activate_scene_strategy(state, cls, facts) is True
 
 
 def test_pre_login_unknown_after_privacy_waits_not_recover() -> None:

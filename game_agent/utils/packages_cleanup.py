@@ -3,7 +3,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from game_agent.utils.gameturbo_bootstrap import PACKAGES_DIR, output_apk_name
+from game_agent.external_services.gameturbo.bootstrap import output_apk_name
+from game_agent.external_services.gameturbo.paths import PACKAGES_DIR
 
 logger = logging.getLogger(__name__)
 

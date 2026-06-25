@@ -65,6 +65,7 @@ def test_plan_route_not_free_when_entry_passed() -> None:
     state = empty_launch_graph_state()
     state["login_done"] = True
     state["privacy_checked"] = True
+    state["enter_tapped_count"] = 1
     state["in_game_entry_passed"] = True
     state["failed_nodes"] = {
         "enter.check_in_game": {
@@ -78,6 +79,19 @@ def test_plan_route_not_free_when_entry_passed() -> None:
     state["facts"] = LaunchFacts(character_creation_blocking=True).model_dump()
     target = plan_route(state)
     assert target == "stability_observe"
+
+
+def test_plan_route_not_free_when_false_login_done_on_login_form() -> None:
+    state = empty_launch_graph_state()
+    state["login_done"] = True
+    state["privacy_checked"] = True
+    state["facts"] = LaunchFacts(
+        login_blocking=True,
+        login_stage="login_form",
+        character_creation_blocking=True,
+    ).model_dump()
+    target = plan_route(state)
+    assert target == "atomic_login"
 
 
 def test_plan_route_not_free_before_login() -> None:

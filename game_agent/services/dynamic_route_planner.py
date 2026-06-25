@@ -10,11 +10,22 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from game_agent.models.launch_graph_state import LaunchFacts, LaunchGraphState
+from game_agent.services.behavior_chain import (
+    BehaviorChain,
+    BehaviorFailureTrace,
+    BehaviorStep,
+    behavior_failure_trace,
+    behavior_progress_fingerprint,
+    can_replan_behavior_chain,
+    parse_behavior_chain_json,
+    record_behavior_chain_failure,
+    validate_behavior_chain,
+)
 from game_agent.utils.ocr_util import OcrBbox
 
 logger = logging.getLogger(__name__)
 
-DynamicActionType = Literal["tap_xy", "wait", "press_back"]
+DynamicActionType = Literal["tap_xy", "tap_text", "swipe", "wait", "press_back", "none"]
 
 _ENTER_WORLD_RE = re.compile(
     r"进入世界|Enter\s*World|进入游戏|开始游戏",
@@ -25,29 +36,22 @@ _CREATE_ROLE_RE = re.compile(
     re.IGNORECASE,
 )
 _CHAR_SLOT_RE = re.compile(r"LV\.|等级|Lv\.|角色", re.IGNORECASE)
+_BEHAVIOR_CHAIN_HINT_RE = re.compile(
+    r"创角|创建角色|Enter\s*World|进入世界|进入游戏|开始游戏|Click\s*to\s*Create|LV\.|等级|角色",
+    re.IGNORECASE,
+)
 
 
-class DynamicActionStep(BaseModel):
+class DynamicActionStep(BehaviorStep):
     id: str
-    action: DynamicActionType = "tap_xy"
-    x: int = 0
-    y: int = 0
-    target_text: str = ""
-    wait_s: float = 1.5
-    reason: str = ""
-    label: str = ""
-    max_attempts: int = 2
-    attempts: int = 0
-    done: bool = False
-
-    def signature(self) -> str:
-        return f"{self.action}:{self.x}:{self.y}:{self.target_text}:{self.wait_s:.1f}"
 
 
-class DynamicActionChain(BaseModel):
+class DynamicActionChain(BehaviorChain):
     steps: list[DynamicActionStep] = Field(default_factory=list)
-    source: str = ""
-    stage: str = ""
+
+
+class DynamicFailureTrace(BehaviorFailureTrace):
+    pass
 
 
 def _bbox_for_pattern(bboxes: list[OcrBbox], pattern: re.Pattern[str]) -> OcrBbox | None:
@@ -81,6 +85,8 @@ def build_dynamic_chain_heuristic(
     *,
     ocr_summary: str,
     facts: LaunchFacts,
+    replan_from_step_id: str = "",
+    failure_context: list[dict[str, Any]] | None = None,
 ) -> DynamicActionChain | None:
     """启发式：选角 -> 进入世界；或仅创建角色/进入世界。"""
     merged = ocr_summary or " ".join(b.text for b in bboxes)
@@ -90,7 +96,7 @@ def build_dynamic_chain_heuristic(
 
     steps: list[DynamicActionStep] = []
 
-    if char_slot and enter:
+    if char_slot and enter and not replan_from_step_id:
         steps.append(
             DynamicActionStep(
                 id="select_character",
@@ -99,6 +105,7 @@ def build_dynamic_chain_heuristic(
                 y=char_slot.cy,
                 target_text=char_slot.text.strip(),
                 label="select_character",
+                success_criteria=["角色槽被选中", "开始游戏/进入世界按钮仍可见"],
                 reason="select existing character slot before enter",
             ),
         )
@@ -110,7 +117,44 @@ def build_dynamic_chain_heuristic(
                 y=enter.cy,
                 target_text=enter.text.strip(),
                 label="enter_world",
+                success_criteria=["进入 loading", "进入 in_game_hud", "进入按钮消失"],
                 reason="tap enter world after character selected",
+            ),
+        )
+    elif replan_from_step_id == "select_character" and enter:
+        steps.append(
+            DynamicActionStep(
+                id="enter_world",
+                action="tap_xy",
+                x=enter.cx,
+                y=enter.cy,
+                target_text=enter.text.strip(),
+                label="enter_world",
+                success_criteria=["进入 loading", "进入 in_game_hud", "进入按钮消失"],
+                reason="replan after select_character stalled; tap visible enter CTA",
+            ),
+        )
+    elif replan_from_step_id == "enter_world" and enter:
+        steps.append(
+            DynamicActionStep(
+                id="wait_after_enter_retry",
+                action="wait",
+                wait_s=1.5,
+                label="wait_after_enter_retry",
+                success_criteria=["界面刷新或进入 loading"],
+                reason="replan from failed enter_world: wait before retry",
+            ),
+        )
+        steps.append(
+            DynamicActionStep(
+                id="enter_world_retry",
+                action="tap_xy",
+                x=enter.cx,
+                y=enter.cy,
+                target_text=enter.text.strip(),
+                label="enter_world",
+                success_criteria=["进入 loading", "进入 in_game_hud", "进入按钮消失"],
+                reason="retry visible enter CTA after wait",
             ),
         )
     elif enter and (
@@ -125,6 +169,7 @@ def build_dynamic_chain_heuristic(
                 y=enter.cy,
                 target_text=enter.text.strip(),
                 label="enter_world",
+                success_criteria=["进入 loading", "进入 in_game_hud", "进入按钮消失"],
                 reason="tap enter world on character select screen",
             ),
         )
@@ -137,6 +182,7 @@ def build_dynamic_chain_heuristic(
                 y=enter.cy,
                 target_text=enter.text.strip(),
                 label="enter_world",
+                success_criteria=["进入 loading", "进入 in_game_hud", "进入按钮消失"],
                 reason="tap enter world CTA",
             ),
         )
@@ -149,6 +195,7 @@ def build_dynamic_chain_heuristic(
                 y=create.cy,
                 target_text=create.text.strip(),
                 label="create_role",
+                success_criteria=["进入创角流程", "出现职业/角色创建控件"],
                 reason="tap create role entry",
             ),
         )
@@ -160,70 +207,25 @@ def build_dynamic_chain_heuristic(
 
     return DynamicActionChain(
         steps=steps,
-        source="heuristic",
+        source="heuristic_replan" if replan_from_step_id else "heuristic",
         stage="character_select" if char_slot else "character_creation",
+        replan_from_step_id=replan_from_step_id,
+        failure_context=failure_context or [],
     )
 
 
 def parse_dynamic_chain_vision(raw: str) -> DynamicActionChain | None:
-    text = (raw or "").strip()
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.startswith("```"):
-        text = text[3:]
-    if text.endswith("```"):
-        text = text[:-3]
-    text = text.strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+    chain = parse_behavior_chain_json(raw, max_wait_s=5.0, max_steps=7)
+    if chain is None:
         return None
-    if not isinstance(data, dict):
-        return None
-    raw_steps = data.get("steps") or []
-    if not isinstance(raw_steps, list) or not raw_steps:
-        return None
-    steps: list[DynamicActionStep] = []
-    for i, item in enumerate(raw_steps):
-        if not isinstance(item, dict):
-            continue
-        action = str(item.get("action", "tap_xy") or "tap_xy").strip().lower()
-        if action not in ("tap_xy", "wait", "press_back"):
-            continue
-        try:
-            x = int(item.get("x", 0) or 0)
-            y = int(item.get("y", 0) or 0)
-            wait_s = float(item.get("wait_s", 1.5) or 1.5)
-        except (TypeError, ValueError):
-            x, y, wait_s = 0, 0, 1.5
-        steps.append(
-            DynamicActionStep(
-                id=str(item.get("id", f"step_{i}") or f"step_{i}"),
-                action=action,  # type: ignore[arg-type]
-                x=x,
-                y=y,
-                target_text=str(item.get("target_text", "") or ""),
-                wait_s=max(0.5, min(wait_s, 5.0)),
-                reason=str(item.get("reason", "") or ""),
-                label=str(item.get("label", "") or ""),
-            ),
-        )
-    if not steps:
-        return None
-    return DynamicActionChain(
-        steps=steps,
-        source="vision",
-        stage=str(data.get("stage", "") or ""),
-    )
+    return DynamicActionChain.model_validate(chain.model_dump())
 
 
 def validate_chain(chain: DynamicActionChain) -> DynamicActionChain | None:
-    if not chain.steps:
+    validated = validate_behavior_chain(chain)
+    if validated is None:
         return None
-    for step in chain.steps:
-        if step.action == "tap_xy" and (step.x <= 0 or step.y <= 0):
-            return None
-    return chain
+    return DynamicActionChain.model_validate(validated.model_dump())
 
 
 def should_build_dynamic_chain(
@@ -240,7 +242,13 @@ def should_build_dynamic_chain(
         return False
     if state.get("current_phase_spec") or state.get("adaptive_active_node_id"):
         return False
-    if not state.get("adaptive_flow_done") and state.get("login_done"):
+    has_chain_hint = bool(
+        facts.character_creation_blocking
+        or facts.interpreter_stage == "character_creation"
+        or facts.vision_stage == "character_creation"
+        or _BEHAVIOR_CHAIN_HINT_RE.search(ocr_summary or "")
+    )
+    if not state.get("adaptive_flow_done") and state.get("login_done") and not has_chain_hint:
         from game_agent.graphs.launch_routing import should_route_adaptive
         from game_agent.models.launch_graph_state import facts_from_state
 
@@ -256,18 +264,15 @@ def should_build_dynamic_chain(
         return False
     if facts.download_visible:
         return False
+    if not has_chain_hint:
+        return False
     if facts.character_creation_blocking:
         return True
     if facts.interpreter_stage == "character_creation":
         return True
     if facts.vision_stage == "character_creation":
         return True
-    merged = ocr_summary or ""
-    if re.search(
-        r"创角|创建角色|Enter\s*World|进入世界|Click\s*to\s*Create|LV\.",
-        merged,
-        re.IGNORECASE,
-    ):
+    if _BEHAVIOR_CHAIN_HINT_RE.search(ocr_summary or ""):
         return True
     return False
 
@@ -287,11 +292,49 @@ def set_dynamic_chain(state: LaunchGraphState, chain: DynamicActionChain) -> Non
     )
 
 
-def clear_dynamic_chain(state: LaunchGraphState, *, failed: bool = False) -> None:
+def clear_dynamic_chain(
+    state: LaunchGraphState,
+    *,
+    failed: bool = False,
+    completed: bool = False,
+) -> None:
     state["dynamic_chain"] = []
     state["dynamic_cursor"] = 0
+    if completed:
+        state["dynamic_failure_trace"] = []
+        state["dynamic_replan_count"] = 0
+        state["dynamic_last_failed_step_id"] = ""
     if failed:
         state["dynamic_failed"] = True
+
+
+def dynamic_failure_trace(state: LaunchGraphState) -> list[dict[str, Any]]:
+    return behavior_failure_trace(state, prefix="dynamic")
+
+
+def can_replan_dynamic_chain(state: LaunchGraphState, *, max_replans: int) -> bool:
+    return can_replan_behavior_chain(state, prefix="dynamic", max_replans=max_replans)
+
+
+def record_dynamic_chain_failure(
+    state: LaunchGraphState,
+    step: DynamicActionStep,
+    *,
+    reason: str,
+    ocr_summary: str = "",
+    artifact: str = "",
+) -> DynamicFailureTrace:
+    trace = record_behavior_chain_failure(
+        state,
+        step,
+        prefix="dynamic",
+        reason=reason,
+        ocr_summary=ocr_summary,
+        artifact=artifact,
+    )
+    state["dynamic_failed"] = False
+    state["recover_hint"] = f"dynamic_replan:{step.id}:{reason[:160]}"
+    return DynamicFailureTrace.model_validate(trace.model_dump())
 
 
 def get_dynamic_chain(state: LaunchGraphState) -> DynamicActionChain | None:
@@ -328,7 +371,7 @@ def advance_dynamic_cursor(state: LaunchGraphState) -> bool:
     cursor = int(state.get("dynamic_cursor") or 0) + 1
     state["dynamic_cursor"] = cursor
     if cursor >= len(chain.steps):
-        clear_dynamic_chain(state)
+        clear_dynamic_chain(state, completed=True)
         logger.info("[DynamicChain] completed all steps")
         return False
     state["dynamic_chain"] = chain.model_dump()
@@ -355,7 +398,7 @@ def chain_progress_fingerprint(
     ocr_summary: str,
     stage: str = "",
 ) -> str:
-    return f"{stage}|{(ocr_summary or '')[:300]}"
+    return behavior_progress_fingerprint(ocr_summary=ocr_summary, stage=stage)
 
 
 def has_active_dynamic_chain(state: LaunchGraphState) -> bool:
@@ -371,7 +414,15 @@ def maybe_build_dynamic_chain(
 ) -> bool:
     if not should_build_dynamic_chain(state, facts, ocr_summary=ocr_summary):
         return False
-    chain = build_dynamic_chain_heuristic(bboxes, ocr_summary=ocr_summary, facts=facts)
+    failed_step_id = str(state.get("dynamic_last_failed_step_id") or "")
+    traces = dynamic_failure_trace(state)
+    chain = build_dynamic_chain_heuristic(
+        bboxes,
+        ocr_summary=ocr_summary,
+        facts=facts,
+        replan_from_step_id=failed_step_id,
+        failure_context=traces,
+    )
     if chain is None:
         return False
     validated = validate_chain(chain)

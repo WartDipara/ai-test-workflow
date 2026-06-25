@@ -16,10 +16,18 @@ from game_agent.graphs.launch_facts import (
     interpretation_focus_for_facts,
     merge_analyze_screen_response,
     merge_interpretation_into_facts,
+    merge_sticky_gate_facts,
     needs_async_vision_enrichment,
     needs_sync_interpretation,
 )
 from game_agent.graphs.launch_routing import plan_route
+from game_agent.graphs.launch_phase import (
+    clear_game_entry_judgment,
+    in_game_entry_allowed,
+    ocr_credential_login_passed,
+    store_game_entry_judgment,
+    vlm_login_verify_passed,
+)
 from game_agent.graphs.launch_limits import launch_graph_limits_from_state, seed_launch_graph_limits
 from game_agent.graphs.launch_state_store import (
     clear_failed_node,
@@ -27,6 +35,7 @@ from game_agent.graphs.launch_state_store import (
     get_last_ocr,
     increment_enter_tapped,
     is_privacy_checked,
+    is_login_done,
     mark_tree_node_done,
     mark_tree_node_failed,
     set_in_game_confirmed,
@@ -34,6 +43,10 @@ from game_agent.graphs.launch_state_store import (
     set_privacy_checked,
     set_server_checked,
     set_sub_account_selected,
+)
+from game_agent.services.enter_gate_planner import (
+    decide_enter_gate_tap,
+    enter_gate_likely_visible,
 )
 from game_agent.services.login_batch_fill import atomic_login_fill_and_submit
 from game_agent.services.login_secure_keyboard import (
@@ -51,7 +64,8 @@ from game_agent.services.login_secure_keyboard import (
 )
 from game_agent.services.vision_tools import run_analyze_screen
 from game_agent.services.screen_interpreter import interpret_launch_screen
-from game_agent.services.node_verifier import verify_stage_exit
+from game_agent.services.node_verifier import NodeVerifyResult, verify_stage_exit
+from game_agent.services.action_frame import note_action_failure, run_action_frame
 from game_agent.models.launch_graph_state import (
     LaunchGraphState,
     facts_from_state,
@@ -65,6 +79,25 @@ from game_agent.services.blocking_overlay import (
 )
 from game_agent.services.game_entry_check import run_in_game_check, run_in_game_check_on_capture
 from game_agent.core.external_log import fetch_external_log_summary
+from game_agent.services.behavior_chain import (
+    behavior_progress_fingerprint,
+    evaluate_step_success,
+    execute_behavior_step,
+    press_back_caused_exit_confirm,
+    sanitize_press_back_step,
+)
+from game_agent.services.in_game_agent import (
+    advance_in_game_behavior_cursor,
+    can_replan_in_game_behavior_chain,
+    clear_in_game_behavior_chain,
+    decide_in_game_action,
+    decide_in_game_behavior_chain,
+    get_current_in_game_behavior_step,
+    execute_in_game_action,
+    mark_in_game_behavior_attempt,
+    record_in_game_behavior_failure,
+    set_in_game_behavior_chain,
+)
 from game_agent.services.in_game_stability_watch import run_stability_check
 from game_agent.services.phase_engine import run_once as run_adaptive_phase_once
 from game_agent.services.privacy_checkbox import ensure_privacy_checkbox_checked_multimodal
@@ -87,11 +120,13 @@ from game_agent.services.free_action_planner import (
 from game_agent.services.dynamic_route_planner import (
     DynamicActionStep,
     advance_dynamic_cursor,
+    can_replan_dynamic_chain,
     chain_progress_fingerprint,
     clear_dynamic_chain,
     get_current_step,
     mark_step_attempt,
     maybe_build_dynamic_chain,
+    record_dynamic_chain_failure,
 )
 from game_agent.services.scene_classifier import classify_scene, detect_scene_transition
 from game_agent.services.scene_gate import plan_from_scene_gate, resolve_scene_gate, scene_id_from_scene_gate
@@ -153,12 +188,16 @@ async def _try_confirm_in_game_via_hud_ocr(
     """OCR HUD hit → multimodal in-game check. Returns True if entry passed."""
     if state.get("in_game_entry_passed") or state.get("in_game_confirmed"):
         return False
-    if not state.get("login_done"):
+    from game_agent.models.launch_graph_state import facts_from_state
+
+    facts = facts_from_state(state)
+    if not in_game_entry_allowed(state, facts):
         return False
     trigger, hud_hits = should_trigger_in_game_hud_check(ocr_summary)
     if not trigger:
         return False
     actx = deps.attempt_context
+    confirm_needed = deps.app_config.game.main_screen_confirm_rounds
     entry_result = await run_in_game_check_on_capture(
         shot_path=shot_path,
         ocr_summary=ocr_summary,
@@ -168,9 +207,11 @@ async def _try_confirm_in_game_via_hud_ocr(
         round_id=round_id,
         sessions_restarted=actx.session_restarts if actx else 0,
         session_index=actx.get_session_index() if actx else 1,
-        confirm_needed=1,
+        confirm_needed=confirm_needed,
         provisional=True,
     )
+    if entry_result.judgment is not None:
+        store_game_entry_judgment(state, entry_result.judgment)
     if not entry_result.confirmed:
         return False
     state["in_game_entry_passed"] = True
@@ -181,6 +222,22 @@ async def _try_confirm_in_game_via_hud_ocr(
         hud_hits,
     )
     return True
+
+
+def _in_game_play_session_active(state: LaunchGraphState) -> bool:
+    if state.get("in_game_play_completed") or state.get("in_game_agent_done"):
+        return False
+    started = float(
+        state.get("in_game_play_started_at") or state.get("in_game_agent_started_at") or 0.0
+    )
+    if started <= 0.0:
+        return False
+    deadline = float(
+        state.get("in_game_play_deadline") or state.get("in_game_agent_deadline") or 0.0
+    )
+    if deadline <= 0.0:
+        return False
+    return time.monotonic() < deadline
 
 
 async def observe_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
@@ -195,11 +252,21 @@ async def observe_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Laun
         state["finished"] = True
         state["terminal_error"] = reason[:2000]
         return state  # type: ignore[return-value]
-    state["iteration"] = int(state.get("iteration") or 0) + 1
-    if state["iteration"] >= limits.max_graph_iterations:
-        state["finished"] = True
-        state["terminal_error"] = f"launch graph iteration limit ({limits.max_graph_iterations})"
-        return state  # type: ignore[return-value]
+    agent_active = _in_game_play_session_active(state) and not state.get("in_game_confirmed")
+    if not agent_active:
+        state["iteration"] = int(state.get("iteration") or 0) + 1
+        if state["iteration"] >= limits.max_graph_iterations:
+            state["finished"] = True
+            state["terminal_error"] = f"launch graph iteration limit ({limits.max_graph_iterations})"
+            return state  # type: ignore[return-value]
+    else:
+        agent_rounds = int(state.get("in_game_agent_rounds") or 0)
+        if agent_rounds >= limits.max_in_game_agent_rounds:
+            state["finished"] = True
+            state["terminal_error"] = (
+                f"in_game_agent round limit ({limits.max_in_game_agent_rounds})"
+            )
+            return state  # type: ignore[return-value]
     actx = deps.attempt_context
     if actx is not None:
         actx.set_ocr_busy(True)
@@ -315,6 +382,9 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
         return state  # type: ignore[return-value]
 
     shot = Path(shot_path)
+    from game_agent.models.launch_graph_state import facts_from_state
+
+    prev_facts = facts_from_state(state) if state.get("facts") else None
     bboxes = deserialize_bboxes(state.get("last_bboxes"))
     if not bboxes:
         _, bboxes = await asyncio.to_thread(
@@ -356,14 +426,19 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
         llm_cfg=deps.app_config.llm_multimodal,
         round_id=deps.round_id,
     )
-    facts = await resolve_download_gate(
-        facts,
-        bboxes=bboxes,
-        ocr_merged=ocr_merged,
-        screenshot_path=shot,
-        llm_cfg=deps.app_config.llm_multimodal,
-        round_id=deps.round_id,
-    )
+    in_game_play_active = _in_game_play_session_active(state)
+    skip_heavy_vlm = in_game_play_active
+    llm_mm = deps.app_config.llm_multimodal
+    if not skip_heavy_vlm:
+        facts = await resolve_download_gate(
+            facts,
+            bboxes=bboxes,
+            ocr_merged=ocr_merged,
+            screenshot_path=shot,
+            llm_cfg=llm_mm,
+            round_id=deps.round_id,
+            screen_h=sh,
+        )
     ocr_has_sub_coords = facts.sub_account_action_xy is not None
     interpret_hash = ""
     try:
@@ -371,7 +446,16 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
     except OSError:
         pass
     already_interpreted = interpret_hash and interpret_hash == state.get("interpret_screenshot_hash")
-    if needs_sync_interpretation(facts, ocr_merged=ocr_merged) and not already_interpreted:
+    skip_interpret = (
+        llm_mm is not None
+        and llm_mm.in_game_skip_interpret
+        and in_game_play_active
+    )
+    if (
+        needs_sync_interpretation(facts, ocr_merged=ocr_merged)
+        and not already_interpreted
+        and not skip_interpret
+    ):
         focus = interpretation_focus_for_facts(facts)
         interp = await interpret_launch_screen(
             llm_cfg=deps.app_config.llm_multimodal,
@@ -427,9 +511,10 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
         ocr_merged=ocr_merged,
         screen_h=sh,
         screenshot_path=shot,
-        llm_cfg=deps.app_config.llm_multimodal,
+        llm_cfg=llm_mm,
         round_id=deps.round_id,
         screenshot_hash=interpret_hash,
+        skip_vlm=skip_heavy_vlm,
     )
     if scene_gate_judgment is not None:
         logger.info(
@@ -447,6 +532,26 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
     )
     apply_scene_classification(state, scene_cls, scene_transition, facts)
     facts = facts_from_state(state)
+    facts = merge_sticky_gate_facts(facts, prev_facts=prev_facts, state=state)
+    if state.get("in_game_entry_passed") or scene_cls.scene_id == "in_game_hud":
+        in_game_updates: dict = {}
+        if facts.download_visible:
+            in_game_updates.update(
+                {
+                    "download_visible": False,
+                    "download_in_progress": False,
+                    "download_action": "",
+                    "download_gate_kind": "",
+                    "download_progress_text": "",
+                },
+            )
+        if in_game_updates:
+            reason = facts.classify_reason
+            if facts.download_visible and in_game_updates.get("download_visible") is False:
+                reason = f"{reason}; in_game:download_suppressed" if reason else "in_game:download_suppressed"
+            in_game_updates["classify_reason"] = reason[:500]
+            facts = facts.model_copy(update=in_game_updates)
+            state["facts"] = facts.model_dump()
     logger.info(
         "[LaunchGraph:classify] scene=%s conf=%.2f source=%s trans=%s active=%s",
         scene_cls.scene_id,
@@ -472,6 +577,8 @@ async def classify_screen(state: LaunchGraphState, deps: LaunchGraphDeps) -> Lau
 def _infer_stage_label(facts, state: LaunchGraphState) -> str:
     if state.get("in_game_confirmed"):
         return "in_game"
+    if state.get("in_game_agent_started_at") and not state.get("in_game_agent_done"):
+        return "in_game_agent"
     if facts.login_blocking:
         return "login_form"
     if facts.sub_account_blocking:
@@ -511,6 +618,14 @@ async def ensure_privacy_checkbox_node(
         deps.run_state.privacy_checkbox_tapped = True
         mark_tree_node_done(state, node, artifact=str(result.debug_marked_image or ""))
     else:
+        note_action_failure(
+            state,
+            node=node,
+            verify=NodeVerifyResult(passed=False, reason=result.message[:300]),
+            ocr_before=get_last_ocr(state),
+            ocr_after=get_last_ocr(state),
+            expected_stage="privacy_checkbox",
+        )
         mark_tree_node_failed(state, node, result.message)
     return state  # type: ignore[return-value]
 
@@ -521,63 +636,139 @@ async def handle_initial_privacy_dialog_node(
 ) -> LaunchGraphState:
     state = dict(state)
     node = "handle_initial_privacy_dialog"
-    from game_agent.models.launch_graph_state import facts_from_state
-
     facts = facts_from_state(state)
     if facts.agree_button_xy is None:
         mark_tree_node_failed(state, node, "no agree button coords")
         return state  # type: ignore[return-value]
-    x, y = facts.agree_button_xy
+
     sw, sh = deps.screen_width, deps.screen_height
-    msg = deps.adb.tap(x, y, width=sw, height=sh)
-    deps.adb.wait_seconds(0.8)
-    mark_tree_node_done(state, node, artifact=msg)
+    ocr_before = get_last_ocr(state)
+
+    async def _act(st: LaunchGraphState, attempt: int) -> str:
+        from game_agent.services.privacy_gate import pick_consent_button_from_ocr
+
+        f = facts_from_state(st)
+        xy = f.agree_button_xy or facts.agree_button_xy
+        if attempt > 1:
+            bboxes = deserialize_bboxes(st.get("last_bboxes"))
+            picked = pick_consent_button_from_ocr(bboxes) if bboxes else None
+            if picked is not None:
+                xy = (picked[0], picked[1])
+                st["facts"] = f.model_copy(update={"agree_button_xy": xy}).model_dump()
+        if xy is None:
+            return "no agree coords"
+        x, y = xy
+        return deps.adb.tap(x, y, width=sw, height=sh)
+
+    def _verify(st: LaunchGraphState, before: str, after: str):
+        return verify_stage_exit(
+            ocr_before=before,
+            ocr_after=after,
+            expected_stage="privacy_modal",
+        )
+
+    frame = await run_action_frame(
+        state,
+        node=node,
+        adb=deps.adb,
+        artifact_root=deps.artifact_root,
+        screen_w=sw,
+        screen_h=sh,
+        act_fn=_act,
+        verify_fn=_verify,
+        max_attempts=3,
+        ocr_before=ocr_before,
+        expected_stage="privacy_modal",
+        attempt_context=deps.attempt_context,
+    )
+    if frame.passed:
+        mark_tree_node_done(state, node, artifact=frame.artifact, evidence=frame.evidence)
+    else:
+        reason = frame.last_reflection.reason if frame.last_reflection else "privacy verify failed"
+        mark_tree_node_failed(state, node, reason[:500], artifact=frame.artifact)
     return state  # type: ignore[return-value]
 
 
 async def handle_download_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
     state = dict(state)
     node = "handle_download"
+    if state.get("in_game_entry_passed") or state.get("in_game_confirmed"):
+        logger.info("[LaunchGraph:download] skipped — already in game")
+        mark_tree_node_done(state, node, evidence="skipped_in_game")
+        return state  # type: ignore[return-value]
+
     sw, sh = deps.screen_width, deps.screen_height
-    from pathlib import Path
-
-    from game_agent.models.launch_graph_state import facts_from_state
-
     facts = facts_from_state(state)
-    shot_path = state.get("last_screenshot")
-    ocr_merged = state.get("last_ocr_summary") or ""
-    bboxes = deserialize_bboxes(state.get("last_bboxes"))
+    ocr_before = get_last_ocr(state)
 
-    if shot_path:
-        if not bboxes:
-            _, bboxes = await asyncio.to_thread(
-                run_ocr_frame,
-                Path(shot_path),
-                device_w=sw,
-                device_h=sh,
-                worker_key=deps.adb.device_serial,
-            )
-            ocr_merged = " ".join(b.text for b in bboxes)
-            state["last_ocr_summary"] = ocr_merged
-            state["last_bboxes"] = serialize_bboxes(bboxes)
+    async def _act(st: LaunchGraphState, attempt: int) -> str:
+        from game_agent.services.download_gate import pick_continue_button_from_ocr
 
-    if facts.download_continue_xy is not None:
-        x, y = facts.download_continue_xy
-        deps.adb.tap(x, y, width=sw, height=sh)
-        deps.adb.wait_seconds(1.0)
-    else:
+        f = facts_from_state(st)
+        bboxes = deserialize_bboxes(st.get("last_bboxes"))
+        if f.download_continue_xy is not None:
+            x, y = f.download_continue_xy
+            deps.adb.tap(x, y, width=sw, height=sh)
+            return f"tapped continue ({x},{y})"
         picked = pick_continue_button_from_ocr(bboxes) if bboxes else None
         if picked is not None:
             deps.adb.tap(picked[0], picked[1], width=sw, height=sh)
-            deps.adb.wait_seconds(1.0)
-        else:
-            deps.adb.wait_seconds(4.0)
+            return f"tapped ocr continue ({picked[0]},{picked[1]})"
+        deps.adb.wait_seconds(4.0)
+        return "wait download"
 
-    if ocr_still_downloading(ocr_merged):
-        logger.info("[LaunchGraph:download] still in progress, not marking done")
-        return state  # type: ignore[return-value]
+    def _verify(st: LaunchGraphState, before: str, after: str):
+        from game_agent.services.download_gate import ocr_still_downloading
+        from game_agent.services.privacy_gate import ocr_has_privacy_context
 
-    mark_tree_node_done(state, node)
+        if ocr_has_privacy_context(after) and not ocr_still_downloading(after):
+            return verify_stage_exit(
+                ocr_before=before,
+                ocr_after=after,
+                expected_stage="privacy_modal",
+            )
+        if ocr_still_downloading(after):
+            return verify_stage_exit(
+                ocr_before=before,
+                ocr_after=after,
+                expected_stage="download",
+            )
+        return verify_stage_exit(
+            ocr_before=before,
+            ocr_after=after,
+            expected_stage="download",
+            completion_signals=["进入", "enter", "开始"],
+        )
+
+    frame = await run_action_frame(
+        state,
+        node=node,
+        adb=deps.adb,
+        artifact_root=deps.artifact_root,
+        screen_w=sw,
+        screen_h=sh,
+        act_fn=_act,
+        verify_fn=_verify,
+        max_attempts=2,
+        ocr_before=ocr_before,
+        expected_stage="download",
+        attempt_context=deps.attempt_context,
+    )
+    if frame.passed:
+        from game_agent.services.download_gate import ocr_still_downloading
+
+        ocr_after = state.get("last_ocr_summary") or ""
+        if ocr_still_downloading(ocr_after):
+            logger.info("[LaunchGraph:download] still in progress, not marking done")
+            return state  # type: ignore[return-value]
+        mark_tree_node_done(state, node, artifact=frame.artifact, evidence=frame.evidence)
+    elif frame.last_reflection and frame.last_reflection.root_cause == "wrong_route":
+        logger.info(
+            "[LaunchGraph:download] wrong_route corrected, defer to privacy milestone"
+        )
+    else:
+        reason = frame.last_reflection.reason if frame.last_reflection else "download verify failed"
+        mark_tree_node_failed(state, node, reason[:500])
     return state  # type: ignore[return-value]
 
 
@@ -587,9 +778,6 @@ async def dismiss_blocking_overlay_node(
 ) -> LaunchGraphState:
     state = dict(state)
     node = "dismiss_blocking_overlay"
-    from pathlib import Path
-    from game_agent.models.launch_graph_state import facts_from_state
-
     facts = facts_from_state(state)
     sw, sh = deps.screen_width, deps.screen_height
     shot_path = state.get("last_screenshot") or ""
@@ -623,59 +811,65 @@ async def dismiss_blocking_overlay_node(
         mark_tree_node_failed(state, node, "no dismiss plan for blocking overlay")
         return state  # type: ignore[return-value]
 
-    tap_msg = deps.adb.tap(plan.x, plan.y, width=sw, height=sh)
-    deps.adb.wait_seconds(0.8)
+    dismiss_plan = plan
 
-    ts = datetime.now().strftime("%H%M%S_%f")
-    after_shot = deps.artifact_root / f"graph_overlay_dismiss_{ts}.png"
-    deps.adb.screencap_png(after_shot)
-    actx = deps.attempt_context
-    if actx is not None:
-        actx.set_ocr_busy(True)
-    try:
-        ocr_after, _ = await asyncio.to_thread(
-            run_ocr_frame,
-            after_shot,
-            device_w=sw,
-            device_h=sh,
-            worker_key=deps.adb.device_serial,
-        )
-    finally:
-        if actx is not None:
-            actx.set_ocr_busy(False)
-    verify = verify_overlay_dismissed(ocr_before, ocr_after)
-    still_visible = overlay_still_visible(ocr_after)
+    async def _act(st: LaunchGraphState, attempt: int) -> str:
+        return deps.adb.tap(dismiss_plan.x, dismiss_plan.y, width=sw, height=sh)
 
-    if verify.passed or not still_visible:
+    def _verify(st: LaunchGraphState, before: str, after: str):
+        overlay_verify = verify_overlay_dismissed(before, after)
+        if overlay_verify.passed:
+            return overlay_verify
+        if not overlay_still_visible(after):
+            return NodeVerifyResult(
+                passed=True,
+                reason="overlay no longer visible",
+                evidence=overlay_verify.evidence,
+            )
+        return overlay_verify
+
+    frame = await run_action_frame(
+        state,
+        node=node,
+        adb=deps.adb,
+        artifact_root=deps.artifact_root,
+        screen_w=sw,
+        screen_h=sh,
+        act_fn=_act,
+        verify_fn=_verify,
+        max_attempts=2,
+        ocr_before=ocr_before,
+        expected_stage="announcement",
+        attempt_context=deps.attempt_context,
+    )
+    if frame.passed:
         facts = facts.model_copy(
             update={
                 "announcement_overlay": False,
                 "announcement_dismiss_xy": None,
-            }
+            },
         )
         state["facts"] = facts.model_dump()
-        state["last_screenshot"] = str(after_shot.resolve())
-        state["last_ocr_summary"] = ocr_after
         mark_tree_node_done(
             state,
             node,
-            artifact=tap_msg,
-            evidence=f"{plan.method}: {verify.reason}",
+            artifact=frame.artifact,
+            evidence=f"{dismiss_plan.method}: {frame.evidence}",
         )
         logger.info(
-            "[LaunchGraph:overlay] dismissed method=%s (%s,%s) %s",
-            plan.method,
-            plan.x,
-            plan.y,
-            verify.reason,
+            "[LaunchGraph:overlay] dismissed method=%s (%s,%s)",
+            dismiss_plan.method,
+            dismiss_plan.x,
+            dismiss_plan.y,
         )
     else:
         await asyncio.to_thread(dismiss_overlay, deps.adb.device_serial, sw, sh)
+        reason = frame.last_reflection.reason if frame.last_reflection else "overlay still visible"
         mark_tree_node_failed(
             state,
             node,
-            f"overlay still visible after {plan.method}: {verify.reason}",
-            artifact=tap_msg,
+            f"overlay still visible after {dismiss_plan.method}: {reason}",
+            artifact=frame.artifact,
         )
     return state  # type: ignore[return-value]
 
@@ -718,8 +912,82 @@ async def atomic_login_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> L
         deps.run_state.cached_login_button_xy = result.targets.login_button_xy
         deps.run_state.cached_login_button_text = result.targets.login_text
 
-    if not result.ok:
+    if not result.ok or not result.ocr_verify_ok or not result.left_login_form:
+        note_action_failure(
+            state,
+            node=node,
+            verify=NodeVerifyResult(
+                passed=False,
+                reason=result.message[:300],
+            ),
+            ocr_before=get_last_ocr(state),
+            ocr_after=result.verify_ocr_summary or "",
+            expected_stage="login",
+        )
         mark_tree_node_failed(state, node, result.message[:500])
+        return state  # type: ignore[return-value]
+
+    if result.verify_screenshot is None:
+        mark_tree_node_failed(state, node, "login verify screenshot missing")
+        return state  # type: ignore[return-value]
+
+    if ocr_credential_login_passed(
+        left_login_form=result.left_login_form,
+        stage=result.stage,
+    ):
+        if cfg.llm_multimodal is not None:
+            actx = deps.attempt_context
+            entry_result = await run_in_game_check_on_capture(
+                shot_path=result.verify_screenshot,
+                ocr_summary=result.verify_ocr_summary,
+                cfg=cfg,
+                run_state=deps.run_state,
+                audit=deps.audit,
+                round_id=deps.round_id,
+                sessions_restarted=actx.session_restarts if actx else 0,
+                session_index=actx.get_session_index() if actx else 1,
+                confirm_needed=1,
+                provisional=True,
+            )
+            if entry_result.judgment is not None:
+                store_game_entry_judgment(state, entry_result.judgment)
+        set_login_done(state, evidence=result.message[:200])
+        deps.run_state.launch_stage = "login_form"
+        mark_tree_node_done(state, node, artifact=result.message[:200], evidence="atomic_login_ocr_ok")
+        return state  # type: ignore[return-value]
+
+    if cfg.llm_multimodal is None:
+        mark_tree_node_failed(state, node, "llm_multimodal required for login VLM verify")
+        return state  # type: ignore[return-value]
+
+    actx = deps.attempt_context
+    entry_result = await run_in_game_check_on_capture(
+        shot_path=result.verify_screenshot,
+        ocr_summary=result.verify_ocr_summary,
+        cfg=cfg,
+        run_state=deps.run_state,
+        audit=deps.audit,
+        round_id=deps.round_id,
+        sessions_restarted=actx.session_restarts if actx else 0,
+        session_index=actx.get_session_index() if actx else 1,
+        confirm_needed=1,
+        provisional=True,
+    )
+    if entry_result.judgment is not None:
+        store_game_entry_judgment(state, entry_result.judgment)
+
+    facts = facts_from_state(state)
+    if not vlm_login_verify_passed(state, facts=facts):
+        vlm_msg = entry_result.message[:300] if entry_result.message else "VLM login verify failed"
+        note_action_failure(
+            state,
+            node=node,
+            verify=NodeVerifyResult(passed=False, reason=vlm_msg),
+            ocr_before=result.verify_ocr_summary or "",
+            ocr_after=result.verify_ocr_summary or "",
+            expected_stage="login",
+        )
+        mark_tree_node_failed(state, node, vlm_msg)
         return state  # type: ignore[return-value]
 
     set_login_done(state, evidence=result.message[:200])
@@ -731,57 +999,50 @@ async def atomic_login_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> L
 async def select_sub_account_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
     state = dict(state)
     node = "select_sub_account"
-    from game_agent.models.launch_graph_state import facts_from_state
-
     facts = facts_from_state(state)
     if facts.sub_account_action_xy is None:
         mark_tree_node_failed(state, node, "no sub-account entry to tap")
         return state  # type: ignore[return-value]
-    x, y = facts.sub_account_action_xy
+
     sw, sh = deps.screen_width, deps.screen_height
     ocr_before = get_last_ocr(state)
-    deps.adb.tap(x, y, width=sw, height=sh)
-    deps.adb.wait_seconds(1.2)
-    ts = datetime.now().strftime("%H%M%S_%f")
-    path = deps.artifact_root / f"graph_subacct_{ts}.png"
-    deps.adb.screencap_png(path)
-    actx = deps.attempt_context
-    if actx is not None:
-        actx.set_ocr_busy(True)
-    try:
-        ocr_after, _ = await asyncio.to_thread(
-            run_ocr_frame,
-            path,
-            device_w=sw,
-            device_h=sh,
-            worker_key=deps.adb.device_serial,
+    tap_xy = facts.sub_account_action_xy
+    signals = list(facts.screen_completion_signals)
+
+    async def _act(st: LaunchGraphState, attempt: int) -> str:
+        x, y = tap_xy  # type: ignore[misc]
+        return deps.adb.tap(x, y, width=sw, height=sh)
+
+    def _verify(st: LaunchGraphState, before: str, after: str):
+        return verify_stage_exit(
+            ocr_before=before,
+            ocr_after=after,
+            expected_stage="sub_account_select",
+            completion_signals=signals,
         )
-    finally:
-        if actx is not None:
-            actx.set_ocr_busy(False)
-    verify = verify_stage_exit(
+
+    frame = await run_action_frame(
+        state,
+        node=node,
+        adb=deps.adb,
+        artifact_root=deps.artifact_root,
+        screen_w=sw,
+        screen_h=sh,
+        act_fn=_act,
+        verify_fn=_verify,
+        max_attempts=3,
         ocr_before=ocr_before,
-        ocr_after=ocr_after,
         expected_stage="sub_account_select",
-        completion_signals=facts.screen_completion_signals,
+        attempt_context=deps.attempt_context,
     )
-    if verify.passed:
-        set_sub_account_selected(state, evidence=verify.evidence)
+    if frame.passed:
+        clear_game_entry_judgment(state)
+        set_sub_account_selected(state, evidence=frame.evidence)
         deps.run_state.launch_stage = "server_select"
-        mark_tree_node_done(
-            state,
-            node,
-            artifact=str(path.resolve()),
-            evidence=verify.evidence,
-        )
+        mark_tree_node_done(state, node, artifact=frame.artifact, evidence=frame.evidence)
     else:
-        mark_tree_node_failed(
-            state,
-            node,
-            verify.reason,
-            artifact=str(path.resolve()),
-            evidence=verify.evidence,
-        )
+        reason = frame.last_reflection.reason if frame.last_reflection else "sub-account verify failed"
+        mark_tree_node_failed(state, node, reason[:500], artifact=frame.artifact, evidence=frame.evidence)
     return state  # type: ignore[return-value]
 
 
@@ -818,18 +1079,92 @@ async def check_server_selector_node(
 async def tap_enter_game_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
     state = dict(state)
     node = "tap_enter_game"
-    from game_agent.models.launch_graph_state import facts_from_state
-
     facts = facts_from_state(state)
-    if facts.enter_cta_xy is None:
-        mark_tree_node_failed(state, node, "no enter CTA")
-        return state  # type: ignore[return-value]
-    x, y = facts.enter_cta_xy
     sw, sh = deps.screen_width, deps.screen_height
-    msg = deps.adb.tap(x, y, width=sw, height=sh)
-    deps.adb.wait_seconds(1.0)
-    increment_enter_tapped(state)
-    mark_tree_node_done(state, node, artifact=msg)
+    if not sw or not sh:
+        sw, sh = deps.adb.touch_size()
+        deps.screen_width, deps.screen_height = sw, sh
+
+    ocr_before = get_last_ocr(state)
+    bboxes = deserialize_bboxes(state.get("last_bboxes"))
+    if not bboxes and not facts.enter_cta_visible:
+        mark_tree_node_failed(state, node, "no enter gate visible")
+        return state  # type: ignore[return-value]
+
+    if not facts.enter_cta_visible and bboxes:
+        if not enter_gate_likely_visible(bboxes, ocr_merged=ocr_before):
+            mark_tree_node_failed(state, node, "no enter gate visible")
+            return state  # type: ignore[return-value]
+
+    stage_hint = "server_select"
+    if completed_tree_node(state, "select_sub_account"):
+        stage_hint = "sub_account_selected; tap primary enter-game CTA"
+    elif facts.server_slot_visible:
+        stage_hint = "server_select; optional server row visible; tap enter-game CTA"
+
+    prior_failure = ""
+    raw_reflection = state.get("last_reflection") or {}
+    if isinstance(raw_reflection, dict):
+        prior_failure = str(raw_reflection.get("reason") or "")
+
+    tap_decision = await decide_enter_gate_tap(
+        llm_cfg=deps.app_config.llm,
+        bboxes=bboxes,
+        ocr_summary=ocr_before,
+        stage_hint=stage_hint,
+        screen_w=sw,
+        screen_h=sh,
+        deepseek=deps.app_config.deepseek,
+        prior_failure=prior_failure,
+    )
+    if tap_decision is None:
+        mark_tree_node_failed(state, node, "main brain could not pick enter CTA")
+        return state  # type: ignore[return-value]
+
+    logger.info(
+        "[tap_enter_game] brain_pick label=%r xy=(%d,%d) source=%s reason=%s",
+        tap_decision.target_text[:60],
+        tap_decision.x,
+        tap_decision.y,
+        tap_decision.source,
+        tap_decision.reason[:120],
+    )
+    tap_xy = (tap_decision.x, tap_decision.y)
+
+    async def _act(st: LaunchGraphState, attempt: int) -> str:
+        x, y = tap_xy
+        msg = deps.adb.tap(x, y, width=sw, height=sh)
+        increment_enter_tapped(st)
+        logger.info("[ActionFrame:%s] act: %s source=%s", node, msg[:120], tap_decision.source)
+        return msg
+
+    def _verify(st: LaunchGraphState, before: str, after: str):
+        return verify_stage_exit(
+            ocr_before=before,
+            ocr_after=after,
+            expected_stage="server_select",
+            completion_signals=facts.screen_completion_signals,
+        )
+
+    frame = await run_action_frame(
+        state,
+        node=node,
+        adb=deps.adb,
+        artifact_root=deps.artifact_root,
+        screen_w=sw,
+        screen_h=sh,
+        act_fn=_act,
+        verify_fn=_verify,
+        max_attempts=2,
+        ocr_before=ocr_before,
+        expected_stage="server_select",
+        attempt_context=deps.attempt_context,
+    )
+    if frame.passed:
+        mark_tree_node_done(state, node, artifact=frame.artifact, evidence=frame.evidence)
+    else:
+        reason = frame.last_reflection.reason if frame.last_reflection else "enter tap verify failed"
+        mark_tree_node_failed(state, node, reason[:500], artifact=frame.artifact)
     return state  # type: ignore[return-value]
 
 
@@ -850,6 +1185,8 @@ async def check_in_game_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> 
     )
     if result.confirmed:
         state["in_game_entry_passed"] = True
+        if result.judgment is not None:
+            store_game_entry_judgment(state, result.judgment)
         mark_tree_node_done(state, node, evidence=result.message[:500])
         logger.info("[LaunchGraph:check_in_game] provisional entry passed, route stability_observe")
     elif result.judgment is not None and (
@@ -877,7 +1214,7 @@ async def check_in_game_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> 
 
 
 async def stability_observe_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
-    """进游戏后稳定性观察：多模态轮询网络/加载异常，通过后 signal 终局。"""
+    """进游戏后短期稳定性观察；通过后启动 in-game agent（不再立即终局）。"""
     state = dict(state)
     node = "stability_observe"
     actx = deps.attempt_context
@@ -949,23 +1286,19 @@ async def stability_observe_node(state: LaunchGraphState, deps: LaunchGraphDeps)
         return state  # type: ignore[return-value]
 
     if at_deadline:
-        note = (result.reason or "In-game stability confirmed")[:2000]
-        set_in_game_confirmed(state, evidence=note[:500])
-        deps.run_state.in_game_confirmed = True
-        deps.run_state.finished = True
-        deps.run_state.success = True
-        deps.run_state.note = note
-        deps.run_state.launch_stage = "in_game"
-        state["finished"] = True
-        if actx is not None:
-            actx.signal_in_game_confirmed(note)
+        note = (result.reason or "In-game stability confirmed, starting agent")[:2000]
+        _start_in_game_play_session(state, deps)
         mark_tree_node_done(
             state,
             node,
             artifact=str(result.screenshot_path.resolve()),
             evidence=note[:500],
         )
-        logger.info("[LaunchGraph:stability] observe_pass rounds=%d | %s", stability_rounds, note[:200])
+        logger.info(
+            "[LaunchGraph:stability] observe_pass rounds=%d → in_game_agent | %s",
+            stability_rounds,
+            note[:200],
+        )
         return state  # type: ignore[return-value]
 
     mark_tree_node_done(
@@ -974,6 +1307,391 @@ async def stability_observe_node(state: LaunchGraphState, deps: LaunchGraphDeps)
         artifact=str(result.screenshot_path.resolve()),
         evidence=result.reason[:200],
     )
+    return state  # type: ignore[return-value]
+
+
+def _start_in_game_play_session(state: LaunchGraphState, deps: LaunchGraphDeps) -> None:
+    cfg = deps.app_config
+    now = time.monotonic()
+    run_s = float(cfg.game.resolve_in_game_run_s())
+    state["stability_observe_complete"] = True
+    state["in_game_play_started_at"] = now
+    state["in_game_play_deadline"] = now + run_s
+    state["in_game_agent_started_at"] = now
+    state["in_game_agent_deadline"] = now + run_s
+    state["current_stage"] = "in_game_agent"
+    deps.run_state.launch_stage = "in_game_play"
+    actx = deps.attempt_context
+    audit = deps.audit
+    if actx is not None:
+        actx.signal_in_game_agent_phase(run_s)
+        actx.signal_in_game_play_started(
+            now + run_s,
+            float(cfg.game.in_game_play_buffer_s),
+        )
+        actx.set_ui_observation("in_game_play")
+    if audit is not None:
+        audit.log_phase(
+            "in_game_play",
+            "in_game_play_started",
+            mode=cfg.game.in_game_mode,
+            duration_s=run_s,
+            goal="smoke_play" if cfg.game.in_game_mode == "smoke" else "soak_play",
+        )
+
+
+def _start_in_game_agent_phase(state: LaunchGraphState, deps: LaunchGraphDeps) -> None:
+    """兼容别名。"""
+    _start_in_game_play_session(state, deps)
+
+
+def _finish_in_game_agent_success(
+    state: LaunchGraphState,
+    deps: LaunchGraphDeps,
+    *,
+    note: str,
+    artifact: str = "",
+) -> None:
+    actx = deps.attempt_context
+    audit = deps.audit
+    cfg = deps.app_config
+    run_s = float(cfg.game.resolve_in_game_run_s())
+    state["in_game_play_completed"] = True
+    state["in_game_play_rounds"] = int(
+        state.get("in_game_play_rounds") or state.get("in_game_agent_rounds") or 0
+    )
+    state["in_game_play_duration_s"] = int(cfg.game.resolve_in_game_run_s())
+    state["in_game_mode"] = cfg.game.in_game_mode
+    set_in_game_confirmed(state, evidence=note[:500])
+    state["in_game_agent_done"] = True
+    state["finished"] = True
+    state["current_stage"] = "in_game"
+    deps.run_state.in_game_confirmed = True
+    deps.run_state.finished = True
+    deps.run_state.success = True
+    deps.run_state.note = note
+    deps.run_state.launch_stage = "in_game"
+    if actx is not None:
+        actx.signal_in_game_confirmed(note)
+    if audit is not None:
+        audit.log_phase(
+            "in_game_play",
+            "in_game_play_completed",
+            duration_s=run_s,
+            rounds=int(state.get("in_game_play_rounds") or 0),
+            replan_count=int(state.get("in_game_behavior_replan_count") or 0),
+            chains_built=int(state.get("in_game_play_chains_built") or 0),
+            steps_executed=int(state.get("in_game_play_steps_executed") or 0),
+        )
+    mark_tree_node_done(
+        state,
+        "in_game_agent",
+        artifact=artifact,
+        evidence=note[:500],
+    )
+
+
+async def in_game_agent_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
+    """进入游戏后 LLM 驱动推进，直至 in_game_run_s 到达成功边界。"""
+    state = dict(state)
+    node = "in_game_agent"
+    cfg = deps.app_config
+    actx = deps.attempt_context
+    limits = launch_graph_limits_from_state(state)
+
+    now = time.monotonic()
+    started = float(state.get("in_game_agent_started_at") or 0.0)
+    if started <= 0.0:
+        _start_in_game_play_session(state, deps)
+        started = float(state.get("in_game_agent_started_at") or now)
+
+    deadline = float(
+        state.get("in_game_play_deadline")
+        or state.get("in_game_agent_deadline")
+        or (started + float(cfg.game.resolve_in_game_run_s()))
+    )
+    if now >= deadline:
+        remaining_note = (
+            f"In-game play completed after {cfg.game.resolve_in_game_run_s():.0f}s "
+            f"({int(state.get('in_game_agent_rounds') or 0)} rounds)"
+        )
+        _finish_in_game_agent_success(state, deps, note=remaining_note)
+        logger.info("[LaunchGraph:in_game_agent] deadline success | %s", remaining_note)
+        return state  # type: ignore[return-value]
+
+    interval_s = float(cfg.game.in_game_agent_interval_s)
+    last_action_at = float(state.get("in_game_agent_last_action_at") or 0.0)
+    if last_action_at > 0 and (now - last_action_at) < interval_s:
+        wait_s = min(interval_s - (now - last_action_at), max(0.5, deadline - now))
+        deps.adb.wait_seconds(wait_s)
+        mark_tree_node_done(state, node, evidence="in_game_agent_interval_wait")
+        return state  # type: ignore[return-value]
+
+    agent_rounds = int(state.get("in_game_agent_rounds") or 0) + 1
+    state["in_game_agent_rounds"] = agent_rounds
+    state["in_game_play_rounds"] = agent_rounds
+    if agent_rounds > limits.max_in_game_agent_rounds:
+        err = f"in_game_agent max rounds ({limits.max_in_game_agent_rounds})"
+        mark_tree_node_failed(state, node, err)
+        state["finished"] = True
+        state["terminal_error"] = err
+        deps.run_state.finished = True
+        deps.run_state.success = False
+        deps.run_state.note = err
+        return state  # type: ignore[return-value]
+
+    sw, sh = deps.screen_width, deps.screen_height
+    if not sw or not sh:
+        sw, sh = deps.adb.touch_size()
+        deps.screen_width, deps.screen_height = sw, sh
+
+    if actx is not None:
+        actx.set_ocr_busy(True)
+    try:
+        ts = datetime.now().strftime("%H%M%S_%f")
+        shot = deps.artifact_root / f"graph_in_game_agent_{agent_rounds:03d}_{ts}.png"
+        deps.adb.screencap_png(shot)
+        ocr_summary, bboxes = await asyncio.to_thread(
+            run_ocr_frame,
+            shot,
+            device_w=sw,
+            device_h=sh,
+            worker_key=deps.adb.device_serial,
+        )
+    finally:
+        if actx is not None:
+            actx.set_ocr_busy(False)
+
+    state["last_screenshot"] = str(shot.resolve())
+    state["last_ocr_summary"] = ocr_summary
+    state["last_bboxes"] = serialize_bboxes(bboxes)
+
+    prior_sig = str(state.get("in_game_agent_last_action_signature") or "")
+    same_streak = int(state.get("in_game_agent_same_action_streak") or 0)
+    remaining_s = max(0.0, deadline - time.monotonic())
+    external_summary = str(state.get("external_log_summary") or state.get("gameturbo_summary") or "")
+
+    vision = None
+    if cfg.llm_multimodal is not None:
+        vision = VisionWorker(cfg.llm_multimodal)
+
+    behavior_step = get_current_in_game_behavior_step(state)
+    can_plan_behavior_chain = (
+        not state.get("in_game_behavior_last_failed_step_id")
+        or can_replan_in_game_behavior_chain(
+            state,
+            max_replans=limits.max_dynamic_replans,
+        )
+    )
+    if behavior_step is None and can_plan_behavior_chain:
+        shot_hash = ""
+        try:
+            shot_hash = hashlib.sha256(shot.read_bytes()).hexdigest()[:16]
+        except OSError:
+            pass
+        cached_hash = str(state.get("llm_cache_hash") or "")
+        if not (shot_hash and shot_hash == cached_hash):
+            chain = await decide_in_game_behavior_chain(
+                vision=vision,
+                screenshot_path=shot,
+                bboxes=bboxes,
+                ocr_summary=ocr_summary,
+                round_id=agent_rounds,
+                remaining_s=remaining_s,
+                external_log_summary=external_summary,
+                failure_context=state.get("in_game_behavior_failure_trace") or [],
+                replan_from_step_id=str(state.get("in_game_behavior_last_failed_step_id") or ""),
+                screen_w=sw,
+                screen_h=sh,
+                max_action_wait_s=float(cfg.game.in_game_agent_max_action_wait_s),
+            )
+            if chain is not None:
+                if shot_hash:
+                    state["llm_cache_hash"] = shot_hash
+                set_in_game_behavior_chain(state, chain)
+                state["in_game_play_chains_built"] = int(state.get("in_game_play_chains_built") or 0) + 1
+                if deps.audit is not None:
+                    deps.audit.log_phase(
+                        "in_game_play",
+                        "behavior_chain_built",
+                        steps=len(chain.steps),
+                        source=chain.source,
+                        goal=chain.goal[:200],
+                    )
+                behavior_step = get_current_in_game_behavior_step(state)
+
+    if behavior_step is not None:
+        before_fp = str(state.get("in_game_behavior_last_fingerprint") or "")
+        before_ocr = ocr_summary
+        behavior_step = sanitize_press_back_step(behavior_step, ocr_summary=before_ocr)
+        step_started = time.monotonic()
+        exec_msg = execute_behavior_step(behavior_step, adb=deps.adb, sw=sw, sh=sh)
+        if behavior_step.action not in ("wait", "none"):
+            deps.adb.wait_seconds(0.6)
+        state["in_game_agent_last_action_at"] = time.monotonic()
+
+        ts = datetime.now().strftime("%H%M%S_%f")
+        after_shot = deps.artifact_root / f"graph_in_game_behavior_{agent_rounds:03d}_{ts}.png"
+        deps.adb.screencap_png(after_shot)
+        if actx is not None:
+            actx.set_ocr_busy(True)
+        try:
+            after_ocr, after_bboxes = await asyncio.to_thread(
+                run_ocr_frame,
+                after_shot,
+                device_w=sw,
+                device_h=sh,
+                worker_key=deps.adb.device_serial,
+            )
+        finally:
+            if actx is not None:
+                actx.set_ocr_busy(False)
+
+        state["last_screenshot"] = str(after_shot.resolve())
+        state["last_ocr_summary"] = after_ocr
+        state["last_bboxes"] = serialize_bboxes(after_bboxes)
+        after_fp = behavior_progress_fingerprint(
+            ocr_summary=after_ocr,
+            stage=behavior_step.intent or behavior_step.label,
+        )
+        progressed = not before_fp or after_fp != before_fp
+        criteria_ok, criteria_reason = evaluate_step_success(
+            behavior_step,
+            before_ocr=before_ocr,
+            after_ocr=after_ocr,
+        )
+        action_ok = "refused" not in str(exec_msg).lower()
+        if behavior_step.success_criteria:
+            step_passed = criteria_ok and action_ok
+        else:
+            step_passed = progressed and action_ok
+        if press_back_caused_exit_confirm(before_ocr=before_ocr, after_ocr=after_ocr):
+            step_passed = False
+            criteria_reason = "press_back_exit_confirm"
+        if step_passed:
+            completed_step = mark_in_game_behavior_attempt(state, behavior_step, done=True)
+            state["in_game_behavior_no_progress"] = 0
+            state["in_game_play_steps_executed"] = int(state.get("in_game_play_steps_executed") or 0) + 1
+            advance_in_game_behavior_cursor(state)
+            if deps.audit is not None:
+                deps.audit.log_phase(
+                    "in_game_play",
+                    "behavior_step_done",
+                    step_id=completed_step.id,
+                    intent=completed_step.intent[:120],
+                    duration_ms=int((time.monotonic() - step_started) * 1000),
+                )
+            logger.info(
+                "[LaunchGraph:in_game_behavior] step_done id=%s action=%s intent=%s | %s",
+                completed_step.id,
+                completed_step.action,
+                completed_step.intent[:100],
+                str(exec_msg)[:120],
+            )
+        else:
+            attempted_step = mark_in_game_behavior_attempt(state, behavior_step, done=False)
+            no_progress = int(state.get("in_game_behavior_no_progress") or 0) + 1
+            state["in_game_behavior_no_progress"] = no_progress
+            step_exhausted = attempted_step.attempts >= limits.max_dynamic_step_attempts
+            chain_stalled = no_progress >= limits.max_dynamic_no_progress
+            if step_exhausted or chain_stalled:
+                reason = (
+                    f"in_game behavior step {attempted_step.id} stalled "
+                    f"attempts={attempted_step.attempts} no_progress={no_progress}"
+                )
+                will_replan = can_replan_in_game_behavior_chain(
+                    state,
+                    max_replans=limits.max_dynamic_replans,
+                )
+                record_in_game_behavior_failure(
+                    state,
+                    attempted_step,
+                    reason=reason,
+                    ocr_summary=after_ocr,
+                    artifact=str(after_shot.resolve()),
+                )
+                if deps.audit is not None:
+                    deps.audit.log_phase(
+                        "in_game_play",
+                        "behavior_step_failed",
+                        step_id=attempted_step.id,
+                        intent=attempted_step.intent[:120],
+                        reason=reason[:200],
+                        duration_ms=int((time.monotonic() - step_started) * 1000),
+                    )
+                clear_in_game_behavior_chain(state, completed=False)
+                if not will_replan:
+                    logger.warning("[LaunchGraph:in_game_behavior] replan budget exhausted")
+                else:
+                    logger.warning(
+                        "[LaunchGraph:in_game_behavior] step_failed id=%s, replan next round",
+                        attempted_step.id,
+                    )
+            else:
+                logger.info(
+                    "[LaunchGraph:in_game_behavior] step_retry id=%s progress=%s criteria=%s | %s",
+                    attempted_step.id,
+                    progressed,
+                    criteria_reason,
+                    str(exec_msg)[:120],
+                )
+        state["in_game_behavior_last_fingerprint"] = after_fp
+        state["in_game_agent_last_action_signature"] = behavior_step.signature()
+        mark_tree_node_done(
+            state,
+            node,
+            artifact=str(after_shot.resolve()),
+            evidence=f"behavior:{behavior_step.action}:{behavior_step.intent[:120]}",
+        )
+        state["recover_hint"] = f"in_game_behavior:{behavior_step.intent[:200]}"
+        return state  # type: ignore[return-value]
+
+    plan = await decide_in_game_action(
+        vision=vision,
+        screenshot_path=shot,
+        bboxes=bboxes,
+        ocr_summary=ocr_summary,
+        round_id=agent_rounds,
+        remaining_s=remaining_s,
+        external_log_summary=external_summary,
+        prior_action_signature=prior_sig if same_streak >= 1 else "",
+        same_action_streak=same_streak,
+        screen_w=sw,
+        screen_h=sh,
+        max_action_wait_s=float(cfg.game.in_game_agent_max_action_wait_s),
+        max_same_action=limits.max_free_same_action,
+    )
+
+    sig = plan.signature()
+    if sig == prior_sig:
+        same_streak += 1
+    else:
+        same_streak = 1
+    state["in_game_agent_same_action_streak"] = same_streak
+    state["in_game_agent_last_action_signature"] = sig
+
+    exec_msg = execute_in_game_action(plan, adb=deps.adb, sw=sw, sh=sh)
+    if plan.action not in ("wait", "none"):
+        deps.adb.wait_seconds(0.6)
+    state["in_game_agent_last_action_at"] = time.monotonic()
+
+    logger.info(
+        "[LaunchGraph:in_game_agent] round=%d remaining=%.0fs action=%s (%s,%s) | %s",
+        agent_rounds,
+        remaining_s,
+        plan.action,
+        plan.x,
+        plan.y,
+        exec_msg[:120],
+    )
+
+    mark_tree_node_done(
+        state,
+        node,
+        artifact=str(shot.resolve()),
+        evidence=f"{plan.action}:{plan.reason[:120]}",
+    )
+    state["recover_hint"] = f"in_game_agent:{plan.reason[:200]}"
     return state  # type: ignore[return-value]
 
 
@@ -1007,15 +1725,7 @@ def _execute_dynamic_step(
     sw: int,
     sh: int,
 ) -> str:
-    if step.action == "tap_xy":
-        if step.x <= 0 or step.y <= 0:
-            return f"refused tap invalid ({step.x},{step.y})"
-        return adb.tap(step.x, step.y, width=sw, height=sh)
-    if step.action == "press_back":
-        return adb.press_back()
-    if step.action == "wait":
-        return adb.wait_seconds(step.wait_s)
-    return "no-op"
+    return execute_behavior_step(step, adb=adb, sw=sw, sh=sh)
 
 
 async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGraphState:
@@ -1039,8 +1749,27 @@ async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) ->
 
     no_progress = int(state.get("dynamic_no_progress") or 0)
     if no_progress >= limits.max_dynamic_no_progress:
-        mark_tree_node_failed(state, node, f"dynamic no progress ({limits.max_dynamic_no_progress})")
-        clear_dynamic_chain(state, failed=True)
+        reason = f"dynamic no progress ({limits.max_dynamic_no_progress})"
+        will_replan = can_replan_dynamic_chain(
+            state,
+            max_replans=limits.max_dynamic_replans,
+        )
+        record_dynamic_chain_failure(
+            state,
+            step,
+            reason=reason,
+            ocr_summary=str(state.get("last_ocr_summary") or ""),
+            artifact=str(state.get("last_screenshot") or ""),
+        )
+        clear_dynamic_chain(state, failed=not will_replan)
+        if will_replan:
+            mark_tree_node_done(state, node, evidence=f"replan:{step.id}:{reason}")
+            logger.warning(
+                "[LaunchGraph:dynamic] step_stalled id=%s, replan from failure",
+                step.id,
+            )
+            return state  # type: ignore[return-value]
+        mark_tree_node_failed(state, node, reason)
         logger.warning("[LaunchGraph:dynamic] dynamic_exit no_progress=%d", no_progress)
         return state  # type: ignore[return-value]
 
@@ -1092,20 +1821,55 @@ async def dynamic_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) ->
     else:
         mark_step_attempt(state, step, done=False)
         state["dynamic_no_progress"] = no_progress + 1
+        note_action_failure(
+            state,
+            node=node,
+            verify=NodeVerifyResult(
+                passed=False,
+                reason=f"dynamic step {step.id} stalled",
+                evidence=f"progressed={progressed} tap_ok={tap_ok}",
+            ),
+            ocr_before=str(state.get("last_ocr_summary") or ""),
+            ocr_after=ocr_summary,
+            attempt=step.attempts,
+            artifact=str(shot.resolve()),
+            expected_stage=step.label,
+        )
         cur = get_current_step(state)
         if cur is not None and cur.attempts >= limits.max_dynamic_step_attempts:
+            reason = f"step {step.id} failed after {cur.attempts} attempts"
+            will_replan = can_replan_dynamic_chain(
+                state,
+                max_replans=limits.max_dynamic_replans,
+            )
+            record_dynamic_chain_failure(
+                state,
+                cur,
+                reason=reason,
+                ocr_summary=ocr_summary,
+                artifact=str(shot.resolve()),
+            )
             logger.warning(
-                "[LaunchGraph:dynamic] step_failed id=%s attempts=%d, clearing chain",
+                "[LaunchGraph:dynamic] step_failed id=%s attempts=%d replan=%s",
                 step.id,
                 cur.attempts,
+                will_replan,
             )
+            clear_dynamic_chain(state, failed=not will_replan)
+            if will_replan:
+                mark_tree_node_done(
+                    state,
+                    node,
+                    artifact=str(shot.resolve()),
+                    evidence=f"replan:{step.id}:{reason}",
+                )
+                return state  # type: ignore[return-value]
             mark_tree_node_failed(
                 state,
                 node,
-                f"step {step.id} failed after {cur.attempts} attempts",
+                reason,
                 artifact=str(shot.resolve()),
             )
-            clear_dynamic_chain(state, failed=True)
             return state  # type: ignore[return-value]
         logger.info(
             "[LaunchGraph:dynamic] step_retry id=%s label=%s progress=%s | %s",
@@ -1296,6 +2060,22 @@ async def scene_action_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> L
     state["scene_last_action_signature"] = plan.signature()
     state["recover_hint"] = f"scene:{scene_id}:{plan.reason[:120]}"
 
+    if plan.action in ("tap_xy", "press_back") and ocr_summary.strip() == after_ocr.strip():
+        note_action_failure(
+            state,
+            node=node,
+            verify=NodeVerifyResult(
+                passed=False,
+                reason="scene action no OCR change",
+                evidence=f"scene={scene_id} action={plan.action}",
+            ),
+            ocr_before=ocr_summary,
+            ocr_after=after_ocr,
+            attempt=scene_rounds,
+            artifact=str(after_shot.resolve()),
+            expected_stage=scene_id,
+        )
+
     logger.info(
         "[LaunchGraph:scene] round=%d scene=%s action=%s mode=%s (%s,%s) | %s",
         scene_rounds,
@@ -1437,6 +2217,20 @@ async def free_node(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGra
     )
     if before_fp and after_fp == before_fp:
         state["free_no_progress_rounds"] = no_progress + 1
+        note_action_failure(
+            state,
+            node=node,
+            verify=NodeVerifyResult(
+                passed=False,
+                reason="free action stalled",
+                evidence=f"action={plan.action} sig={sig}",
+            ),
+            ocr_before=ocr_summary,
+            ocr_after=ocr_summary,
+            attempt=free_rounds,
+            artifact=str(shot.resolve()),
+            expected_stage=plan.stage,
+        )
         logger.info(
             "[LaunchGraph:free] free_progress stalled round=%d streak=%d",
             free_rounds,
@@ -1500,6 +2294,26 @@ async def recover_from_failure_node(
     def _clear_failed(node_name: str) -> None:
         clear_failed_node(state, node_name)
 
+    ocr_merged = str(state.get("last_ocr_summary") or "")
+    on_enter_gate_past_login = (
+        failed_name == "atomic_login"
+        and facts.login_stage != "login_form"
+        and not facts.login_blocking
+        and (
+            facts.enter_cta_visible
+            or bool(_ENTER_WORLD_RE.search(ocr_merged))
+        )
+    )
+    if on_enter_gate_past_login:
+        set_login_done(state, evidence="recover: enter gate past credential login")
+        deps.run_state.launch_stage = "server_select"
+        _clear_failed("atomic_login")
+        clear_game_entry_judgment(state)
+        state["recover_hint"] = f"{hint}; enter_gate_continue"
+        logger.info("[LaunchGraph:recover] enter gate past login — clear atomic_login failed")
+        mark_tree_node_done(state, node)
+        return state  # type: ignore[return-value]
+
     if is_login_flow_in_progress(state):
         sw, sh = deps.screen_width, deps.screen_height
         if not sw or not sh:
@@ -1543,6 +2357,15 @@ async def recover_from_failure_node(
                 f"dismiss={dismiss_msg[:200]}"
             )
             logger.warning("[LaunchGraph:recover] %s", hint[:400])
+
+        if failed_name == "atomic_login" and not login_blackout:
+            dismiss_msg = await asyncio.to_thread(
+                try_dismiss_login_secure_keyboard,
+                deps.adb,
+                deps.app_config.executor,
+            )
+            hint += f"; pre-retry dismiss={dismiss_msg[:120]}"
+            logger.info("[LaunchGraph:recover] atomic_login pre-retry dismiss: %s", dismiss_msg[:200])
 
         cfg = deps.app_config
         try:
@@ -1588,7 +2411,7 @@ async def recover_from_failure_node(
 
     skip_vision = (
         (facts.login_blocking and not state.get("login_done"))
-        or failed_name == "atomic_login"
+        or (failed_name == "atomic_login" and facts.login_stage == "login_form")
     )
 
     if deps.app_config.llm_multimodal is not None and not skip_vision:

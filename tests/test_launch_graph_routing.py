@@ -36,12 +36,13 @@ def test_route_atomic_login_when_ocr_clear_but_not_done() -> None:
     assert route_next(state) == "atomic_login"
 
 
-def test_route_no_login_when_done() -> None:
+def test_route_atomic_login_when_false_login_done_on_login_form() -> None:
+    """假 login_done 但画面仍为登录窗时 reconcile 后应回到 atomic_login。"""
     state = _state(
         facts=LaunchFacts(login_blocking=True, login_stage="login_form"),
         login_done=True,
     )
-    assert route_next(state) != "atomic_login"
+    assert route_next(state) == "atomic_login"
 
 
 def test_route_sub_account_before_server() -> None:
@@ -135,7 +136,8 @@ def test_route_check_in_game_after_enter_tap() -> None:
     assert route_next(state) == "check_in_game"
 
 
-def test_route_second_enter_when_cta_still_visible() -> None:
+def test_route_check_in_game_after_enter_tap_even_if_cta_visible() -> None:
+    """点过进游戏后即使 CTA 仍在，也应进入 check_in_game 而非无限 tap。"""
     state = _state(
         facts=LaunchFacts(
             enter_cta_visible=True,
@@ -146,4 +148,4 @@ def test_route_second_enter_when_cta_still_visible() -> None:
         server_checked=True,
         enter_tapped_count=1,
     )
-    assert route_next(state) == "tap_enter_game"
+    assert route_next(state) == "check_in_game"

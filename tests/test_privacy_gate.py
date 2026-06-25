@@ -133,6 +133,27 @@ def test_merge_unknown_clears_privacy_branch_fields() -> None:
     assert merged.terms_checkbox_visible is False
 
 
+def test_merge_unknown_preserves_modal_when_milestone_pending() -> None:
+    facts = LaunchFacts(
+        initial_privacy_dialog=True,
+        agree_button_xy=(704, 1583),
+        privacy_gate_kind="modal",
+    )
+    judgment = PrivacyGateJudgment(
+        gate_kind="unknown",
+        confidence=0.0,
+        reason="API timeout",
+    )
+    merged = merge_privacy_gate_judgment(
+        facts,
+        judgment,
+        bboxes=[],
+        privacy_milestones_done=False,
+    )
+    assert merged.initial_privacy_dialog is True
+    assert merged.agree_button_xy == (704, 1583)
+
+
 def test_pick_consent_button_from_ocr() -> None:
     bboxes = [
         OcrBbox(text="不同意", cx=200, cy=2200, x1=0, y1=0, x2=0, y2=0),

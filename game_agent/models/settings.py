@@ -12,6 +12,16 @@ class LLMSection(BaseModel):
     base_url: str = Field(..., description="OpenAI 兼容 API base URL")
     api_key: str = Field(..., description="API Key，可配合 YAML 中的 ${ENV} 由加载器展开")
     model_name: str = Field(..., description="厂商 model 字段，如 deepseek-v4-flash、gpt-4o 等")
+    vision_timeout_s: float = Field(
+        20.0,
+        ge=5.0,
+        le=120.0,
+        description="多模态 VLM 单次调用超时（秒）。",
+    )
+    in_game_skip_interpret: bool = Field(
+        True,
+        description="游戏内试玩阶段跳过 launch interpret 等多余 VLM 调用。",
+    )
 
 
 class DeepSeekSection(BaseModel):
@@ -187,11 +197,23 @@ class LaunchGraphSection(BaseModel):
         le=10,
         description="dynamic 链中单步最大重试次数。",
     )
+    max_dynamic_replans: int = Field(
+        2,
+        ge=0,
+        le=10,
+        description="dynamic/behavior 链失败后允许从失败点重新规划的次数。",
+    )
     max_stability_observe_rounds: int = Field(
         16,
         ge=4,
         le=60,
         description="stability_observe 最大轮次。",
+    )
+    max_in_game_agent_rounds: int = Field(
+        250,
+        ge=20,
+        le=1000,
+        description="in_game_agent 最大图循环轮次（与 in_game_run_s 共同熔断）。",
     )
     max_adaptive_rounds: int = Field(
         12,
@@ -278,7 +300,38 @@ class ExecutorSection(BaseModel):
 
 class GameSection(BaseModel):
     """游戏流程超时与判定参数；包名/Activity 由 TaskRuntime 管理。"""
-    timeout_s: float = Field(300.0, description="并行监控的最大允许时间（秒），超时算作异常。")
+    timeout_s: float = Field(
+        300.0,
+        description="[deprecated] 请使用 launch_timeout_s；未设置时作为 launch 阶段超时回退值。",
+    )
+    launch_timeout_s: float | None = Field(
+        None,
+        ge=60.0,
+        le=7200.0,
+        description="安装+登录+进 HUD 的最大时间（秒）。",
+    )
+    in_game_mode: Literal["smoke", "soak"] = Field(
+        "smoke",
+        description="smoke：短试玩；soak：长稳压测。",
+    )
+    in_game_smoke_s: float = Field(
+        180.0,
+        ge=30.0,
+        le=3600.0,
+        description="smoke 模式游戏内试玩时长（秒）。",
+    )
+    in_game_soak_s: float = Field(
+        1200.0,
+        ge=60.0,
+        le=7200.0,
+        description="soak 模式游戏内试玩时长（秒）。",
+    )
+    in_game_play_buffer_s: float = Field(
+        60.0,
+        ge=0.0,
+        le=600.0,
+        description="orchestrator 并行阶段在 play deadline 之外的额外缓冲（秒）。",
+    )
     package_install_wait_timeout_s: float = Field(
         120.0,
         ge=10.0,
@@ -321,6 +374,24 @@ class GameSection(BaseModel):
         le=60.0,
         description="稳定性观察期间两次多模态轮询的最小间隔（秒）。",
     )
+    in_game_run_s: float = Field(
+        1200.0,
+        ge=60.0,
+        le=7200.0,
+        description="[compat] 显式覆盖试玩时长；未改默认值时由 in_game_mode 决定 smoke/soak。",
+    )
+    in_game_agent_interval_s: float = Field(
+        10.0,
+        ge=3.0,
+        le=60.0,
+        description="in-game agent 两轮 LLM 决策之间的最小间隔（秒）。",
+    )
+    in_game_agent_max_action_wait_s: float = Field(
+        5.0,
+        ge=0.5,
+        le=30.0,
+        description="in-game agent 单次 wait 动作的最长等待（秒）。",
+    )
     session_poll_interval_s: float = Field(
         1.5,
         ge=0.5,
@@ -343,6 +414,19 @@ class GameSection(BaseModel):
         le=50,
         description="单轮观察者允许的最大会话重启次数；0 表示不限制。",
     )
+
+    def resolve_launch_timeout_s(self) -> float:
+        if self.launch_timeout_s is not None:
+            return float(self.launch_timeout_s)
+        return float(self.timeout_s)
+
+    def resolve_in_game_run_s(self) -> float:
+        if self.in_game_run_s != 1200.0:
+            return float(self.in_game_run_s)
+        if self.in_game_mode == "soak":
+            return float(self.in_game_soak_s)
+        return float(self.in_game_smoke_s)
+
 
 class GameTurboPluginSection(BaseModel):
     """GameTurbo 外部插件开关；启用后由 external-services/gameturbo 接管打包与日志。"""

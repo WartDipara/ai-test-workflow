@@ -3,16 +3,20 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from game_agent.models.run_failure import RunFailure
 from game_agent.models.task_config import TaskConfig
 from game_agent.modules.retry.cleanup import FailureCleanup
-from game_agent.modules.retry.retry_config import RetryConfigHandler
 from game_agent.services.adb_service import AdbService
 from game_agent.services.failure_report import generate_and_save_attempt_failure_report
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.services.shutdown import is_shutdown_requested
+
+if TYPE_CHECKING:
+    from game_agent.external_services.context import ServiceContext
+    from game_agent.external_services.manager import ExternalServiceManager
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,8 @@ class AnomalyHandler:
     task_deliverable_root: Path | None = None
     blocked_stage_hint: str = ""
     audit: RunAuditLogger | None = None
+    external_services: ExternalServiceManager | None = None
+    service_context: ServiceContext | None = None
 
     async def handle(
         self,
@@ -52,6 +58,7 @@ class AnomalyHandler:
                 app_config=self.app_config,
                 artifact_root=self.artifact_root,
                 audit=self.audit,
+                external_services=self.external_services,
             )
             await cleanup.run(reason)
             rec.ok()
@@ -74,16 +81,34 @@ class AnomalyHandler:
             return
 
         with trace_operation("anomaly", "retry_config_modify", retry=retry_count) as rec:
-            retry_cfg = RetryConfigHandler(
-                adb=self.adb,
-                app_config=self.app_config,
-                config_path=self.config_path,
-                artifact_root=self.artifact_root,
-                task_deliverable_root=self.task_deliverable_root,
-                blocked_stage_hint=self.blocked_stage_hint,
-                audit=self.audit,
-            )
-            await retry_cfg.run(retry_count, failure.message)
+            if (
+                self.external_services is not None
+                and self.service_context is not None
+            ):
+                await self.external_services.run_modify_retry(
+                    self.service_context,
+                    retry_count=retry_count,
+                    failure_message=failure.message,
+                    config_path=self.config_path,
+                    deliverable_root=self.task_deliverable_root,
+                    blocked_stage_hint=self.blocked_stage_hint,
+                    audit=self.audit,
+                )
+            else:
+                from game_agent.external_services.gameturbo.retry.modify import (
+                    RetryConfigHandler,
+                )
+
+                retry_cfg = RetryConfigHandler(
+                    adb=self.adb,
+                    app_config=self.app_config,
+                    config_path=self.config_path,
+                    artifact_root=self.artifact_root,
+                    task_deliverable_root=self.task_deliverable_root,
+                    blocked_stage_hint=self.blocked_stage_hint,
+                    audit=self.audit,
+                )
+                await retry_cfg.run(retry_count, failure.message)
             rec.ok()
         await self._write_attempt_failure_report(retry_count, failure, will_retry=True)
 

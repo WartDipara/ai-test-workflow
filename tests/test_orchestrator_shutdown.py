@@ -53,11 +53,15 @@ def test_retry_handler_skips_modify_when_shutdown() -> None:
     from game_agent.services.shutdown import get_shutdown_context
 
     get_shutdown_context().request_shutdown("SIGINT")
+    external_services = MagicMock()
+    external_services.run_modify_retry = AsyncMock()
     handler = AnomalyHandler(
         adb=MagicMock(),
         app_config=MagicMock(),
         config_path=Path("settings.yaml"),
         artifact_root=None,
+        external_services=external_services,
+        service_context=MagicMock(),
     )
     failure = RunFailure(ErrorCode.NET_LOG_ANOMALY, "log anomaly", retryable=True)
 
@@ -65,9 +69,6 @@ def test_retry_handler_skips_modify_when_shutdown() -> None:
         patch(
             "game_agent.controllers.retry_controller.FailureCleanup",
         ) as cleanup_cls,
-        patch(
-            "game_agent.controllers.retry_controller.RetryConfigHandler",
-        ) as retry_cls,
         patch(
             "game_agent.controllers.retry_controller.generate_and_save_attempt_failure_report",
             new_callable=AsyncMock,
@@ -80,4 +81,4 @@ def test_retry_handler_skips_modify_when_shutdown() -> None:
             handler.handle(1, failure, run_retry_config=True, will_retry=True),
         )
 
-    retry_cls.assert_not_called()
+    external_services.run_modify_retry.assert_not_called()

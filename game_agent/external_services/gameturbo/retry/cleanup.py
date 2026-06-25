@@ -8,13 +8,13 @@ from pathlib import Path
 from game_agent.models.pipeline_phase import PipelinePhase
 from game_agent.models.task_config import TaskConfig
 from game_agent.services.adb_service import AdbService
-from game_agent.services.gameturbo_log import (
+from game_agent.external_services.gameturbo.log import (
     ensure_gameturbo_log_for_analysis,
     finalize_gameturbo_log,
 )
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.utils.gameturbo_log_domain_extract import (
+from game_agent.external_services.gameturbo.log.domain_extract import (
     DEFAULT_OUTPUT_NAME,
     extract_domain_region_from_log,
 )

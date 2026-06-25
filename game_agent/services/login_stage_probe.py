@@ -27,8 +27,8 @@ _SUB_ACCOUNT_CREATE_PURCHASE_RE = re.compile(
 )
 
 _LOGIN_FORM_RE = re.compile(
-    r"^(log\s*in|login|登录|立即登录)$|"
-    r"account|phone\s*number|email|login\s*password|"
+    r"^(log\s*in|login|sign\s*in|sign\s*up|登录|立即登录|注册)$|"
+    r"account|phone\s*number|email|login\s*password|password|"
     r"账号|用户名|密码|forgot\s*password|忘记密码",
     re.IGNORECASE,
 )

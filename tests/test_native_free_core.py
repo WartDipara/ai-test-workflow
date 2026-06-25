@@ -33,19 +33,18 @@ _CORE_SCAN_ROOTS = (
 )
 
 _FORBIDDEN_IMPORT_MODULES = (
+    "game_agent.external_services.gameturbo",
     "game_agent.utils.gameturbo_bootstrap",
+    "game_agent.utils.gameturbo_config_apply",
+    "game_agent.utils.gameturbo_log_domain_extract",
+    "game_agent.utils.gameturbo_log_skill",
+    "game_agent.services.gameturbo_config_retry",
     "game_agent.services.gameturbo_log",
+    "game_agent.services.gameturbo_log_anomaly",
+    "game_agent.services.gameturbo_log_health",
 )
 
-_LEGACY_GT_ADJACENT = {
-    "game_agent/controllers/log_monitor_controller.py",
-    "game_agent/controllers/session_controller.py",
-    "game_agent/controllers/executor_controller.py",
-    "game_agent/modules/retry/analysis.py",
-    "game_agent/modules/retry/deploy_retry.py",
-    "game_agent/modules/retry/retry_config.py",
-    "game_agent/core/external_log.py",
-}
+_LEGACY_GT_ADJACENT: set[str] = set()
 
 
 def _rel_posix(path: Path) -> str:

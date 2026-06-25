@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from game_agent.controllers.log_monitor_controller import LogMonitor
+from game_agent.external_services.gameturbo.log import GAMETURBO_LOG_COLLECTOR
 from game_agent.models.settings import AppConfig, GameSection, LLMSection
 
 
@@ -61,23 +62,9 @@ def test_log_monitor_does_not_fatal_on_tunnel_closed_line(tmp_path: Path) -> Non
             return proc
 
         stop = asyncio.Event()
-        monitor = LogMonitor(adb, cfg, tmp_path)
+        monitor = LogMonitor(adb, cfg, tmp_path, GAMETURBO_LOG_COLLECTOR)
 
-        with (
-            patch("asyncio.create_subprocess_exec", fake_exec),
-            patch(
-                "game_agent.controllers.log_monitor_controller.gameturbo_log_path",
-                return_value=log_path,
-            ),
-            patch(
-                "game_agent.controllers.log_monitor_controller.read_gameturbo_dedup_keys",
-                return_value=set(),
-            ),
-            patch(
-                "game_agent.controllers.log_monitor_controller.append_gameturbo_line",
-                side_effect=lambda p, line: log_path.open("a", encoding="utf-8").write(line + "\n"),
-            ),
-        ):
+        with patch("asyncio.create_subprocess_exec", fake_exec):
             return await monitor._run_one_stream(stop, log_path=log_path, seen_keys=set())
 
     result = asyncio.run(_run())

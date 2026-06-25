@@ -63,7 +63,6 @@ from game_agent.services.shutdown import (
     get_shutdown_context,
     is_shutdown_requested,
 )
-from game_agent.services.gameturbo_config_retry import infer_blocked_stage
 from game_agent.services.normal_exit import NormalExitState, confirm_in_game_normal_exit
 from game_agent.services.pipeline_trace import (
     activate_pipeline_trace,
@@ -74,6 +73,7 @@ from game_agent.services.pipeline_trace import (
 from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.services.run_deliverable import (
     RunDeliverablePaths,
+    build_in_game_play_summary,
     create_task_output_dir,
     publish_core_success_deliverable,
     publish_failure_deliverable,
@@ -81,7 +81,6 @@ from game_agent.services.run_deliverable import (
 )
 from game_agent.services.task_finalize import TaskRunJournal, finalize_task_deliverable
 from game_agent.services.vision_probe import probe_startup_for_llm
-from game_agent.utils.packages_cleanup import cleanup_deploy_artifacts, cleanup_task_packages
 from game_agent.utils.stage_logging import pipeline_stage
 
 logger = logging.getLogger(__name__)
@@ -183,6 +182,7 @@ class GameTestOrchestrator:
         self._device_startup_cleanup: list[DevicePackageCleanupResult] = []
         self._external_services: ExternalServiceManager | None = None
         self._in_game_confirmed = False
+        self._winning_graph_snapshot: dict = {}
 
     def _runtime(self):
         return self._task_context.runtime
@@ -292,25 +292,10 @@ class GameTestOrchestrator:
         """GameTurbo 插件开启时，从 packages 内 APK 同步包名/启动 Activity。"""
         if not self._gameturbo_plugin_enabled():
             return
-        from game_agent.external_services.gameturbo.bootstrap import (
-            discover_source_apk,
-            output_apk_path,
+        self._external_service_manager().sync_runtime_from_packages(
+            runtime=self._runtime(),
+            deploy_gid=self._deploy_gid(),
         )
-
-        deploy_gid = self._deploy_gid()
-        out_apk = output_apk_path(deploy_gid)
-        apk: Path | None = out_apk if out_apk.is_file() else None
-        if apk is None:
-            try:
-                apk = discover_source_apk(
-                    gid=deploy_gid,
-                    source_apk=self._runtime().source_apk,
-                )
-            except RuntimeError:
-                return
-        runtime = self._runtime()
-        runtime.update_from_apk(apk)
-        TaskRuntimeRegistry.register(runtime)
         self._rebind_config()
 
     def _check_shutdown(self) -> None:
@@ -473,22 +458,14 @@ class GameTestOrchestrator:
         )
 
     def _apply_gameturbo_context_from_preprocess(self) -> None:
-        from game_agent.external_services.gameturbo.bootstrap import resolve_game_config
-
         assert self._preprocess_record is not None
         processed = self._preprocess_record.processed_apk
         if processed is None:
             return
-        source_apk = processed.resolve()
-        gid = parse_gid_from_apk_name(source_apk)
-        game_config_path, _created = resolve_game_config(gid)
-        runtime = self._runtime()
-        runtime.update_gameturbo(
-            gid=gid,
-            source_apk=source_apk,
-            game_config_path=game_config_path,
+        self._external_service_manager().apply_preprocess_context(
+            runtime=self._runtime(),
+            processed_apk=processed.resolve(),
         )
-        TaskRuntimeRegistry.register(runtime)
         self._rebind_config()
 
     def _run_one_attempt(
@@ -594,11 +571,14 @@ class GameTestOrchestrator:
         if parallel_err:
             logger.warning("并行游戏阶段失败: %s", parallel_err)
             self._last_executor_failure_reason = parallel_err
-            self._last_blocked_stage_hint = infer_blocked_stage(
-                reason=parallel_err,
-                ui_stage=self._last_attempt_ui_stage,
-                ui_progress=self._last_attempt_ui_progress,
-            )
+            if self._gameturbo_plugin_enabled():
+                self._last_blocked_stage_hint = self._external_service_manager().infer_blocked_stage(
+                    reason=parallel_err,
+                    ui_stage=self._last_attempt_ui_stage,
+                    ui_progress=self._last_attempt_ui_progress,
+                )
+            else:
+                self._last_blocked_stage_hint = self._last_attempt_ui_stage or "unknown"
             self._on_attempt_failure(
                 retry=retry,
                 max_retries=max_retries,
@@ -620,11 +600,7 @@ class GameTestOrchestrator:
 
     def _run_preprocessing(self, cfg: AppConfig):
         """执行预处理阶段：APK 下载/ABI 剥离。返回 PreprocessResult。"""
-        packages_dir = None
-        if self._gameturbo_plugin_enabled():
-            from game_agent.external_services.gameturbo.paths import PACKAGES_DIR
-
-            packages_dir = PACKAGES_DIR
+        packages_dir = self._external_service_manager().preprocessing_packages_dir()
 
         logger.info("APK 下载/ABI 剥离")
         apk_url = self._task_context.apk_url or None
@@ -659,11 +635,9 @@ class GameTestOrchestrator:
         if self._last_blocked_stage_hint:
             lines.append(f"Blocked stage hint: {self._last_blocked_stage_hint}")
         if self._deliverable is not None and self._gameturbo_plugin_enabled():
-            from game_agent.services.gameturbo_config_retry import (
-                format_last_patch_for_executor,
+            patch_lines = self._external_service_manager().format_executor_retry_brief(
+                self._deliverable.root,
             )
-
-            patch_lines = format_last_patch_for_executor(self._deliverable.root)
             if patch_lines:
                 lines.append(patch_lines)
         if not lines:
@@ -745,10 +719,9 @@ class GameTestOrchestrator:
                 executor=mods.executor,
                 log_monitor=log_monitor_on,
             )
-        if self._gameturbo_plugin_enabled():
-            from game_agent.services.gameturbo_log import append_gameturbo_stage_marker
-
-            append_gameturbo_stage_marker(
+        log_collector = self._external_service_manager().external_log_collector(svc_ctx)
+        if log_collector is not None:
+            log_collector.append_stage_marker(
                 self._artifact_root,
                 PipelinePhase.OBSERVER.value,
                 "parallel game phase start",
@@ -780,6 +753,7 @@ class GameTestOrchestrator:
                 self._adb,
                 cfg,
                 self._artifact_root,
+                log_collector,
                 session_state=session_state,
                 audit=self._audit,
             )
@@ -828,6 +802,7 @@ class GameTestOrchestrator:
             audit=self._audit,
             log_monitor=log_mon,
             attempt_context=attempt_ctx,
+            log_collector=log_collector,
         )
         async def _session_task() -> str | None:
             from game_agent.utils.stage_logging import pipeline_stage
@@ -905,9 +880,28 @@ class GameTestOrchestrator:
         executor_state = None
         timed_out = False
         phase_ok = False
-        deadline = time.monotonic() + cfg.game.timeout_s
+        launch_timeout_s = cfg.game.resolve_launch_timeout_s()
+        launch_deadline = time.monotonic() + launch_timeout_s
+        deadline = launch_deadline
 
-        while pending and time.monotonic() < deadline and not phase_ok:
+        while pending and not phase_ok:
+            if attempt_ctx is not None:
+                deadline = attempt_ctx.extend_parallel_deadline(deadline)
+            play_active = attempt_ctx.is_in_game_play_active()
+            now = time.monotonic()
+            if play_active:
+                loop_deadline = deadline
+            else:
+                loop_deadline = min(deadline, launch_deadline)
+            if now >= loop_deadline:
+                if attempt_ctx.is_in_game_confirmed():
+                    phase_ok = True
+                    logger.info(
+                        "Parallel phase deadline reached but in-game already confirmed"
+                    )
+                else:
+                    timed_out = True
+                break
             if attempt_ctx.is_in_game_confirmed():
                 phase_ok = True
                 logger.info(
@@ -916,7 +910,7 @@ class GameTestOrchestrator:
                     len(pending),
                 )
                 break
-            remaining = deadline - time.monotonic()
+            remaining = loop_deadline - now
             done, pending = await asyncio.wait(
                 pending,
                 timeout=max(0.1, remaining),
@@ -998,6 +992,7 @@ class GameTestOrchestrator:
                     )
 
         in_game_signaled = attempt_ctx.is_in_game_confirmed()
+        play_active = attempt_ctx.is_in_game_play_active()
         if in_game_signaled:
             phase_ok = True
 
@@ -1009,10 +1004,11 @@ class GameTestOrchestrator:
                 executor_in_game_confirmed=(
                     executor_state.in_game_confirmed if executor_state else None
                 ),
+                in_game_play_active=play_active,
             ):
                 timed_out = True
                 attempt_ctx.signal_fatal(
-                    f"Parallel game phase timeout ({cfg.game.timeout_s:.0f}s) "
+                    f"Parallel game phase timeout ({launch_timeout_s:.0f}s) "
                     "without in-game confirmation",
                 )
                 stop_event.set()
@@ -1058,15 +1054,19 @@ class GameTestOrchestrator:
             in_game_signaled=in_game_signaled,
             executor_in_game_confirmed=exec_in_game,
             executor_enabled=mods.executor,
+            in_game_play_active=play_active,
         ):
             return (
-                f"Parallel game phase timeout ({cfg.game.timeout_s:.0f}s) "
+                f"Parallel game phase timeout ({launch_timeout_s:.0f}s) "
                 "without in-game confirmation"
             )
 
         if not mods.executor:
             if timed_out:
-                logger.info("Monitors-only phase timed out after %.0fs (ok)", cfg.game.timeout_s)
+                logger.info(
+                    "Monitors-only phase timed out after %.0fs (ok)",
+                    launch_timeout_s,
+                )
             self._observer_session_restarts = session_state.restarts_count
             return None
 
@@ -1123,6 +1123,10 @@ class GameTestOrchestrator:
             session_state.restarts_count,
         )
         self._observer_session_restarts = session_state.restarts_count
+        if executor_state is not None:
+            self._winning_graph_snapshot = dict(executor_state.graph_state_snapshot or {})
+        if log_collector is not None and self._adb is not None and self._artifact_root is not None:
+            log_collector.finalize_log(self._adb, self._artifact_root)
         return None
 
     def _resolve_task_gid_for_deliverable(self) -> str:
@@ -1246,15 +1250,11 @@ class GameTestOrchestrator:
         ):
             return self._preprocess_record.processed_apk.resolve()
         if self._gameturbo_plugin_enabled():
-            from game_agent.external_services.gameturbo.bootstrap import discover_source_apk
-
-            try:
-                return discover_source_apk(
-                    gid=self._deploy_gid(),
-                    source_apk=runtime.source_apk,
-                )
-            except RuntimeError:
-                return None
+            return self._external_service_manager().resolve_source_apk(
+                runtime=self._runtime(),
+                deploy_gid=self._deploy_gid(),
+                preprocess_record=self._preprocess_record,
+            )
         return None
 
     def _launch_game_after_prepare_context(self, cfg: TaskConfig) -> None:
@@ -1297,7 +1297,9 @@ class GameTestOrchestrator:
             return
         deploy_gid = self._deploy_gid()
         with trace_operation("packages", "cleanup_deploy_artifacts_after_attempt") as rec:
-            removed = cleanup_deploy_artifacts(gid=deploy_gid)
+            removed = self._external_service_manager().cleanup_deploy_artifacts(
+                gid=deploy_gid,
+            )
             rec.ok(removed=removed)
         if removed and self._audit is not None:
             self._audit.log_phase(
@@ -1325,9 +1327,9 @@ class GameTestOrchestrator:
         deploy_gid = self._deploy_gid()
         summary: dict[str, list[str]] = {}
         with trace_operation("packages", "finalize_after_deliverable") as rec:
-            summary = cleanup_task_packages(
-                deploy_gid or "",
-                self._source_apk_path,
+            summary = self._external_service_manager().finalize_task_packages(
+                gid=deploy_gid or "",
+                source_apk=self._source_apk_path,
             )
             rec.ok(**{k: len(v) for k, v in summary.items()})
         total = sum(len(v) for v in summary.values())
@@ -1547,28 +1549,10 @@ class GameTestOrchestrator:
                 }
 
             if self._gameturbo_plugin_enabled():
-                from game_agent.external_services.gameturbo.bootstrap import (
-                    find_merged_config_for_deliverable,
-                    merged_config_path,
-                )
-                from game_agent.external_services.gameturbo.paths import (
-                    GAMETURBO_MERGED_CONFIG_PATH,
-                )
-
-                config_path = find_merged_config_for_deliverable(
-                    deploy_gid or "",
+                config_path = self._external_service_manager().require_success_merged_config(
+                    deploy_gid=deploy_gid,
                     winning_artifact_root=winning_root,
                 )
-                if config_path is None:
-                    fallback = (
-                        merged_config_path(deploy_gid)
-                        if deploy_gid
-                        else GAMETURBO_MERGED_CONFIG_PATH
-                    )
-                    raise RuntimeError(
-                        f"测试通过但缺少 deploy 合并配置（已查 {winning_root} 与 {fallback}），"
-                        "请确认 deploy.sh 已执行并生成合并配置"
-                    )
                 passed = publish_success_deliverable(
                     self._deliverable,
                     game_config_path=config_path,
@@ -1590,6 +1574,7 @@ class GameTestOrchestrator:
                     in_game_confirmed=self._in_game_confirmed,
                     session_restarts=self._observer_session_restarts,
                     external_services=external_evidence,
+                    in_game_play=build_in_game_play_summary(self._winning_graph_snapshot),
                 )
                 logger.info(
                     "任务成功产出已写入: %s",
@@ -1618,6 +1603,7 @@ class GameTestOrchestrator:
                 max_retries=max_retries,
                 ai_report=ai_report,
                 error_code=error_code,
+                app_config=cfg.base,
             )
             self._finalize_packages_after_deliverable()
             logger.info(
@@ -1638,6 +1624,7 @@ class GameTestOrchestrator:
             preprocessing_enabled=self._preprocessing_enabled,
             artifacts_dir=cfg.agent.artifacts_dir,
             modules_summary=cfg.modules.model_dump(),
+            app_config=cfg.base,
         )
         logger.info(
             "任务审查日志: %s | 已清理 artifacts 目录 %d 个",
@@ -1696,6 +1683,11 @@ class GameTestOrchestrator:
             task_deliverable_root=deliverable_root,
             blocked_stage_hint=self._last_blocked_stage_hint,
             audit=self._audit,
+            external_services=self._external_service_manager(),
+            service_context=self._build_service_context(
+                retry=retry_count,
+                max_retries=max_retries,
+            ),
         )
         asyncio.run(
             handler.handle(

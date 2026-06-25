@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import dataclass, field
 
 
@@ -26,6 +27,9 @@ class AttemptContext:
     session_index: int = 1
     _in_game_confirmed: bool = field(default=False, repr=False)
     _in_game_note: str = field(default="", repr=False)
+    _in_game_agent_deadline: float = field(default=0.0, repr=False)
+    _in_game_play_deadline: float = field(default=0.0, repr=False)
+    _in_game_play_buffer_s: float = field(default=60.0, repr=False)
     _ocr_busy: bool = field(default=False, repr=False)
 
     def signal_fatal(self, reason: str) -> None:
@@ -99,11 +103,46 @@ class AttemptContext:
             return True
 
     def signal_in_game_confirmed(self, note: str = "") -> None:
-        """Executor 在 check_in_game 确认后立即通知 orchestrator，避免等待收尾阻塞判定。"""
+        """Executor 在 in-game play 完成且无异常后通知 orchestrator。"""
         with self._lock:
             self._in_game_confirmed = True
             if (note or "").strip():
                 self._in_game_note = note.strip()[:2000]
+
+    def signal_in_game_agent_phase(self, run_s: float) -> None:
+        """稳定性观察通过后启动 in-game play，延长并行阶段 deadline（兼容旧接口）。"""
+        with self._lock:
+            deadline = time.monotonic() + max(60.0, float(run_s))
+            self._in_game_agent_deadline = deadline
+            self._in_game_play_deadline = deadline
+            self.ui_stage = "in_game_play"
+
+    def signal_in_game_play_started(self, play_deadline: float, buffer_s: float = 60.0) -> None:
+        """进入游戏内试玩：orchestrator 以 play_deadline + buffer 延长并行阶段。"""
+        with self._lock:
+            self._in_game_play_deadline = float(play_deadline)
+            self._in_game_play_buffer_s = max(0.0, float(buffer_s))
+            self._in_game_agent_deadline = self._in_game_play_deadline + self._in_game_play_buffer_s
+            self.ui_stage = "in_game_play"
+
+    def extend_parallel_deadline(self, base_deadline: float) -> float:
+        with self._lock:
+            if self._in_game_play_deadline > 0:
+                return max(
+                    base_deadline,
+                    self._in_game_play_deadline + self._in_game_play_buffer_s,
+                )
+            if self._in_game_agent_deadline > 0:
+                return max(base_deadline, self._in_game_agent_deadline)
+            return base_deadline
+
+    def is_in_game_play_active(self) -> bool:
+        with self._lock:
+            if self._in_game_confirmed:
+                return False
+            if self._in_game_play_deadline <= 0:
+                return False
+            return time.monotonic() < self._in_game_play_deadline
 
     def is_in_game_confirmed(self) -> bool:
         with self._lock:

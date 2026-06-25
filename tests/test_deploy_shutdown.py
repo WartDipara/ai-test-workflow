@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from game_agent.services import deploy_runner
+from game_agent.external_services.gameturbo.deploy import runner as deploy_runner
 from game_agent.services.shutdown import ShutdownRequested, reset_shutdown_context
 from game_agent.services.subprocess_tree import PopenResult
 
@@ -26,14 +26,19 @@ def test_run_deploy_raises_on_shutdown_and_writes_log(tmp_path: Path) -> None:
         patch.object(deploy_runner, "DEPLOY_SCRIPT", script),
         patch.object(deploy_runner, "ANDROID_DIR", tmp_path),
         patch.object(deploy_runner, "_find_bash", return_value="bash"),
-        patch.object(deploy_runner, "create_install_monitor") as monitor_factory,
+        patch.object(deploy_runner, "InstallMonitorSession") as session_cls,
         patch.object(deploy_runner, "deploy_build_locked") as build_lock,
         patch.object(deploy_runner, "popen_communicate_poll") as popen_mock,
         patch.object(deploy_runner, "is_shutdown_requested", return_value=False),
     ):
         monitor = MagicMock()
-        monitor.result.summary.return_value = "ok"
-        monitor_factory.return_value = monitor
+        monitor.result.errors = []
+        monitor.result.polls = 0
+        session = MagicMock()
+        session.monitor = monitor
+        session._results = []
+        session.run_while.side_effect = lambda action: action()
+        session_cls.start.return_value = session
         build_lock.return_value.__enter__ = MagicMock(return_value=None)
         build_lock.return_value.__exit__ = MagicMock(return_value=False)
         popen_mock.return_value = PopenResult(

@@ -9,13 +9,7 @@ from pathlib import Path
 from game_agent.models.settings import AppConfig
 from game_agent.modules.observer_session.state import ObserverSessionState
 from game_agent.services.adb_service import AdbService
-from game_agent.services.gameturbo_log import (
-    append_gameturbo_line,
-    bootstrap_gameturbo_log,
-    gameturbo_log_dedup_key,
-    gameturbo_log_path,
-    read_gameturbo_dedup_keys,
-)
+from game_agent.services.external_log_base import ExternalLogCollector
 from game_agent.services.run_audit_log import RunAuditLogger
 
 logger = logging.getLogger(__name__)
@@ -23,11 +17,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class LogMonitor:
-    """GameTurbo logcat 采集：运行期只写入 gameturbo.log，不做规则判死。"""
+    """External plugin logcat 采集：运行期只写入插件日志，不做规则判死。"""
 
     adb: AdbService
     app_config: AppConfig
     artifact_root: Path
+    collector: ExternalLogCollector
     session_state: ObserverSessionState | None = None
     audit: RunAuditLogger | None = None
     _restart_requested: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -43,16 +38,16 @@ class LogMonitor:
         skip_initial_bootstrap: bool = False,
     ) -> str | None:
         """兼容旧接口名：仅采集至 stop；流异常断开时返回基础设施错误（非日志判死）。"""
-        logger.info("[LogMonitor] 开始采集 GameTurbo 日志（运行期不分析）...")
-        log_path = gameturbo_log_path(self.artifact_root)
+        logger.info("[LogMonitor] 开始采集 %s 日志（运行期不分析）...", self.collector.service_name)
+        log_path = self.collector.log_path(self.artifact_root)
         if not skip_initial_bootstrap:
-            bootstrap_gameturbo_log(self.adb, self.artifact_root)
-        seen_keys = read_gameturbo_dedup_keys(log_path)
+            self.collector.bootstrap_log(self.adb, self.artifact_root)
+        seen_keys = self.collector.read_dedup_keys(log_path)
         while not stop_event.is_set():
             if self._restart_requested.is_set():
                 self._restart_requested.clear()
-                log_path = gameturbo_log_path(self.artifact_root)
-                seen_keys = read_gameturbo_dedup_keys(log_path)
+                log_path = self.collector.log_path(self.artifact_root)
+                seen_keys = self.collector.read_dedup_keys(log_path)
                 logger.info("[LogMonitor] 会话重启后恢复 logcat 流")
 
             stream_err = await self._run_one_stream(
@@ -81,7 +76,7 @@ class LogMonitor:
         log_path: Path,
         seen_keys: set[str],
     ) -> str | None:
-        cmd = self.adb._base() + ["logcat", "-s", "GameTurbo"]
+        cmd = self.adb._base() + ["logcat", "-s", self.collector.logcat_tag]
         logger.info("[LogMonitor] 监听命令: %s", " ".join(cmd))
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -107,7 +102,8 @@ class LogMonitor:
                     now = time.monotonic()
                     if now - last_heartbeat >= heartbeat_interval_s:
                         logger.info(
-                            "[LogMonitor] 仍在采集 GameTurbo | 已收 %d 条 | session=%d",
+                            "[LogMonitor] 仍在采集 %s | 已收 %d 条 | session=%d",
+                            self.collector.service_name,
                             line_count,
                             self.session_state.session_index
                             if self.session_state
@@ -122,9 +118,9 @@ class LogMonitor:
                 if not line:
                     continue
                 line_count += 1
-                key = gameturbo_log_dedup_key(line)
+                key = self.collector.log_dedup_key(line)
                 if key not in seen_keys:
-                    append_gameturbo_line(log_path, line)
+                    self.collector.append_line(log_path, line)
                     seen_keys.add(key)
                 if line_count <= 3 or line_count % 20 == 0:
                     logger.debug("[LogMonitor] logcat #%d: %s", line_count, line[:200])

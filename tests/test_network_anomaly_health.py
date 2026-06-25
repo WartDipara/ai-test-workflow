@@ -6,18 +6,18 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from game_agent.models.run_failure import classify_failure
-from game_agent.services.gameturbo_log import (
+from game_agent.external_services.gameturbo.log import (
     format_latest_gameturbo_log_for_agent,
     resolve_pipeline_artifact_root,
     tail_gameturbo_log_lines,
 )
-from game_agent.services.gameturbo_log_health import assess_gameturbo_log_health
+from game_agent.external_services.gameturbo.log_health import assess_gameturbo_log_health
 from game_agent.controllers.network_anomaly_coordinator import (
     NetworkAnomalyCoordinator,
     format_confirmed_network_anomaly,
     format_confirmed_vision_ocr_anomaly,
 )
-from game_agent.services.gameturbo_config_retry import infer_blocked_stage
+from game_agent.external_services.gameturbo.config_retry import infer_blocked_stage
 from game_agent.services.screen_download_health import (
     ScreenProgressTracker,
     is_download_stall_watch_stage,

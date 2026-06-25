@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from game_agent.services.gameturbo_log import (
+from game_agent.external_services.gameturbo.log import (
     ensure_gameturbo_log_for_analysis,
     gameturbo_log_path,
     merge_gameturbo_session_archives,

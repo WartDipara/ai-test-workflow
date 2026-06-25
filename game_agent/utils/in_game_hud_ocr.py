@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from game_agent.utils.character_creation_ocr import match_character_creation_ocr
 
 # HUD markers: match any → may trigger in-game confirmation (still needs multimodal).
@@ -45,7 +47,7 @@ IN_GAME_HUD_OCR_MARKERS: tuple[str, ...] = (
 
 def _marker_in_text(text: str, marker: str) -> bool:
     if marker.isascii():
-        return marker.lower() in text.lower()
+        return re.search(rf"\b{re.escape(marker)}\b", text, re.IGNORECASE) is not None
     return marker in text
 
 

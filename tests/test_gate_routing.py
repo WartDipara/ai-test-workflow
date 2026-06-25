@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,6 +23,8 @@ from game_agent.models.scene import SceneClassification, SceneTransition
 from game_agent.services.download_gate import (
     apply_download_ocr_to_facts,
     ocr_has_clear_download_progress,
+    ocr_has_download_context,
+    ocr_merged_for_download_gate,
     ocr_still_downloading,
 )
 from game_agent.services.login_stage_probe import probe_login_stage
@@ -89,6 +93,36 @@ def test_download_progress_routes_handle_download_not_scene() -> None:
     assert plan_route(state) == "handle_download"
 
 
+def test_top_mbps_ocr_does_not_trigger_download_gate() -> None:
+    bboxes = [
+        OcrBbox(text="12.5 MB/s", cx=200, cy=80, x1=0, y1=0, x2=0, y2=0),
+        OcrBbox(text="任务", cx=540, cy=400, x1=0, y1=0, x2=0, y2=0),
+    ]
+    gate_ocr = ocr_merged_for_download_gate(bboxes, screen_h=2400)
+    assert "任务" in gate_ocr
+    assert ocr_has_download_context(gate_ocr) is False
+    assert ocr_has_download_context("12.5 MB/s") is False
+    assert ocr_has_download_context("资源下载 12.5 MB/s") is True
+
+
+def test_in_game_entry_passed_skips_download_route() -> None:
+    ocr = "12.5 MB/s 加速"
+    facts = LaunchFacts(download_visible=True, enter_cta_visible=False)
+    state = _state(
+        login_done=True,
+        privacy_checked=True,
+        enter_tapped_count=1,
+        in_game_entry_passed=True,
+        stability_observe_complete=True,
+        in_game_agent_started_at=1.0,
+        in_game_agent_deadline=999999.0,
+        last_ocr_summary=ocr,
+    )
+    state["facts"] = facts.model_dump()
+    assert plan_route(state) == "in_game_agent"
+    assert plan_route(state) != "handle_download"
+
+
 def test_download_visible_not_classified_as_loading_scene() -> None:
     facts = LaunchFacts(download_visible=True)
     cls = classify_scene(
@@ -101,45 +135,87 @@ def test_download_visible_not_classified_as_loading_scene() -> None:
     assert cls.scene_id != "loading"
 
 
-def test_download_in_progress_does_not_mark_done() -> None:
+def test_download_in_progress_does_not_mark_done(tmp_path: Path) -> None:
     @dataclass
     class _Deps:
         screen_width: int = 1080
         screen_height: int = 2400
         adb: MagicMock = MagicMock()
+        artifact_root: Path = tmp_path
+        attempt_context: object | None = None
 
     deps = _Deps()
     deps.adb.wait_seconds = MagicMock()
+    deps.adb.device_serial = "test"
+    deps.adb.tap.return_value = "Tapped"
+    deps.adb.screencap_png = MagicMock()
 
     state = _state(
         last_ocr_summary="资源下载 45%",
         last_bboxes=[],
+        facts=LaunchFacts(download_visible=True, download_in_progress=True).model_dump(),
     )
     mark_tree_node_done(state, "atomic_login")
     assert completed_tree_node(state, "handle_download") is False
 
-    import asyncio
+    from game_agent.services import action_frame as af
+    from game_agent.services.action_frame import ObserveCapture
+    from game_agent.utils.ocr_util import OcrBbox
 
-    result = asyncio.run(handle_download_node(state, deps))  # type: ignore[arg-type]
+    async def fake_observe(*args, **kwargs):
+        return ObserveCapture(
+            screenshot=str(tmp_path / "dl.png"),
+            ocr_summary="资源下载 45%",
+            bboxes=[OcrBbox(text="45%", cx=1, cy=1, x1=0, y1=0, x2=0, y2=0)],
+        )
+
+    original = af.capture_observe
+    af.capture_observe = fake_observe
+    try:
+        result = asyncio.run(handle_download_node(state, deps))  # type: ignore[arg-type]
+    finally:
+        af.capture_observe = original
     assert completed_tree_node(result, "handle_download") is False
 
 
-def test_download_ui_gone_marks_done() -> None:
+def test_download_ui_gone_marks_done(tmp_path: Path) -> None:
     @dataclass
     class _Deps:
         screen_width: int = 1080
         screen_height: int = 2400
         adb: MagicMock = MagicMock()
+        artifact_root: Path = tmp_path
+        attempt_context: object | None = None
 
     deps = _Deps()
     deps.adb.wait_seconds = MagicMock()
+    deps.adb.device_serial = "test"
+    deps.adb.tap.return_value = "Tapped"
+    deps.adb.screencap_png = MagicMock()
 
-    state = _state(last_ocr_summary="进入游戏")
+    state = _state(
+        last_ocr_summary="进入游戏",
+        facts=LaunchFacts(download_visible=True).model_dump(),
+    )
     assert ocr_still_downloading("进入游戏") is False
 
-    import asyncio
+    from game_agent.services import action_frame as af
+    from game_agent.services.action_frame import ObserveCapture
+    from game_agent.utils.ocr_util import OcrBbox
 
-    result = asyncio.run(handle_download_node(state, deps))  # type: ignore[arg-type]
+    async def fake_observe(*args, **kwargs):
+        return ObserveCapture(
+            screenshot=str(tmp_path / "dl_done.png"),
+            ocr_summary="进入游戏",
+            bboxes=[OcrBbox(text="进入游戏", cx=1, cy=1, x1=0, y1=0, x2=0, y2=0)],
+        )
+
+    original = af.capture_observe
+    af.capture_observe = fake_observe
+    try:
+        result = asyncio.run(handle_download_node(state, deps))  # type: ignore[arg-type]
+    finally:
+        af.capture_observe = original
     assert completed_tree_node(result, "handle_download") is True
 
 
@@ -168,10 +244,17 @@ def test_checkbox_gate_skips_sync_interpretation_even_with_character_hint() -> N
     assert needs_sync_interpretation(facts, ocr_merged="用户协议 隐私政策 LV.") is False
 
 
-def test_privacy_gate_skips_when_download_visible() -> None:
-    facts = LaunchFacts(download_visible=True)
-    ocr = "已阅读并同意 用户协议 隐私政策"
+def test_privacy_gate_skips_when_real_download_in_progress() -> None:
+    facts = LaunchFacts(download_visible=True, download_in_progress=True)
+    ocr = "资源更新中 35% 下载"
     assert should_invoke_privacy_gate_vlm(facts, ocr_merged=ocr) is False
+
+
+def test_privacy_gate_runs_when_download_visible_without_progress() -> None:
+    """隐私屏误标 download_visible 时仍应调 PrivacyGate。"""
+    facts = LaunchFacts(download_visible=True, download_in_progress=False)
+    ocr = "已阅读并同意 用户协议 隐私政策 更新日期"
+    assert should_invoke_privacy_gate_vlm(facts, ocr_merged=ocr) is True
 
 
 def test_true_loading_black_screen_routes_scene_wait() -> None:

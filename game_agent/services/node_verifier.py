@@ -6,6 +6,12 @@ import re
 from dataclasses import dataclass
 
 from game_agent.models.screen_interpretation import ScreenInterpretation
+from game_agent.services.privacy_gate import ocr_has_privacy_context, privacy_modal_still_open
+
+_PRIVACY_TERMS_RE = re.compile(
+    r"个人信息保护|隐私政策|用户协议|许可及服务|适龄提示|protect.*privacy|privacy\s*policy",
+    re.IGNORECASE,
+)
 
 _SUB_ACCOUNT_PANEL_RE = re.compile(
     r"sub-?account|小号|子账号|选择小号|选择角色|last\s*login|上次登录|最近登录",
@@ -95,6 +101,39 @@ def verify_stage_exit(
                 evidence=delta,
             )
 
+    if stage == "privacy_modal":
+        before_modal = privacy_modal_still_open(merged_before)
+        after_modal = privacy_modal_still_open(merged_after)
+        if before_modal and not after_modal:
+            return NodeVerifyResult(
+                passed=True,
+                reason="privacy consent buttons disappeared",
+                evidence=delta,
+            )
+        if before_modal and after_modal:
+            return NodeVerifyResult(
+                passed=False,
+                reason="privacy modal consent row still visible",
+                evidence=delta,
+            )
+        if _LOGIN_FORM_RE.search(merged_after) and not _LOGIN_FORM_RE.search(merged_before):
+            return NodeVerifyResult(
+                passed=True,
+                reason="login form appeared after privacy consent",
+                evidence=delta,
+            )
+        if not before_modal:
+            return NodeVerifyResult(
+                passed=True,
+                reason="no privacy modal consent row before action",
+                evidence=delta,
+            )
+        return NodeVerifyResult(
+            passed=False,
+            reason="privacy modal still visible",
+            evidence=delta,
+        )
+
     if stage in ("sub_account_select", "sub_account"):
         before_panel = bool(_SUB_ACCOUNT_PANEL_RE.search(merged_before))
         after_panel = bool(_SUB_ACCOUNT_PANEL_RE.search(merged_after))
@@ -144,6 +183,27 @@ def verify_stage_exit(
         return NodeVerifyResult(
             passed=False,
             reason="announcement still visible",
+            evidence=delta,
+        )
+
+    if stage == "server_select":
+        before_enter = bool(_SERVER_SELECT_RE.search(merged_before))
+        after_enter = bool(_SERVER_SELECT_RE.search(merged_after))
+        if before_enter and not after_enter:
+            return NodeVerifyResult(
+                passed=True,
+                reason="server/enter screen text changed after tap",
+                evidence=delta,
+            )
+        if merged_before.strip() != merged_after.strip():
+            return NodeVerifyResult(
+                passed=True,
+                reason="OCR changed after enter tap",
+                evidence=delta,
+            )
+        return NodeVerifyResult(
+            passed=False,
+            reason="no change after enter tap",
             evidence=delta,
         )
 

@@ -6,15 +6,15 @@ import logging
 from pathlib import Path
 
 from game_agent.exceptions import DeployPhaseError
+from game_agent.external_services.gameturbo.deploy.runner import DeployResult, run_deploy
 from game_agent.models.deploy_recovery import DeployRecoveryPatch
-from game_agent.models.gameturbo_config import GameTurboConfigPatch
+from game_agent.external_services.gameturbo.models.config import GameTurboConfigPatch
 from game_agent.models.task_config import TaskConfig
-from game_agent.modules.retry.analysis import AnalysisAgent
-from game_agent.services.deploy_runner import DeployResult, run_deploy
+from game_agent.external_services.gameturbo.retry.analysis import AnalysisAgent
 from game_agent.services.pipeline_trace import trace_operation
 from game_agent.services.run_audit_log import RunAuditLogger
-from game_agent.utils.gameturbo_bootstrap import merged_config_path, output_apk_name
-from game_agent.utils.gameturbo_config_apply import (
+from game_agent.external_services.gameturbo.bootstrap import merged_config_path, output_apk_name
+from game_agent.external_services.gameturbo.config.apply import (
     ConfigApplyResult,
     apply_gameturbo_config_patch,
 )

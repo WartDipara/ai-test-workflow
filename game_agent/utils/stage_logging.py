@@ -89,13 +89,9 @@ def pipeline_stage(
 ) -> Iterator[None]:
     """
     Bind pipeline stage for logging in the current thread/task.
-    Optionally write an external plugin log stage separator when enabled.
+    External plugin log markers are written by plugin-owned collectors.
     """
-    root = artifact_root if artifact_root is not None else gameturbo_root
-    if write_external_log_marker and root is not None:
-        from game_agent.services.gameturbo_log import append_gameturbo_stage_marker
-
-        append_gameturbo_stage_marker(root, phase, note)
+    del artifact_root, gameturbo_root, write_external_log_marker, note
 
     token = bind_pipeline_stage(phase)
     try:

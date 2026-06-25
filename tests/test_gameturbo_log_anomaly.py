@@ -1,4 +1,4 @@
-from game_agent.services.gameturbo_log_anomaly import is_fatal_gameturbo_log_line
+from game_agent.external_services.gameturbo.log_anomaly import is_fatal_gameturbo_log_line
 
 
 def test_bhook_ok_not_fatal() -> None:

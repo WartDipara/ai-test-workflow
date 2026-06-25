@@ -7,6 +7,7 @@ import re
 
 from game_agent.models.launch_graph_state import LaunchFacts
 from game_agent.models.screen_interpretation import ScreenInterpretation
+from game_agent.services.enter_gate_planner import enter_gate_likely_visible
 from game_agent.services.login_stage_probe import probe_login_stage
 from game_agent.services.server_selector_locator import find_enter_game_bbox, locate_server_selector_target
 from game_agent.utils.ocr_util import OcrBbox
@@ -16,6 +17,8 @@ _PRIVACY_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 from game_agent.services.download_gate import ocr_has_download_context
+from game_agent.graphs.launch_state_store import completed_tree_node, is_privacy_checked
+from game_agent.services.privacy_gate import privacy_modal_still_open
 _ANNOUNCEMENT_RE = re.compile(
     r"公告|announcement|Notice|日常通知|点击空白|今日不再|不再提示",
     re.IGNORECASE,
@@ -30,6 +33,7 @@ _CHARACTER_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _ENTER_WORLD_OCR_RE = re.compile(r"Enter\s*World|进入世界", re.IGNORECASE)
+_PK_AGREEMENT_RE = re.compile(r"PK\s*玩法|接受.*PK", re.IGNORECASE)
 
 
 def _looks_like_character_select_screen(
@@ -58,10 +62,11 @@ def classify_screen_facts(
 ) -> LaunchFacts:
     """把 OCR 结果转为 LaunchFacts。"""
     login_probe = probe_login_stage(bboxes, screen_w=screen_w, screen_h=screen_h)
-    enter = find_enter_game_bbox(bboxes)
+    enter_anchor = find_enter_game_bbox(bboxes, screen_h=screen_h)
     target, _enter = locate_server_selector_target(bboxes, screen_w=screen_w, screen_h=screen_h)
 
     merged = ocr_summary or " ".join(b.text for b in bboxes)
+    enter_visible = enter_gate_likely_visible(bboxes, ocr_merged=merged)
     download_visible = ocr_has_download_context(merged)
     announcement_overlay = bool(_ANNOUNCEMENT_RE.search(merged))
     privacy_context = bool(_PRIVACY_CONTEXT_RE.search(merged))
@@ -73,8 +78,10 @@ def classify_screen_facts(
         sub_label = login_probe.action_label
 
     reason_parts = [login_probe.reason]
-    if enter is not None:
-        reason_parts.append(f"enter_cta={enter.text[:40]!r}")
+    if enter_visible:
+        reason_parts.append("enter_gate_visible")
+    if enter_anchor is not None:
+        reason_parts.append(f"enter_anchor={enter_anchor.text[:40]!r}")
     if privacy_context:
         reason_parts.append("privacy_context_detected")
     if target is not None:
@@ -88,9 +95,9 @@ def classify_screen_facts(
         sub_account_blocking=login_probe.blocking and login_probe.stage == "sub_account_select",
         sub_account_action_xy=sub_action,
         sub_account_label=sub_label,
-        enter_cta_visible=enter is not None,
-        enter_cta_xy=(enter.cx, enter.cy) if enter else None,
-        enter_cta_label=enter.text.strip() if enter else "",
+        enter_cta_visible=enter_visible,
+        enter_cta_xy=None,
+        enter_cta_label=enter_anchor.text.strip() if enter_anchor else "",
         server_slot_visible=(
             target is not None and target.source == "ocr"
         ),
@@ -205,9 +212,8 @@ def merge_interpretation_into_facts(
             updates["login_stage"] = "login_form"
 
     elif stage == "server_select":
-        if tap_xy is not None and not facts.enter_cta_xy:
+        if tap_xy is not None:
             updates["enter_cta_visible"] = True
-            updates["enter_cta_xy"] = tap_xy
             if tap_label:
                 updates["enter_cta_label"] = tap_label
 
@@ -261,7 +267,7 @@ def needs_sync_interpretation(facts: LaunchFacts, *, ocr_merged: str = "") -> bo
         return True
     if facts.login_blocking and facts.login_stage == "login_form":
         return False
-    if facts.server_slot_visible and facts.enter_cta_xy is not None:
+    if facts.server_slot_visible and facts.enter_cta_visible:
         return False
     return False
 
@@ -330,3 +336,54 @@ def merge_analyze_screen_response(
     if progress:
         hint_parts.append(f"progress={progress[:40]}")
     return merged, "; ".join(hint_parts)
+
+
+def merge_sticky_gate_facts(
+    facts: LaunchFacts,
+    *,
+    prev_facts: LaunchFacts | None,
+    state: dict | None = None,
+) -> LaunchFacts:
+    """
+    classify 每轮重建 facts 时，保留未完成里程碑的门禁信号，避免 OCR 冲掉隐私弹窗状态。
+    """
+    if prev_facts is None:
+        return facts
+
+    privacy_done = False
+    if state is not None:
+        privacy_done = completed_tree_node(state, "handle_initial_privacy_dialog") and is_privacy_checked(
+            state  # type: ignore[arg-type]
+        )
+
+    updates: dict = {}
+    ocr = str(state.get("last_ocr_summary") or "") if state is not None else ""
+    if not privacy_done:
+        if privacy_modal_still_open(ocr) and not facts.initial_privacy_dialog:
+            updates["initial_privacy_dialog"] = True
+            updates["privacy_gate_kind"] = "modal"
+        if prev_facts.initial_privacy_dialog and not facts.initial_privacy_dialog:
+            if prev_facts.privacy_gate_kind == "modal" or prev_facts.agree_button_xy:
+                updates["initial_privacy_dialog"] = True
+                updates["privacy_gate_kind"] = prev_facts.privacy_gate_kind or "modal"
+        if prev_facts.agree_button_xy and facts.agree_button_xy is None:
+            if updates.get("initial_privacy_dialog") or prev_facts.initial_privacy_dialog:
+                updates["agree_button_xy"] = prev_facts.agree_button_xy
+
+    # 误设的 download_visible 在隐私屏上应被抑制
+    if (
+        (updates.get("initial_privacy_dialog") or facts.initial_privacy_dialog or prev_facts.initial_privacy_dialog)
+        and facts.download_visible
+        and not facts.download_in_progress
+        and not facts.download_progress_text
+    ):
+        updates["download_visible"] = False
+        updates["download_in_progress"] = False
+        updates["download_gate_kind"] = ""
+
+    if not updates:
+        return facts
+    reason = facts.classify_reason
+    reason = f"{reason}; sticky_gate_merge" if reason else "sticky_gate_merge"
+    updates["classify_reason"] = reason
+    return facts.model_copy(update=updates)

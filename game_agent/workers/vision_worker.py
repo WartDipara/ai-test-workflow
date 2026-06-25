@@ -29,6 +29,26 @@ class VisionWorker:
     def __init__(self, llm_config: LLMSection) -> None:
         self._llm_config = llm_config
         self._agent = Agent(build_llm_model(llm_config), output_type=str)
+        self._vision_timeout_s = float(llm_config.vision_timeout_s)
+
+    async def _run_agent(
+        self,
+        inputs,
+        *,
+        prefix: str = "[VisionWorker]",
+        fallback: str = "",
+    ) -> str:
+        try:
+            result = await asyncio.wait_for(
+                self._agent.run(inputs),
+                timeout=self._vision_timeout_s,
+            )
+            return (result.output or "").strip()
+        except asyncio.TimeoutError:
+            logger.warning("%s API timeout (%.0fs)", prefix, self._vision_timeout_s)
+            return fallback
+        except asyncio.CancelledError:
+            raise
 
     async def analyze_game_state(
         self,
@@ -81,8 +101,8 @@ Return valid JSON only (no markdown fence):
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            output = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            output = result
             elapsed = time.perf_counter() - t0
             log_vision_json(
                 logger,
@@ -153,8 +173,8 @@ Return valid JSON only (no markdown fence):
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            output = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            output = result
             log_vision_json(
                 logger,
                 prefix,
@@ -248,10 +268,10 @@ JSON only (no markdown fence):
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run(
+            result = await self._run_agent(
                 [prompt, BinaryImage.from_path(screenshot_path)],
             )
-            output = (result.output or "").strip()
+            output = result
             log_vision_json(
                 logger,
                 prefix,
@@ -280,10 +300,10 @@ JSON only (no markdown fence):
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run(
+            result = await self._run_agent(
                 [prompt, BinaryImage.from_path(screenshot_path)],
             )
-            output = (result.output or "").strip()
+            output = result
             log_full_text(
                 logger,
                 prefix,
@@ -314,8 +334,8 @@ JSON only (no markdown fence):
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            output = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            output = result
             elapsed = time.perf_counter() - t0
             log_vision_json(
                 logger,
@@ -386,10 +406,10 @@ Rules:
         prefix = f"[VisionWorker:server_probe] 第 {round_id} 轮" if round_id is not None else "[VisionWorker:server_probe]"
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run(
+            result = await self._run_agent(
                 [prompt, BinaryImage.from_path(screenshot_path)],
             )
-            output = (result.output or "").strip()
+            output = result
             log_full_text(
                 logger,
                 prefix,
@@ -435,10 +455,10 @@ Rules:
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run(
+            result = await self._run_agent(
                 [prompt, BinaryImage.from_path(screenshot_path)],
             )
-            output = (result.output or "").strip()
+            output = result
             log_full_text(
                 logger,
                 prefix,
@@ -524,8 +544,8 @@ JSON only (no markdown fence):
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            raw = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = result
             elapsed = time.perf_counter() - t0
             judgment = _parse_game_entry_judgment(raw)
             logger.info(
@@ -619,8 +639,8 @@ Rules:
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            raw = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = result
             judgment = parse_privacy_gate_judgment(raw)
             logger.info(
                 "%s 判定 | %.2fs | gate=%s conf=%.2f",
@@ -680,8 +700,8 @@ Rules:
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            raw = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = result
             judgment = parse_download_gate_judgment(raw)
             logger.info(
                 "%s 判定 | %.2fs | download=%s action=%s",
@@ -737,8 +757,8 @@ Rules:
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            raw = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = result
             judgment = parse_sub_account_gate_judgment(raw)
             logger.info(
                 "%s 判定 | %.2fs | sub_account=%s conf=%.2f",
@@ -813,8 +833,8 @@ Ignore top-left GameTurbo overlay.
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run([prompt, BinaryImage.from_path(screenshot_path)])
-            raw = (result.output or "").strip()
+            result = await self._run_agent([prompt, BinaryImage.from_path(screenshot_path)])
+            raw = result
             judgment = parse_scene_gate_judgment(raw)
             logger.info(
                 "%s 判定 | %.2fs | scene=%s conf=%.2f action=%s",
@@ -916,8 +936,8 @@ Rules:
 
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run(images)
-            raw = (result.output or "").strip()
+            result = await self._run_agent(images)
+            raw = result
             judgment = parse_privacy_checkbox_judgment(raw)
             logger.info(
                 "%s 判定 | %.2fs | state=%s conf=%.2f visible=%s",
@@ -984,10 +1004,10 @@ Rules:
         )
         t0 = time.perf_counter()
         try:
-            result = await self._agent.run(
+            result = await self._run_agent(
                 [prompt, BinaryImage.from_path(screenshot_path)],
             )
-            raw = (result.output or "").strip()
+            raw = result
             judgment = parse_checkbox_tap_alignment(raw)
             logger.info(
                 "%s | %.2fs | on_checkbox=%s conf=%.2f dir=%s",

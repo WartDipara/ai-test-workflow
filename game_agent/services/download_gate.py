@@ -15,22 +15,69 @@ logger = logging.getLogger(__name__)
 
 _GATE_MIN_CONFIDENCE = 0.55
 
-DOWNLOAD_CONTEXT_RE = re.compile(
-    r"下载|更新|resource|download|热更|patch|MB|GB",
+# 「更新日期」等隐私文案中的「更新」子串不应触发下载判定
+_DOWNLOAD_STRONG_CONTEXT_RE = re.compile(
+    r"下载|resource|download|热更|patch|资源包|资源更新",
+    re.IGNORECASE,
+)
+_DOWNLOAD_UPDATE_VERB_RE = re.compile(
+    r"正在更新|更新资源|更新中|资源更新中|热更",
     re.IGNORECASE,
 )
 DOWNLOAD_PROGRESS_RE = re.compile(r"\d+\s*%|%\s*\d+")
 DOWNLOAD_UPDATING_RE = re.compile(r"正在更新|更新资源|资源包|下载中", re.IGNORECASE)
+_SIZE_UNIT_RE = re.compile(r"\b\d+[\.,]?\d*\s*(MB|GB|KB|Mbps|Kbps|mb/s|MB/s)\b", re.IGNORECASE)
 _CONTINUE_RE = re.compile(r"继续|确定|确认|Continue|OK", re.IGNORECASE)
+
+# 屏幕顶部加速/速率条常见区域（忽略该区域的 OCR 文本参与下载判定）
+_DOWNLOAD_TOP_REGION_FRACTION = 0.15
+
+
+def filter_bboxes_for_download_gate(
+    bboxes: list[OcrBbox],
+    *,
+    screen_h: int,
+    top_fraction: float = _DOWNLOAD_TOP_REGION_FRACTION,
+) -> list[OcrBbox]:
+    if screen_h <= 0:
+        return list(bboxes)
+    threshold = int(screen_h * top_fraction)
+    return [bbox for bbox in bboxes if int(bbox.cy) >= threshold]
+
+
+def ocr_merged_for_download_gate(
+    bboxes: list[OcrBbox],
+    *,
+    screen_h: int,
+    fallback_merged: str = "",
+) -> str:
+    filtered = filter_bboxes_for_download_gate(bboxes, screen_h=screen_h)
+    if filtered:
+        return " ".join((bbox.text or "").strip() for bbox in filtered if (bbox.text or "").strip())
+    return fallback_merged or ""
 
 
 def ocr_has_download_context(ocr_merged: str) -> bool:
     merged = ocr_merged or ""
-    if DOWNLOAD_CONTEXT_RE.search(merged):
-        return True
     if DOWNLOAD_UPDATING_RE.search(merged):
         return True
-    return bool(DOWNLOAD_PROGRESS_RE.search(merged))
+    if _DOWNLOAD_UPDATE_VERB_RE.search(merged):
+        return True
+    if _DOWNLOAD_STRONG_CONTEXT_RE.search(merged):
+        return True
+    if DOWNLOAD_PROGRESS_RE.search(merged):
+        return bool(
+            _DOWNLOAD_STRONG_CONTEXT_RE.search(merged)
+            or DOWNLOAD_UPDATING_RE.search(merged)
+            or _DOWNLOAD_UPDATE_VERB_RE.search(merged)
+        )
+    if _SIZE_UNIT_RE.search(merged):
+        return bool(
+            _DOWNLOAD_STRONG_CONTEXT_RE.search(merged)
+            or DOWNLOAD_UPDATING_RE.search(merged)
+            or _DOWNLOAD_UPDATE_VERB_RE.search(merged)
+        )
+    return False
 
 
 def ocr_has_clear_download_progress(ocr_merged: str) -> bool:
@@ -74,7 +121,16 @@ def merge_download_gate_judgment(
     reason = f"{facts.classify_reason}; {note}" if facts.classify_reason else note
 
     if not judgment.is_download or judgment.confidence < min_confidence:
-        return facts.model_copy(update={"classify_reason": reason})
+        return facts.model_copy(
+            update={
+                "download_visible": False,
+                "download_in_progress": False,
+                "download_gate_kind": "",
+                "download_action": "",
+                "download_continue_xy": None,
+                "classify_reason": reason,
+            },
+        )
 
     if judgment.action == "done" and judgment.confidence >= min_confidence:
         return facts.model_copy(
@@ -143,20 +199,26 @@ async def resolve_download_gate(
     screenshot_path: Path,
     llm_cfg,
     round_id: int = 0,
+    screen_h: int = 0,
 ) -> LaunchFacts:
-    if not ocr_has_download_context(ocr_merged):
+    gate_ocr = ocr_merged_for_download_gate(
+        bboxes,
+        screen_h=screen_h,
+        fallback_merged=ocr_merged,
+    )
+    if not ocr_has_download_context(gate_ocr):
         return facts
 
-    if ocr_has_clear_download_progress(ocr_merged):
-        return apply_download_ocr_to_facts(facts, ocr_merged=ocr_merged)
+    if ocr_has_clear_download_progress(gate_ocr):
+        return apply_download_ocr_to_facts(facts, ocr_merged=gate_ocr)
 
-    if llm_cfg is None or not should_invoke_download_gate_vlm(facts, ocr_merged=ocr_merged):
-        return apply_download_ocr_to_facts(facts, ocr_merged=ocr_merged)
+    if llm_cfg is None or not should_invoke_download_gate_vlm(facts, ocr_merged=gate_ocr):
+        return apply_download_ocr_to_facts(facts, ocr_merged=gate_ocr)
 
     vision = VisionWorker(llm_cfg)
     judgment = await vision.judge_download_gate(
         screenshot_path=screenshot_path,
-        ocr_summary=ocr_merged,
+        ocr_summary=gate_ocr,
         round_id=round_id,
     )
     merged = merge_download_gate_judgment(facts, judgment, bboxes=bboxes)

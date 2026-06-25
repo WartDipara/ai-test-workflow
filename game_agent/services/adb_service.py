@@ -422,5 +422,8 @@ class AdbService:
             if should_abort and should_abort():
                 waited = total - (deadline - time.monotonic())
                 return f"Wait aborted after {max(0.0, waited):.1f}s"
-            time.sleep(min(0.25, deadline - time.monotonic()))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.25, remaining))
         return f"Waited {seconds:.1f}s"

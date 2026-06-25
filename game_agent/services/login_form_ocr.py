@@ -24,7 +24,7 @@ _COMPOUND_LOGIN_RE = re.compile(
 )
 
 _STANDALONE_LOGIN_RE = re.compile(
-    r"^(登录|立即登录|log\s*in|login)\s*[.!…]*$",
+    r"^(登录|立即登录|log\s*in|login|sign\s*in)\s*[.!…]*$",
     re.IGNORECASE,
 )
 

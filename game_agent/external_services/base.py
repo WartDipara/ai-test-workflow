@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from game_agent.external_services.context import ServiceContext
     from game_agent.models.run_failure import RunFailure
+    from game_agent.services.external_log_base import ExternalLogCollector
 
 
 @dataclass(slots=True)
@@ -74,6 +75,9 @@ class ExternalService(ABC):
         return RetryDecision()
 
     def collect_evidence(self, ctx: ServiceContext) -> ExternalEvidence | None:
+        return None
+
+    def log_collector(self, ctx: ServiceContext) -> ExternalLogCollector | None:
         return None
 
     def effective_log_monitor(self, ctx: ServiceContext, modules_log_monitor: bool) -> bool:

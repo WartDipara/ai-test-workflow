@@ -136,14 +136,6 @@ def run_executor_flow_sync(
     attempt_context: AttemptContext | None = None,
 ) -> RunState:
     token = bind_pipeline_stage(PipelinePhase.EXECUTOR.value)
-    if artifact_root is not None:
-        from game_agent.services.gameturbo_log import append_gameturbo_stage_marker
-
-        append_gameturbo_stage_marker(
-            artifact_root,
-            PipelinePhase.EXECUTOR.value,
-            "executor thread start",
-        )
     try:
         ctrl = ExecutorFlowController(config_path, app_config=app_config)
         if app_config is None:

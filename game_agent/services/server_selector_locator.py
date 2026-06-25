@@ -54,18 +54,36 @@ class ServerSelectorTarget:
     source: Literal["ocr", "fallback", "unresolved"]
 
 
-def find_enter_game_bbox(bboxes: list[OcrBbox]) -> OcrBbox | None:
-    """匹配进入游戏主 CTA（排除 Login 等）。"""
-    candidates: list[tuple[int, OcrBbox]] = []
+def find_enter_game_bbox(bboxes: list[OcrBbox], *, screen_h: int = 0) -> OcrBbox | None:
+    """匹配进入游戏主 CTA（排除 Login / 健康底栏）；供区服带等内部定位。"""
+    primary: list[OcrBbox] = []
+    fallback: list[tuple[int, OcrBbox]] = []
     for bbox in bboxes:
         text = bbox.text.strip()
         if not text or _EXCLUDE_TARGET_RE.search(text):
             continue
-        if _ENTER_GAME_RE.search(text):
-            candidates.append((bbox.cy, bbox))
-    if not candidates:
+        if re.search(r"适龄|CADPA|健康|16岁|本游戏适合", text, re.IGNORECASE):
+            continue
+        if screen_h > 0 and bbox.cy > int(screen_h * 0.92):
+            if re.search(r"进入", text) and not re.search(
+                r"进入游戏|开始游戏|Enter\s*Game|Start\s*Game",
+                text,
+                re.IGNORECASE,
+            ):
+                continue
+        if re.search(
+            r"进入游戏|开始游戏|踏入仙途|开始冒险|Enter\s*Game|Start\s*Game|Play\s*Now",
+            text,
+            re.IGNORECASE,
+        ):
+            primary.append(bbox)
+        elif _ENTER_GAME_RE.search(text):
+            fallback.append((bbox.cy, bbox))
+    if primary:
+        return primary[0]
+    if not fallback:
         return None
-    return max(candidates, key=lambda item: item[0])[1]
+    return max(fallback, key=lambda item: item[0])[1]
 
 
 def server_band(enter: OcrBbox, screen_w: int, screen_h: int) -> ServerBand:
@@ -215,7 +233,7 @@ def locate_server_selector_target(
     优先 OCR 语义候选（Enter/协议行垂直分区）；无候选时不静默几何 fallback。
     若 Enter 上方仍有区服语义 OCR 却未入选，返回 source=unresolved。
     """
-    enter = find_enter_game_bbox(bboxes)
+    enter = find_enter_game_bbox(bboxes, screen_h=screen_h)
     if enter is None:
         return None, None
 

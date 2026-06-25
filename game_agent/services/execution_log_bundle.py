@@ -8,6 +8,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from game_agent.external_services.manager import (
+    CORE_ANALYSIS_LOG_FILES,
+    CORE_EXECUTION_LOG_FILES,
+    ExecutionLogArchivePlan,
+    core_execution_log_archive_plan,
+)
 from game_agent.modules.preprocessing.preprocessor import PreprocessResult
 from game_agent.services.run_deliverable import RunDeliverablePaths
 
@@ -18,20 +24,9 @@ EXECUTION_MANIFEST_NAME = "execution_manifest.json"
 LOGS_SUBDIR = "logs"
 REPORTS_SUBDIR = "reports"
 
-EXECUTION_FILE_NAMES: tuple[str, ...] = (
-    "process.log",
-    "pipeline_trace.jsonl",
-    "deploy.log",
-    "gameturbo.log",
-)
+EXECUTION_FILE_NAMES: tuple[str, ...] = CORE_EXECUTION_LOG_FILES
 
-ANALYSIS_FILE_NAMES: tuple[str, ...] = (
-    "attempt_failure_report.md",
-    "attempt_failure_report.json",
-    "ai_analysis_report.txt",
-    "domain_region_analysis.json",
-    "anomaly_evidence.json",
-)
+ANALYSIS_FILE_NAMES: tuple[str, ...] = CORE_ANALYSIS_LOG_FILES
 
 # 默认单文件内联上限（超出则只在 final_logs 中引用 logs/ 路径）
 DEFAULT_INLINE_MAX_BYTES = 12 * 1024 * 1024
@@ -127,8 +122,11 @@ def _copy_if_exists(src: Path, dst: Path) -> int:
 def archive_attempt_logs(
     deliverable_root: Path,
     attempt_records: list[tuple[int, Path]],
+    *,
+    archive_plan: ExecutionLogArchivePlan | None = None,
 ) -> list[AttemptLogArchive]:
     """将各轮执行日志完整拷贝到 run_outputs/logs/，分析报告到 reports/。"""
+    plan = archive_plan or core_execution_log_archive_plan()
     archives: list[AttemptLogArchive] = []
     logs_root = deliverable_root / LOGS_SUBDIR
     reports_root = deliverable_root / REPORTS_SUBDIR
@@ -139,15 +137,19 @@ def archive_attempt_logs(
         logs_dir.mkdir(parents=True, exist_ok=True)
         sizes: dict[str, int] = {}
 
-        for fname in EXECUTION_FILE_NAMES:
+        if plan.prepare_artifact is not None:
+            plan.prepare_artifact(artifact_root)
+
+        for fname in plan.execution_files:
             n = _copy_if_exists(artifact_root / fname, logs_dir / fname)
             if n:
                 sizes[fname] = n
 
-        for session_log in sorted(artifact_root.glob("gameturbo_session_*.log")):
-            n = _copy_if_exists(session_log, logs_dir / session_log.name)
-            if n:
-                sizes[session_log.name] = n
+        if plan.session_log_glob:
+            for session_log in sorted(artifact_root.glob(plan.session_log_glob)):
+                n = _copy_if_exists(session_log, logs_dir / session_log.name)
+                if n:
+                    sizes[session_log.name] = n
 
         audit_src = artifact_root / "audit" / "events.jsonl"
         n = _copy_if_exists(audit_src, logs_dir / "audit_events.jsonl")
@@ -169,7 +171,7 @@ def archive_attempt_logs(
             )
 
         reports_dir: Path | None = None
-        report_files = [artifact_root / n for n in ANALYSIS_FILE_NAMES]
+        report_files = [artifact_root / n for n in plan.analysis_files]
         if any(p.is_file() for p in report_files):
             reports_dir = reports_root / name
             reports_dir.mkdir(parents=True, exist_ok=True)
@@ -236,11 +238,13 @@ def build_final_logs(
     preprocessing_enabled: bool,
     archives: list[AttemptLogArchive],
     inline_max_bytes: int = DEFAULT_INLINE_MAX_BYTES,
+    archive_plan: ExecutionLogArchivePlan | None = None,
 ) -> Path:
     """
     生成 final_logs.log：仅执行过程（无 AI 失败报告 Markdown / 分析 JSON 正文）。
     超大文件在文内引用 logs/<attempt>/ 下的完整副本。
     """
+    plan = archive_plan or core_execution_log_archive_plan()
     out_path = deliverable.root / FINAL_LOG_NAME
     journal_path = deliverable.root / "task_journal.jsonl"
 
@@ -285,7 +289,7 @@ def build_final_logs(
             if arch and arch.reports_dir:
                 out.write(f"  analysis reports: {arch.reports_dir}\n")
 
-            for fname in EXECUTION_FILE_NAMES:
+            for fname in plan.execution_files:
                 src = artifact_root / fname
                 archived = logs_ref / fname if logs_ref else None
                 _inline_file(
