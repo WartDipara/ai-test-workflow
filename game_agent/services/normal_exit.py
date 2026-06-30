@@ -48,7 +48,7 @@ async def confirm_in_game_normal_exit(
         else cfg.game.normal_exit_observe_s
     )
     wait_s = max(1.0, min(wait_s, 120.0))
-    note = (summary or "AI 判定已进入游戏内，执行正常退出").strip()[:2000]
+    note = (summary or "In-game confirmed by AI, normal exit").strip()[:2000]
 
     state.in_game_main_confirmed = True
     state.normal_exit_committed = True
@@ -74,7 +74,7 @@ async def confirm_in_game_normal_exit(
     game_pkg = (cfg.game.package_name or "").strip()
     packages = [game_pkg] if game_pkg else []
 
-    logger.info("[NormalExit] 观察结束，force-stop: %s", packages)
+    logger.info("[NormalExit] Observe done, force-stop: %s", packages)
     msg = adb.force_stop_packages(packages)
     if audit is not None:
         audit.log_phase(

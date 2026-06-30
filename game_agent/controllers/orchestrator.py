@@ -10,10 +10,6 @@ from pathlib import Path
 from game_agent.config.loader import load_app_config
 from game_agent.config.paths import resolve_repo_path
 from game_agent.controllers.executor_controller import run_executor_flow_sync
-from game_agent.controllers.parallel_phase_policy import (
-    should_return_parallel_timeout_failure,
-    should_signal_parallel_timeout_fatal,
-)
 from game_agent.controllers.log_monitor_controller import LogMonitor
 from game_agent.controllers.network_anomaly_coordinator import NetworkAnomalyCoordinator
 from game_agent.controllers.pre_controller import PreprocessingController
@@ -35,8 +31,10 @@ from game_agent.models.run_state import RunState
 from game_agent.models.run_failure import (
     ErrorCode,
     RunFailure,
+    USER_INTERRUPT_MESSAGE,
     classify_failure,
     parse_error_code_from_text,
+    user_interrupt_failure,
 )
 from game_agent.models.settings import AppConfig, ModulesSection
 from game_agent.models.task_config import TaskConfig
@@ -56,6 +54,7 @@ from game_agent.services.device_workspace_cleanup import (
 from game_agent.services.failure_report import (
     generate_and_save_attempt_failure_report,
     generate_failure_diagnosis_report,
+    user_interrupt_diagnosis_report,
 )
 from game_agent.services.game_launch import is_game_running
 from game_agent.services.shutdown import (
@@ -285,7 +284,7 @@ class GameTestOrchestrator:
 
     def _prepare_packages_at_task_start(self) -> list[str]:
         """批跑：跳过 packages 全量清空，任务结束按 gid 精准清理。"""
-        logger.debug("跳过 packages 全量清空（批跑 per-gid 清理）")
+        logger.debug("Skip full packages wipe (batch per-gid cleanup)")
         return []
 
     def _sync_game_section_from_packages(self) -> None:
@@ -304,7 +303,7 @@ class GameTestOrchestrator:
     def _log_module_flags(self, cfg: AppConfig) -> None:
         m = cfg.modules
         logger.info(
-            "模块开关: executor=%s log_monitor=%s retry=%s max_retries=%s",
+            "Modules: executor=%s log_monitor=%s retry=%s max_retries=%s",
             m.executor,
             m.log_monitor,
             m.retry_on_failure,
@@ -343,7 +342,7 @@ class GameTestOrchestrator:
                     if not preprocess_result.ok:
                         rec.fail(error=preprocess_result.message)
                         logger.error(
-                            "预处理失败，终止任务: %s", preprocess_result.message
+                            "Preprocess failed, abort task: %s", preprocess_result.message
                         )
                         self._establish_task_deliverable(cfg, mods)
                         if self._task_journal is not None:
@@ -395,7 +394,7 @@ class GameTestOrchestrator:
             assert cfg is not None
             assert self._adb is not None
 
-            logger.info("=== 开始流程 第 %d/%d 次尝试 ===", retry, max_retries)
+            logger.info("=== Run start attempt %d/%d ===", retry, max_retries)
             if self._task_journal is not None:
                 self._task_journal.log(
                     "attempt",
@@ -419,7 +418,7 @@ class GameTestOrchestrator:
                 self._audit.detach_process_log_handler()
             self._audit.log_phase(
                 "orchestrator",
-                f"第 {retry}/{max_retries} 次尝试开始",
+                f"Attempt {retry}/{max_retries} started",
                 modules=cfg.modules.model_dump(),
                 task_id=self._task_id,
                 deliverable_dir=str(self._deliverable.root),
@@ -447,9 +446,9 @@ class GameTestOrchestrator:
                 deactivate_pipeline_trace()
 
         if self._audit is not None:
-            self._audit.finalize(success=False, note="超过最大重试次数")
-        logger.error("=== 最终异常结束，超过最大重试次数 ===")
-        last = self._last_failure_reason or "超过最大重试次数"
+            self._audit.finalize(success=False, note="max retries exceeded")
+        logger.error("=== Run failed: max retries exceeded ===")
+        last = self._last_failure_reason or "max retries exceeded"
         return self._finish_run(
             success=False,
             last_reason=last,
@@ -491,7 +490,7 @@ class GameTestOrchestrator:
                         preprocess_record=self._preprocess_record,
                     )
                     if apk_path is None:
-                        raise RuntimeError("缺少可安装 APK（apk_cache 或预处理产物）")
+                        raise RuntimeError("No installable APK (apk_cache or preprocess output)")
                     skip_install = bool(
                         self._runtime().package_name.strip()
                         and self._adb.is_package_installed(
@@ -526,7 +525,7 @@ class GameTestOrchestrator:
                 if install_result.install_monitor_summary and self._audit is not None:
                     self._audit.log_phase(
                         PipelinePhase.INIT.value,
-                        "安装监控已完成",
+                        "Install monitor finished",
                         summary=install_result.install_monitor_summary[:2000],
                     )
                 asyncio.run(
@@ -537,15 +536,15 @@ class GameTestOrchestrator:
                 retry=retry,
                 max_retries=max_retries,
                 mods=mods,
-                reason=f"GameTurbo deploy 失败: {e}",
+                reason=f"GameTurbo deploy failed: {e}",
                 exc=e,
             )
             return
         except Exception as e:
             label = (
-                "GameTurbo 前置处理失败"
+                "GameTurbo bootstrap failed"
                 if self._gameturbo_plugin_enabled()
-                else "核心安装准备失败"
+                else "Core install prep failed"
             )
             logger.error("%s: %s", label, e)
             self._on_attempt_failure(
@@ -569,7 +568,7 @@ class GameTestOrchestrator:
             self._run_parallel_game_phase(cfg, retry=retry, max_retries=max_retries),
         )
         if parallel_err:
-            logger.warning("并行游戏阶段失败: %s", parallel_err)
+            logger.warning("Parallel game phase failed: %s", parallel_err)
             self._last_executor_failure_reason = parallel_err
             if self._gameturbo_plugin_enabled():
                 self._last_blocked_stage_hint = self._external_service_manager().infer_blocked_stage(
@@ -591,7 +590,7 @@ class GameTestOrchestrator:
         self._in_game_confirmed = True
         if self._audit is not None:
             self._audit.finalize(success=True, note="parallel game phase passed")
-        logger.info("=== 测试全部通过（check_in_game 已确认）===")
+        logger.info("=== All tests passed (check_in_game confirmed) ===")
         raise _FinishRun(
             success=True,
             winning_retry=retry,
@@ -602,7 +601,7 @@ class GameTestOrchestrator:
         """执行预处理阶段：APK 下载/ABI 剥离。返回 PreprocessResult。"""
         packages_dir = self._external_service_manager().preprocessing_packages_dir()
 
-        logger.info("APK 下载/ABI 剥离")
+        logger.info("APK download / ABI strip")
         apk_url = self._task_context.apk_url or None
         controller = PreprocessingController(
             cache_dir=cfg.preprocessing.apk_cache_dir,
@@ -611,9 +610,9 @@ class GameTestOrchestrator:
         )
         result = controller.run(apk_url=apk_url)
         if result.ok:
-            logger.info("预处理完成: %s", result.message)
+            logger.info("Preprocess done: %s", result.message)
         else:
-            logger.error("预处理失败: %s", result.message)
+            logger.error("Preprocess failed: %s", result.message)
         return result
 
     def _snapshot_attempt_ui(self, attempt_ctx: AttemptContext) -> None:
@@ -739,7 +738,7 @@ class GameTestOrchestrator:
                 )
             attempt_ctx.mark_deploy_package_verified()
             logger.info(
-                "[Orchestrator] 设备已安装 %s，执行者可跳过 wait_for_package_installed",
+                "[Orchestrator] %s already installed, executor may skip wait_for_package_installed",
                 target_pkg,
             )
 
@@ -792,6 +791,29 @@ class GameTestOrchestrator:
 
             monitor_tasks.append(
                 asyncio.create_task(_network_anomaly_task(), name="network_anomaly"),
+            )
+
+        if cfg.foreground_guard.enabled:
+            from game_agent.controllers.foreground_coordinator import ForegroundCoordinator
+
+            fg_watch = ForegroundCoordinator(
+                adb=self._adb,
+                app_config=cfg,
+                attempt_context=attempt_ctx,
+                audit=self._audit,
+            )
+
+            async def _foreground_task() -> str | None:
+                from game_agent.utils.stage_logging import pipeline_stage
+
+                with pipeline_stage(PipelinePhase.OBSERVER.value):
+                    result = await fg_watch.run_until_fatal(stop_event)
+                if result:
+                    attempt_ctx.signal_fatal(result)
+                return result
+
+            monitor_tasks.append(
+                asyncio.create_task(_foreground_task(), name="foreground_guard"),
             )
 
         session_coordinator = SessionCoordinator(
@@ -878,30 +900,10 @@ class GameTestOrchestrator:
             pending.add(executor_task)
 
         executor_state = None
-        timed_out = False
         phase_ok = False
-        launch_timeout_s = cfg.game.resolve_launch_timeout_s()
-        launch_deadline = time.monotonic() + launch_timeout_s
-        deadline = launch_deadline
+        poll_s = 1.0
 
         while pending and not phase_ok:
-            if attempt_ctx is not None:
-                deadline = attempt_ctx.extend_parallel_deadline(deadline)
-            play_active = attempt_ctx.is_in_game_play_active()
-            now = time.monotonic()
-            if play_active:
-                loop_deadline = deadline
-            else:
-                loop_deadline = min(deadline, launch_deadline)
-            if now >= loop_deadline:
-                if attempt_ctx.is_in_game_confirmed():
-                    phase_ok = True
-                    logger.info(
-                        "Parallel phase deadline reached but in-game already confirmed"
-                    )
-                else:
-                    timed_out = True
-                break
             if attempt_ctx.is_in_game_confirmed():
                 phase_ok = True
                 logger.info(
@@ -910,21 +912,11 @@ class GameTestOrchestrator:
                     len(pending),
                 )
                 break
-            remaining = loop_deadline - now
             done, pending = await asyncio.wait(
                 pending,
-                timeout=max(0.1, remaining),
+                timeout=poll_s,
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            if not done:
-                if attempt_ctx.is_in_game_confirmed():
-                    phase_ok = True
-                    logger.info(
-                        "Parallel phase deadline reached but in-game already confirmed"
-                    )
-                else:
-                    timed_out = True
-                break
 
             for task in done:
                 if task is shutdown_task:
@@ -992,28 +984,11 @@ class GameTestOrchestrator:
                     )
 
         in_game_signaled = attempt_ctx.is_in_game_confirmed()
-        play_active = attempt_ctx.is_in_game_play_active()
         if in_game_signaled:
             phase_ok = True
 
         if pending:
-            if should_signal_parallel_timeout_fatal(
-                timed_out=timed_out or time.monotonic() >= deadline,
-                phase_ok=phase_ok,
-                in_game_signaled=in_game_signaled,
-                executor_in_game_confirmed=(
-                    executor_state.in_game_confirmed if executor_state else None
-                ),
-                in_game_play_active=play_active,
-            ):
-                timed_out = True
-                attempt_ctx.signal_fatal(
-                    f"Parallel game phase timeout ({launch_timeout_s:.0f}s) "
-                    "without in-game confirmation",
-                )
-                stop_event.set()
-                await _cancel_pending()
-            elif phase_ok or in_game_signaled:
+            if phase_ok or in_game_signaled:
                 logger.info(
                     "Parallel phase: draining executor after in-game success "
                     "(pending=%d)",
@@ -1048,25 +1023,8 @@ class GameTestOrchestrator:
         exec_in_game = (
             executor_state.in_game_confirmed if executor_state is not None else None
         )
-        if should_return_parallel_timeout_failure(
-            timed_out=timed_out,
-            phase_ok=phase_ok,
-            in_game_signaled=in_game_signaled,
-            executor_in_game_confirmed=exec_in_game,
-            executor_enabled=mods.executor,
-            in_game_play_active=play_active,
-        ):
-            return (
-                f"Parallel game phase timeout ({launch_timeout_s:.0f}s) "
-                "without in-game confirmation"
-            )
 
         if not mods.executor:
-            if timed_out:
-                logger.info(
-                    "Monitors-only phase timed out after %.0fs (ok)",
-                    launch_timeout_s,
-                )
             self._observer_session_restarts = session_state.restarts_count
             return None
 
@@ -1155,7 +1113,7 @@ class GameTestOrchestrator:
         )
         self._task_journal = TaskRunJournal(self._deliverable.root)
         logger.info(
-            "任务产出目录: %s (gid=%s task_id=%s)",
+            "Task output dir: %s (gid=%s task_id=%s)",
             self._deliverable.root,
             self._task_gid,
             self._task_id,
@@ -1229,12 +1187,12 @@ class GameTestOrchestrator:
                 old_root.rmdir()
             except OSError:
                 logger.warning(
-                    "任务产出目录 gid 已更新: %s -> %s（旧目录未删除，请手动清理）",
+                    "Task output gid updated: %s -> %s (old dir kept, remove manually)",
                     old_root,
                     new_root,
                 )
             else:
-                logger.info("任务产出目录 gid 已更新: %s -> %s", old_root, new_root)
+                logger.info("Task output gid updated: %s -> %s", old_root, new_root)
         self._deliverable = new_deliverable
         self._task_journal = TaskRunJournal(new_root)
         self._source_apk_path = self._resolve_source_apk()
@@ -1267,17 +1225,17 @@ class GameTestOrchestrator:
             return
         try:
             msg = self._adb.launch_game(pkg, cfg.game.launch_activity)
-            logger.info("prepare_context 后已启动游戏: %s", msg)
+            logger.info("Game launched after prepare_context: %s", msg)
             if self._audit is not None:
                 self._audit.log_phase(
                     PipelinePhase.INIT.value,
-                    "deploy 后启动游戏",
+                    "Game launched after deploy",
                     package=pkg,
                     launch_result=msg[:500],
                 )
         except Exception as e:
             logger.warning(
-                "prepare_context 后启动游戏失败（executor 将重试 open_game_app）: %s",
+                "Game launch after prepare_context failed (executor will retry open_game_app): %s",
                 e,
             )
 
@@ -1286,12 +1244,12 @@ class GameTestOrchestrator:
             return
         if will_retry:
             logger.info(
-                "将重试：保留 packages 下 deploy 产物，避免 Modify 后重复打包安装",
+                "Will retry: keep deploy artifacts in packages to avoid repack after Modify",
             )
             if self._audit is not None:
                 self._audit.log_phase(
                     "packages",
-                    "保留 deploy 产物以待下一轮",
+                    "Kept deploy artifacts for next attempt",
                     gid=self._deploy_gid() or "",
                 )
             return
@@ -1304,7 +1262,7 @@ class GameTestOrchestrator:
         if removed and self._audit is not None:
             self._audit.log_phase(
                 "packages",
-                "本轮结束，已清理 deploy 产物",
+                "Attempt ended, deploy artifacts cleaned",
                 removed=removed,
             )
 
@@ -1317,7 +1275,7 @@ class GameTestOrchestrator:
 
             n = detach_process_log_handlers_for_roots(roots)
             if n:
-                logger.debug("已释放 %d 个 process.log FileHandler", n)
+                logger.debug("Released %d process.log FileHandler(s)", n)
 
     def _finalize_packages_after_deliverable(self) -> None:
         if not self._gameturbo_plugin_enabled():
@@ -1335,7 +1293,7 @@ class GameTestOrchestrator:
         total = sum(len(v) for v in summary.values())
         if total:
             logger.info(
-                "任务结束，packages 已清空: deploy=%s source=%s leftover=%s",
+                "Task end, packages cleared: deploy=%s source=%s leftover=%s",
                 summary.get("deploy"),
                 summary.get("source"),
                 summary.get("leftover"),
@@ -1351,9 +1309,12 @@ class GameTestOrchestrator:
         exc: BaseException | None = None,
     ) -> None:
         """Classify failure; retry only when error code is network/acceleration (E2xxx)."""
-        failure = classify_failure(reason, exc=exc)
-        self._last_failure_reason = failure.format()
         interrupted = isinstance(exc, ShutdownRequested) or is_shutdown_requested()
+        if interrupted:
+            failure = user_interrupt_failure()
+        else:
+            failure = classify_failure(reason, exc=exc)
+        self._last_failure_reason = failure.format()
         will_retry = (
             not interrupted
             and failure.retryable
@@ -1374,13 +1335,13 @@ class GameTestOrchestrator:
 
         if failure.retryable:
             logger.warning(
-                "可重试失败 %s（网络/加速）: %s",
+                "Retryable failure %s (network/accel): %s",
                 failure.code.value,
                 failure.message[:300],
             )
         else:
             logger.error(
-                "不可重试失败 %s（立即结束任务）: %s",
+                "Non-retryable failure %s (abort task): %s",
                 failure.code.value,
                 failure.format()[:500],
             )
@@ -1406,7 +1367,7 @@ class GameTestOrchestrator:
             modify_failure = classify_failure(str(modify_exc), exc=modify_exc)
             self._last_failure_reason = modify_failure.format()
             logger.error(
-                "Modify 阶段核心失败，终止任务: %s",
+                "Modify stage core failure, abort task: %s",
                 modify_failure.format()[:500],
             )
             if self._task_journal is not None:
@@ -1432,13 +1393,8 @@ class GameTestOrchestrator:
 
         if interrupted:
             if self._audit is not None:
-                self._audit.finalize(success=False, note="interrupted")
-            reason_text = (
-                exc.reason
-                if isinstance(exc, ShutdownRequested)
-                else get_shutdown_context().reason()
-            )
-            raise ShutdownRequested(reason_text)
+                self._audit.finalize(success=False, note=USER_INTERRUPT_MESSAGE)
+            raise ShutdownRequested(USER_INTERRUPT_MESSAGE)
 
         if self._audit is not None:
             self._audit.finalize(success=False, note=failure.format()[:500])
@@ -1523,7 +1479,7 @@ class GameTestOrchestrator:
             if winning_root is None and self._attempt_records:
                 winning_root = self._attempt_records[-1][1]
             if winning_root is None:
-                raise RuntimeError("测试通过但缺少 artifact 目录，无法记录产出元数据")
+                raise RuntimeError("Tests passed but artifact dir missing, cannot record deliverables")
 
             runtime = self._runtime()
             external_evidence: dict = {}
@@ -1560,8 +1516,9 @@ class GameTestOrchestrator:
                     winning_retry=winning_retry,
                     total_attempts=len(self._attempt_records),
                     session_restarts=self._observer_session_restarts,
+                    external_evidence=external_evidence or None,
                 )
-                logger.info("任务成功产出配置文件: %s", passed)
+                logger.info("Task deliverable config written: %s", passed)
             else:
                 publish_core_success_deliverable(
                     self._deliverable,
@@ -1577,7 +1534,7 @@ class GameTestOrchestrator:
                     in_game_play=build_in_game_play_summary(self._winning_graph_snapshot),
                 )
                 logger.info(
-                    "任务成功产出已写入: %s",
+                    "Task success deliverables written: %s",
                     self._deliverable.root / "result.json",
                 )
 
@@ -1585,17 +1542,21 @@ class GameTestOrchestrator:
                 self._finalize_packages_after_deliverable()
             exit_code = 0
         else:
-            reason = last_reason or self._last_failure_reason or "未知失败"
-            ai_report = asyncio.run(
-                generate_failure_diagnosis_report(
-                    cfg,
-                    gid=self._task_gid,
-                    task_id=self._task_id,
-                    last_reason=reason,
-                    attempt_records=self._attempt_records,
-                    game_config_path=self._runtime().game_config_path,
-                ),
-            )
+            if is_shutdown_requested():
+                reason = USER_INTERRUPT_MESSAGE
+                ai_report = user_interrupt_diagnosis_report()
+            else:
+                reason = last_reason or self._last_failure_reason or "unknown failure"
+                ai_report = asyncio.run(
+                    generate_failure_diagnosis_report(
+                        cfg,
+                        gid=self._task_gid,
+                        task_id=self._task_id,
+                        last_reason=reason,
+                        attempt_records=self._attempt_records,
+                        game_config_path=self._runtime().game_config_path,
+                    ),
+                )
             publish_failure_deliverable(
                 self._deliverable,
                 attempt_artifact_roots=self._attempt_records,
@@ -1607,8 +1568,9 @@ class GameTestOrchestrator:
             )
             self._finalize_packages_after_deliverable()
             logger.info(
-                "任务失败产出已写入: %s（含 AI 报告 failure_report.md）",
+                "Task failure deliverables written: %s (%s)",
                 self._deliverable.root,
+                "user interrupt, no AI report" if is_shutdown_requested() else "includes AI report failure_report.md",
             )
             exit_code = 1
 
@@ -1627,12 +1589,12 @@ class GameTestOrchestrator:
             app_config=cfg.base,
         )
         logger.info(
-            "任务审查日志: %s | 已清理 artifacts 目录 %d 个",
+            "Task audit log: %s | cleaned %d artifact dir(s)",
             fin.final_log_path,
             len(fin.artifacts_removed),
         )
         if fin.artifacts_failed:
-            logger.warning("部分 artifacts 清理失败: %s", fin.artifacts_failed)
+            logger.warning("Some artifact cleanup failed: %s", fin.artifacts_failed)
         return exit_code
 
     def _write_attempt_failure_report_sync(
@@ -1659,7 +1621,7 @@ class GameTestOrchestrator:
                 ),
             )
         except Exception as e:
-            logger.warning("本轮 AI 失败报告生成失败: %s", e)
+            logger.warning("Attempt AI failure report failed: %s", e)
 
     def _handle_failure_sync(
         self,

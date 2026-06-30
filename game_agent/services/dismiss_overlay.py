@@ -18,7 +18,13 @@ _DISMISS_TEXT_PATTERNS = (
 )
 
 
-def dismiss_overlay(serial: str | None, width: int, height: int) -> str:
+def dismiss_overlay(
+    serial: str | None,
+    width: int,
+    height: int,
+    *,
+    allow_press_back: bool = True,
+) -> str:
     steps: list[str] = []
 
     try:
@@ -47,13 +53,14 @@ def dismiss_overlay(serial: str | None, width: int, height: int) -> str:
 
     time.sleep(0.5)
 
-    try:
-        from game_agent.services.adb_service import AdbService
+    if allow_press_back:
+        try:
+            from game_agent.services.adb_service import AdbService
 
-        adb = AdbService(serial)
-        adb.press_back()
-        steps.append("adb back")
-    except Exception as e:
-        steps.append(f"adb back 失败: {e}")
+            adb = AdbService(serial)
+            adb.press_back()
+            steps.append("adb back")
+        except Exception as e:
+            steps.append(f"adb back 失败: {e}")
 
     return " | ".join(steps)

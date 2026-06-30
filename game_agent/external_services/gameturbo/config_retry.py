@@ -47,7 +47,7 @@ def ensure_baseline_copy(game_config_path: Path, deliverable_root: Path) -> Path
     dst = _backup_dir(deliverable_root) / BASELINE_NAME
     if not dst.is_file():
         shutil.copy2(game_config_path, dst)
-        logger.info("[ConfigRetry] 已保存基线配置 -> %s", dst)
+        logger.info("[ConfigRetry] Baseline config saved -> %s", dst)
     return dst
 
 
@@ -82,7 +82,7 @@ def restore_before_new_patch(
 
     shutil.copy2(restore_from, game_config_path)
     logger.info(
-        "[ConfigRetry] 已恢复配置（撤销上轮补丁） %s -> %s",
+        "[ConfigRetry] Restored config (reverted last patch) %s -> %s",
         restore_from.name,
         game_config_path,
     )
@@ -102,7 +102,7 @@ def backup_config_before_patch(
     if artifact_root is not None:
         art_dst = artifact_root / f"game_config_before_attempt_{next_attempt}.json"
         shutil.copy2(game_config_path, art_dst)
-    logger.info("[ConfigRetry] 补丁前备份 -> %s", dst)
+    logger.info("[ConfigRetry] Pre-patch backup -> %s", dst)
     return dst
 
 
@@ -118,7 +118,7 @@ def backup_config_after_patch(
     if artifact_root is not None:
         art_dst = artifact_root / f"game_config_after_patch_attempt_{next_attempt}.json"
         shutil.copy2(game_config_path, art_dst)
-    logger.info("[ConfigRetry] 补丁后备份 -> %s", dst)
+    logger.info("[ConfigRetry] Post-patch backup -> %s", dst)
     return dst
 
 
@@ -142,7 +142,7 @@ def load_journal_entries(deliverable_root: Path) -> list[ConfigRetryJournalEntry
             data = json.loads(line)
             out.append(ConfigRetryJournalEntry(**data))
         except (json.JSONDecodeError, TypeError) as e:
-            logger.warning("跳过无效 journal 行: %s", e)
+            logger.warning("Skip invalid journal line: %s", e)
     return out
 
 
@@ -170,27 +170,7 @@ def format_last_patch_for_executor(deliverable_root: Path) -> str:
     return "\n".join(parts)
 
 
-def infer_blocked_stage(*, reason: str, ui_stage: str = "", ui_progress: str = "") -> str:
-    stage = (ui_stage or "").strip()
-    if stage and stage not in ("unknown", ""):
-        if stage in ("resource_download", "loading"):
-            return "resource_download"
-        if stage in ("login", "login_form"):
-            return "login"
-        if stage == "sub_account_select":
-            return "server_select"
-        return stage
-
-    blob = f"{reason} {ui_progress}".lower()
-    if "stage=resource_download" in blob:
-        return "resource_download"
-    if "server_select" in blob or "选服" in blob:
-        return "server_select"
-    if "stage=login" in blob or "login_form" in blob:
-        return "login"
-    if any(k in blob for k in ("登录", "login password", "credential")):
-        return "login"
-    return "unknown"
+from game_agent.i18n.stages import infer_blocked_stage as infer_blocked_stage
 
 
 def prepare_modify_stage(

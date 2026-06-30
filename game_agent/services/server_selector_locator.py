@@ -6,26 +6,13 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from game_agent.i18n import Concept, compile_lexicon_pattern
 from game_agent.services.checkbox_locator import find_privacy_terms_anchor
 from game_agent.utils.ocr_util import OcrBbox
 
-_ENTER_GAME_RE = re.compile(
-    r"踏入仙途|开始游戏|进入游戏|开始冒险|Enter\s*Game|Start\s*Game|^Start$|"
-    r"^Enter$|Play\s*Now|进入",
-    re.IGNORECASE,
-)
-
-_EXCLUDE_TARGET_RE = re.compile(
-    r"sub-?account|login|password|账号|密码|登录|协议|隐私|privacy|agree|"
-    r"copyright|publisher|版本|support|forgot|health\s*advisory|cadpa|适龄",
-    re.IGNORECASE,
-)
-
-_SERVER_HINT_RE = re.compile(
-    r"选服|区服|服务器|server|click\s*to\s*select|select\s*server|线路|realm|zone|"
-    r"role\s*name|exclusive|sponsored|删档|内测|\d+服|-{2,}",
-    re.IGNORECASE,
-)
+_ENTER_GAME_RE = compile_lexicon_pattern(Concept.ENTER_GAME, Concept.START_GAME)
+_EXCLUDE_TARGET_RE = compile_lexicon_pattern(Concept.EXCLUDE_AUTH_CONTEXT)
+_SERVER_HINT_RE = compile_lexicon_pattern(Concept.SERVER_HINT)
 
 _PROBE_NAME_CHUNK_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]{3,}")
 

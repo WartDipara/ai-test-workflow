@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import re
 
+from game_agent.i18n import Concept, compile_lexicon_pattern, text_contains
 from game_agent.models.server_connectivity_probe import ServerConnectivityProbe
 from game_agent.utils.ocr_util import OcrBbox
 
-# 含 OCR 常见误识变体（如「双认服」≈「所选服」）
-_SERVER_ERROR_RE = re.compile(
-    r"默认服不存在|所选服不存在|选服不存在|双认服不存在|"
-    r"请重新选服|重新选服|服务器不存在|区服不存在|"
-    r"无法连接服务器|连接服务器失败|获取服务器列表失败|"
-    r"server\s*(does\s*)?not\s*exist|re-?select\s*server|"
-    r"failed\s*to\s*(fetch|load)\s*server",
-    re.IGNORECASE,
+_SERVER_ERROR_RE = compile_lexicon_pattern(
+    Concept.SERVER_NOT_EXIST,
+    Concept.CONNECTION_FAILED,
 )
 
 _DASH_ONLY_SLOT_RE = re.compile(r"^-{2,}$")
@@ -26,7 +22,11 @@ def find_server_error_text(bboxes: list[OcrBbox]) -> str | None:
         text = bbox.text.strip()
         if not text:
             continue
-        if _SERVER_ERROR_RE.search(text):
+        if _SERVER_ERROR_RE.search(text) or text_contains(
+            text,
+            Concept.SERVER_NOT_EXIST,
+            Concept.CONNECTION_FAILED,
+        ):
             return text[:200]
     return None
 

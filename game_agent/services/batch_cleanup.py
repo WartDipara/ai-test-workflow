@@ -76,11 +76,11 @@ def cleanup_batch_workspace(
         try:
             shutil.rmtree(batch_root)
             removed.append(str(batch_root.resolve()))
-            logger.info("已清理批跑中间目录: %s", batch_root)
+            logger.info("Cleaned batch workspace: %s", batch_root)
         except OSError as exc:
             msg = f"{batch_root}: {exc}"
             failed.append(msg)
-            logger.warning("批跑中间目录清理失败: %s", msg)
+            logger.warning("Batch workspace cleanup failed: %s", msg)
     if archived:
-        logger.info("batch_manifest 已归档: %s", archived)
+        logger.info("batch_manifest archived: %s", archived)
     return archived, failed

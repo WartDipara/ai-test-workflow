@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from game_agent.models.launch_graph_state import LaunchFacts
 from game_agent.services.node_verifier import NodeVerifyResult
 from game_agent.services.privacy_gate import ocr_has_privacy_context, privacy_modal_still_open
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 ActionRootCause = Literal[
     "wrong_coords",
@@ -19,11 +20,12 @@ ActionRootCause = Literal[
     "unknown",
 ]
 
-_PRIVACY_TERMS_RE = re.compile(
-    r"个人信息保护|隐私政策|用户协议|许可及服务|适龄提示|protect.*privacy|privacy\s*policy",
+_PRIVACY_TERMS_RE = compile_lexicon_pattern(Concept.PRIVACY, Concept.PRIVACY_TERMS)
+_DOWNLOAD_PROGRESS_RE = re.compile(
+    compile_lexicon_pattern(Concept.DOWNLOAD_UPDATING, Concept.DOWNLOAD_STRONG).pattern
+    + r"|\d+\s*%",
     re.IGNORECASE,
 )
-_DOWNLOAD_PROGRESS_RE = re.compile(r"\d+\s*%|正在更新|下载中|资源包", re.IGNORECASE)
 
 
 class ActionReflection(BaseModel):
@@ -93,6 +95,14 @@ def reflect_on_failure(
                     "download_in_progress": False,
                 },
             )
+
+    if stage in ("sub_account_select", "sub_account"):
+        return ActionReflection(
+            root_cause="wrong_coords",
+            reason=verify.reason or "still on sub-account screen",
+            recover_hint=f"re-match sub_account target: {verify.evidence}"[:200],
+            wait_s=1.2,
+        )
 
     if merged_before.strip() == merged_after.strip():
         return ActionReflection(

@@ -12,26 +12,20 @@ from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 
 from game_agent.models.settings import DeepSeekSection, LLMSection
+from game_agent.i18n import Concept, compile_lexicon_pattern
 from game_agent.services.behavior_chain import strip_json_fence
 from game_agent.services.llm_service import build_llm_model
 from game_agent.utils.ocr_util import OcrBbox
 
 logger = logging.getLogger(__name__)
 
-_PRIMARY_ENTER_RE = re.compile(
-    r"进入游戏|开始游戏|踏入仙途|开始冒险|Enter\s*Game|Start\s*Game|Play\s*Now",
-    re.IGNORECASE,
+_PRIMARY_ENTER_RE = compile_lexicon_pattern(
+    Concept.ENTER_GAME,
+    Concept.START_GAME,
 )
-_BARE_ENTER_RE = re.compile(r"进入|Enter", re.IGNORECASE)
-_HEALTH_ADVISORY_RE = re.compile(
-    r"适龄|CADPA|健康|16岁|本游戏适合",
-    re.IGNORECASE,
-)
-_EXCLUDE_RE = re.compile(
-    r"sub-?account|login|password|账号|密码|登录|协议|隐私|privacy|agree|"
-    r"copyright|publisher|版本|support|forgot",
-    re.IGNORECASE,
-)
+_BARE_ENTER_RE = compile_lexicon_pattern(Concept.BARE_ENTER)
+_HEALTH_ADVISORY_RE = compile_lexicon_pattern(Concept.HEALTH_ADVISORY)
+_EXCLUDE_RE = compile_lexicon_pattern(Concept.EXCLUDE_AUTH_CONTEXT)
 
 
 class EnterGateTapPlan(BaseModel):

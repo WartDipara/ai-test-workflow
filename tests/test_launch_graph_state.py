@@ -16,6 +16,7 @@ def test_empty_launch_graph_state_defaults() -> None:
     assert state["server_checked"] is False
     assert state["enter_tapped_count"] == 0
     assert state["iteration"] == 0
+    assert state["in_game_vlm_no_progress_streak"] == 0
 
 
 def test_mark_node_done_and_failed() -> None:

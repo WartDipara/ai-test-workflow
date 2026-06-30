@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 from game_agent.graphs.launch_tree import TreeTrace, launch_dfs_next
 from game_agent.graphs.launch_limits import launch_graph_limits_from_state
@@ -29,13 +30,11 @@ from game_agent.graphs.static_priority import blocks_scene_routing
 from game_agent.services.dynamic_route_planner import has_active_dynamic_chain
 from game_agent.models.scene import SCENE_STRATEGY_IDS
 from game_agent.services.scene_strategies import is_pre_login_passive_wait
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 logger = logging.getLogger(__name__)
 
-_CHARACTER_ROUTE_RE = re.compile(
-    r"创角|创建角色|选择职业|Click\s*to\s*Create|Create\s*Role|Enter\s*World|进入世界",
-    re.IGNORECASE,
-)
+_CHARACTER_ROUTE_RE = compile_lexicon_pattern(Concept.CHARACTER_CREATION, Concept.ENTER_WORLD)
 
 _STATIC_BLOCKING_ACTIONS: frozenset[LaunchRouteTarget] = frozenset(
     {
@@ -61,8 +60,40 @@ def _adaptive_phase_failed(state: LaunchGraphState) -> bool:
     return bool(isinstance(bucket, dict) and bucket.get("failed"))
 
 
+def should_route_session_agent(state: LaunchGraphState, facts: LaunchFacts) -> bool:
+    """进入游戏后：主脑 Agent 优先于 scene/adaptive/dynamic。"""
+    if state.get("session_relogin_recovery_active"):
+        return False
+    if state.get("in_game_confirmed") or state.get("finished"):
+        return False
+    if state.get("in_game_agent_done"):
+        return False
+    if not state.get("session_agent_active"):
+        return False
+    if facts.sub_account_blocking or facts.initial_privacy_dialog:
+        return False
+    if blocks_scene_routing(state, facts):
+        return False
+    return True
+
+
+def should_route_session_relogin(state: LaunchGraphState, facts: LaunchFacts) -> bool:
+    """进程重启后的简化重登：优先于 session_agent / scene / free。"""
+    if not state.get("session_relogin_recovery_active"):
+        return False
+    if state.get("in_game_confirmed") or state.get("finished"):
+        return False
+    if facts.initial_privacy_dialog and not state.get("privacy_checked"):
+        return False
+    return True
+
+
 def should_route_scene(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     """场景策略：对话/教程/加载等连续推进，优先于 adaptive/dynamic/free。"""
+    if state.get("session_relogin_recovery_active"):
+        return False
+    if state.get("session_agent_active"):
+        return False
     if state.get("in_game_confirmed"):
         return False
     if state.get("in_game_entry_passed"):
@@ -93,6 +124,9 @@ def should_route_scene(state: LaunchGraphState, facts: LaunchFacts) -> bool:
         return True
     if not is_post_login(state, facts):
         return False
+    label_slug = str(state.get("scene_label_slug") or "").strip()
+    if state.get("scene_strategy_active") and label_slug and label_slug != "unknown_scene":
+        return True
     if state.get("scene_strategy_active"):
         active = str(state.get("active_scene_strategy") or state.get("scene_id") or "")
         if active in SCENE_STRATEGY_IDS:
@@ -104,6 +138,8 @@ def should_route_scene(state: LaunchGraphState, facts: LaunchFacts) -> bool:
 
 def should_route_adaptive(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     """登录后可变 UI：由 AI 阶段模板处理，优先于 dynamic/check_in_game。"""
+    if state.get("session_agent_active"):
+        return False
     if should_route_scene(state, facts):
         return False
     if not is_post_login(state, facts):
@@ -142,6 +178,8 @@ def should_route_dynamic(state: LaunchGraphState) -> bool:
     """动态链仍有待执行步骤。"""
     limits = launch_graph_limits_from_state(state)
     facts = facts_from_state(state)
+    if state.get("session_agent_active"):
+        return False
     if not is_post_login(state, facts):
         return False
     if is_login_active(state, facts):
@@ -238,6 +276,25 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
         dfs_action = decision.action
         if dfs_action in _STATIC_BLOCKING_ACTIONS:
             target = dfs_action
+        elif should_route_session_relogin(state, facts):
+            target = "session_relogin"
+            logger.info(
+                "[LaunchGraph:route] session_relogin_enter rounds=%d restarts=%d",
+                int(state.get("session_relogin_rounds") or 0),
+                int(state.get("session_relogin_session_index") or 0),
+            )
+        elif should_route_session_agent(state, facts):
+            target = "in_game_agent"
+            logger.info(
+                "[LaunchGraph:route] session_agent_enter rounds=%d elapsed=%.0fs",
+                int(state.get("in_game_agent_rounds") or 0),
+                max(
+                    0.0,
+                    time.monotonic() - float(state.get("session_agent_started_at") or 0.0),
+                )
+                if state.get("session_agent_started_at")
+                else 0.0,
+            )
         elif should_route_scene(state, facts):
             target = "scene_action"
             logger.info(
@@ -277,6 +334,18 @@ def plan_route(state: LaunchGraphState) -> LaunchRouteTarget:
             )
         elif node_attempts(state, "recover_from_failure") >= limits.max_node_attempts:
             target = "end"
+        elif dfs_action is None and (
+            facts.login_blocking
+            or str(facts.vision_stage or "").lower() == "login"
+            or facts.login_stage == "login_form"
+        ):
+            target = "atomic_login"
+            logger.info(
+                "[LaunchGraph:route] login_vision_fallback -> atomic_login "
+                "blocking=%s vision_stage=%s",
+                facts.login_blocking,
+                facts.vision_stage,
+            )
         else:
             target = "recover_from_failure"
 

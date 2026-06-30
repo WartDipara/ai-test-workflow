@@ -56,7 +56,7 @@ class AdbService:
         r = self._run(["pull", remote, str(local)], timeout=timeout)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
-            raise RuntimeError(f"adb pull 失败: {remote!r} -> {local}: {err}")
+            raise RuntimeError(f"adb pull failed: {remote!r} -> {local}: {err}")
 
     def uninstall(self, package: str, *, timeout: float = 60.0) -> str:
         pkg = (package or "").strip()
@@ -103,7 +103,7 @@ class AdbService:
                     " ".join(cmd),
                 )
                 time.sleep(0.35 * (attempt + 1))
-        raise RuntimeError(f"adb 命令失败: {' '.join(cmd)}")
+        raise RuntimeError(f"adb command failed: {' '.join(cmd)}")
 
     def verify_connection(self) -> str:
         r = self._run(["get-state"], timeout=15.0)
@@ -117,7 +117,7 @@ class AdbService:
     def shell(self, command: str, *, timeout: float = 60.0) -> str:
         r = self._run(["shell", command], timeout=timeout)
         if r.returncode != 0:
-            raise RuntimeError(f"adb shell 失败: {command!r} err={r.stderr.strip()}")
+            raise RuntimeError(f"adb shell failed: {command!r} err={r.stderr.strip()}")
         return r.stdout or ""
 
     def launch_game(self, package: str, activity: str | None) -> str:
@@ -163,7 +163,7 @@ class AdbService:
         r = self._run(["exec-out", "screencap", "-p"], timeout=45.0, text=False)
         if r.returncode != 0:
             err = r.stderr.decode("utf-8", errors="replace") if r.stderr else ""
-            raise RuntimeError(f"screencap 失败: {err}")
+            raise RuntimeError(f"screencap failed: {err}")
         dest.write_bytes(r.stdout or b"")
         return dest
 
@@ -185,7 +185,15 @@ class AdbService:
         x2: int,
         y2: int,
         duration_ms: int = 400,
+        *,
+        width: int = 0,
+        height: int = 0,
     ) -> str:
+        if width > 0 and height > 0:
+            if not (0 <= x1 < width and 0 <= y1 < height):
+                return f"Refused swipe: start ({x1},{y1}) outside {width}x{height}"
+            if not (0 <= x2 < width and 0 <= y2 < height):
+                return f"Refused swipe: end ({x2},{y2}) outside {width}x{height}"
         try:
             self.shell(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}", timeout=20.0)
             return f"Swiped ({x1},{y1})->({x2},{y2})"
@@ -233,13 +241,13 @@ class AdbService:
         r = self._run(["shell", "cmd", "clipboard", "set-text", text], timeout=15.0)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
-            logger.warning("clipboard set-text 失败，回退 input text: %s", err[:200])
+            logger.warning("clipboard set-text failed, fallback input text: %s", err[:200])
             return self.input_text_adb(text)
         try:
             self.shell("input keyevent 279", timeout=10.0)
             return "Pasted via clipboard"
         except Exception as e:
-            logger.warning("粘贴键失败，回退 input text: %s", e)
+            logger.warning("paste key failed, fallback input text: %s", e)
             return self.input_text_adb(text)
 
     def fill_text_at(
@@ -369,7 +377,7 @@ class AdbService:
             pkg, act = extract_component(out, markers)
             if pkg and act:
                 return pkg, act
-        logger.info("foreground 解析失败：所有 dumpsys 方案均未提取到组件")
+        logger.info("foreground parse failed: no component from dumpsys")
         return None, None
 
     def install_apk(self, apk_path: Path, *, timeout: float = 300.0) -> str:

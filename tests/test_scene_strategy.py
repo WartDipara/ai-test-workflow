@@ -170,6 +170,46 @@ def test_plan_dialogue_uses_continue_when_no_narrative_line() -> None:
     assert plan.target_text == "点击继续"
 
 
+def test_plan_dialogue_skips_blank_continue_cta_text() -> None:
+    bboxes = [
+        OcrBbox(
+            text="Click Blank to Continue",
+            cx=537,
+            cy=1463,
+            x1=400,
+            y1=1440,
+            x2=680,
+            y2=1490,
+        ),
+    ]
+    plan = plan_dialogue_action(
+        bboxes,
+        ocr_summary="Click Blank to Continue",
+        screen_w=1080,
+        screen_h=2400,
+        transition=SceneTransition(kind="none"),
+    )
+    assert plan.action == "tap_xy"
+    assert plan.reason == "dialogue:dialogue_box_fallback"
+    assert plan.y == int(2400 * 0.82)
+
+
+def test_plan_dialogue_dim_region_mode() -> None:
+    plan = plan_dialogue_action(
+        [],
+        ocr_summary="",
+        screen_w=1080,
+        screen_h=2400,
+        transition=SceneTransition(kind="none"),
+        advance_mode="dim_region",
+        dim_tap_xy=(572, 2093),
+    )
+    assert plan.mode == "dim_advance"
+    assert plan.x == 572
+    assert plan.y == 2093
+    assert plan.reason == "dialogue:dim_region"
+
+
 def test_plan_dialogue_taps_narrative_over_continue_label() -> None:
     bboxes = _dialogue_bboxes()
     plan = plan_dialogue_action(

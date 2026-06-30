@@ -36,19 +36,19 @@ async def probe_multimodal_support(llm: LLMSection) -> str | None:
             ],
             max_tokens=8,
         )
-        logger.info("多模态探针通过：API 接受了 image_url 消息")
+        logger.info("Multimodal probe OK: API accepted image_url")
         return None
     except BadRequestError as e:
         body = getattr(e, "body", None) or str(e)
         snippet = str(body)[:1200]
-        logger.error("多模态探针失败（BadRequest）: %s", snippet)
+        logger.error("Multimodal probe failed (BadRequest): %s", snippet)
         return _format_vision_failure(snippet)
     except APIStatusError as e:
         snippet = str(e)[:1200]
-        logger.error("多模态探针失败（HTTP）: %s", snippet)
+        logger.error("Multimodal probe failed (HTTP): %s", snippet)
         return _format_vision_failure(snippet)
     except Exception as e:
-        logger.exception("多模态探针发生非预期异常")
+        logger.exception("Multimodal probe unexpected error")
         return f"Multimodal probe unexpected error: {e!s}"
 
 

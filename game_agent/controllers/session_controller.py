@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class SessionCoordinator:
-    """检测游戏进程 crash/重启，归档日志并通知各监控模块重置状态。"""
+    """Detect game process crash/restart, archive logs, reset monitor state."""
 
     adb: AdbService
     app_config: AppConfig
@@ -40,8 +40,8 @@ class SessionCoordinator:
 
     async def watch(self, stop_event: asyncio.Event) -> str | None:
         """
-        轮询游戏进程；检测到消失后再现则触发会话重启。
-        返回非 None 表示应中止观察者（如超过 max_session_restarts）。
+        Poll game process; absent then reappeared triggers session restart.
+        Non-None return means abort observer (e.g. max_session_restarts exceeded).
         """
         cfg = self.app_config
         game_pkg = cfg.game.package_name
@@ -54,7 +54,8 @@ class SessionCoordinator:
         absent_since: float | None = None
 
         logger.info(
-            "[SessionCoordinator] 开始监听进程重启 | 包=%s | 轮询=%.1fs | 缺失阈值=%.1fs",
+            "[SessionCoordinator] Watching process restarts | pkg=%s | "
+            "poll=%.1fs | absent_threshold=%.1fs",
             game_pkg,
             poll_s,
             absent_threshold,
@@ -71,7 +72,7 @@ class SessionCoordinator:
                     if absent_duration >= absent_threshold:
                         fail = await self._on_session_restart(
                             reason=(
-                                f"游戏进程消失 {absent_duration:.1f}s 后重新出现 "
+                                f"Game process absent {absent_duration:.1f}s then reappeared "
                                 f"(pids={sorted(pids)})"
                             ),
                         )
@@ -87,7 +88,7 @@ class SessionCoordinator:
                 ):
                     fail = await self._on_session_restart(
                         reason=(
-                            f"游戏主进程 pid 变化 "
+                            f"Primary game process pid changed "
                             f"{primary_package_pid(last_pids)} -> {primary_package_pid(pids)} "
                             f"(all_pids {sorted(last_pids)} -> {sorted(pids)})"
                         ),
@@ -100,7 +101,11 @@ class SessionCoordinator:
             else:
                 if had_running and absent_since is None:
                     absent_since = now
-                    logger.info("[SessionCoordinator] 检测到游戏进程消失，开始计时")
+                    logger.info("[SessionCoordinator] Game process gone, starting timer")
+                    if self.attempt_context is not None:
+                        self.attempt_context.bump_session_generation(
+                            reason="process_absent:invalidate_inflight",
+                        )
                 last_pids = frozenset()
 
             if (
@@ -108,7 +113,7 @@ class SessionCoordinator:
                 and self.session_state.restarts_count >= max_restarts
             ):
                 msg = (
-                    f"游戏会话重启次数达到上限 ({max_restarts})，中止本轮观察者"
+                    f"Session restart limit reached ({max_restarts}), aborting observer"
                 )
                 logger.warning("[SessionCoordinator] %s", msg)
                 return msg
@@ -125,12 +130,15 @@ class SessionCoordinator:
         idx_before = self.session_state.session_index
         self.session_state.reset_for_new_session(reason=reason)
         if self.attempt_context is not None:
-            self.attempt_context.request_reset_in_game_streak()
+            self.attempt_context.bump_session_generation(
+                reason=f"session_restart:{reason[:120]}",
+            )
+            self.attempt_context.request_session_relogin_recovery()
             self.attempt_context.set_session_restarts(self.session_state.restarts_count)
             self.attempt_context.set_session_index(self.session_state.session_index)
 
         logger.warning(
-            "[SessionCoordinator] 会话重启 #%d | %s",
+            "[SessionCoordinator] Session restart #%d | %s",
             self.session_state.session_index,
             reason[:300],
         )
@@ -141,13 +149,13 @@ class SessionCoordinator:
             else None
         )
         if archived is not None:
-            logger.info("[SessionCoordinator] 已归档日志 %s", archived.name)
+            logger.info("[SessionCoordinator] Archived log %s", archived.name)
 
         if cfg.game.clear_logcat_on_session_restart and self.log_collector is not None:
             try:
                 self.log_collector.clear_device_logcat(self.adb)
             except Exception as e:
-                logger.warning("[SessionCoordinator] logcat -c 失败: %s", e)
+                logger.warning("[SessionCoordinator] logcat -c failed: %s", e)
 
         if self.log_collector is not None:
             self.log_collector.bootstrap_log(self.adb, self.artifact_root)
@@ -167,6 +175,6 @@ class SessionCoordinator:
         max_restarts = cfg.game.max_session_restarts
         if max_restarts > 0 and self.session_state.restarts_count >= max_restarts:
             return (
-                f"游戏会话重启次数达到上限 ({max_restarts}): {reason[:200]}"
+                f"Session restart limit reached ({max_restarts}): {reason[:200]}"
             )
         return None

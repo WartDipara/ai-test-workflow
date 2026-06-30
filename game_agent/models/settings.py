@@ -5,6 +5,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from game_agent.models.dialogue_dim_tap import DialogueDimTapSection
+from game_agent.models.motion_probe import MotionProbeSection
+from game_agent.models.scene_labels_config import SceneLabelsSection
+
 
 class LLMSection(BaseModel):
     """任意 OpenAI 兼容 LLM 端点（主脑 / 多模态均可复用此结构）。"""
@@ -12,12 +16,6 @@ class LLMSection(BaseModel):
     base_url: str = Field(..., description="OpenAI 兼容 API base URL")
     api_key: str = Field(..., description="API Key，可配合 YAML 中的 ${ENV} 由加载器展开")
     model_name: str = Field(..., description="厂商 model 字段，如 deepseek-v4-flash、gpt-4o 等")
-    vision_timeout_s: float = Field(
-        20.0,
-        ge=5.0,
-        le=120.0,
-        description="多模态 VLM 单次调用超时（秒）。",
-    )
     in_game_skip_interpret: bool = Field(
         True,
         description="游戏内试玩阶段跳过 launch interpret 等多余 VLM 调用。",
@@ -209,12 +207,6 @@ class LaunchGraphSection(BaseModel):
         le=60,
         description="stability_observe 最大轮次。",
     )
-    max_in_game_agent_rounds: int = Field(
-        250,
-        ge=20,
-        le=1000,
-        description="in_game_agent 最大图循环轮次（与 in_game_run_s 共同熔断）。",
-    )
     max_adaptive_rounds: int = Field(
         12,
         ge=1,
@@ -286,6 +278,13 @@ class ExecutorSection(BaseModel):
         True,
         description="atomic_login 使用 OCR 阶段缓存的登录按钮坐标（安全键盘黑屏时仍可点击）。",
     )
+    server_selector_check_enabled: bool = Field(
+        True,
+        description=(
+            "为 false 时跳过 check_server_selector（不点区服槽、不验证区服列表弹窗），"
+            "直接视为 server_checked 并继续 tap_enter_game。"
+        ),
+    )
     server_panel_fusion_enabled: bool = Field(
         True,
         description="区服 tap 后 OCR+多模态双路并行融合判定弹窗是否打开。",
@@ -299,38 +298,14 @@ class ExecutorSection(BaseModel):
 
 
 class GameSection(BaseModel):
-    """游戏流程超时与判定参数；包名/Activity 由 TaskRuntime 管理。"""
+    """游戏流程与判定参数；包名/Activity 由 TaskRuntime 管理。"""
     timeout_s: float = Field(
         300.0,
-        description="[deprecated] 请使用 launch_timeout_s；未设置时作为 launch 阶段超时回退值。",
-    )
-    launch_timeout_s: float | None = Field(
-        None,
-        ge=60.0,
-        le=7200.0,
-        description="安装+登录+进 HUD 的最大时间（秒）。",
+        description="历史兼容字段；并行/局内阶段不再因该值熔断。",
     )
     in_game_mode: Literal["smoke", "soak"] = Field(
         "smoke",
-        description="smoke：短试玩；soak：长稳压测。",
-    )
-    in_game_smoke_s: float = Field(
-        180.0,
-        ge=30.0,
-        le=3600.0,
-        description="smoke 模式游戏内试玩时长（秒）。",
-    )
-    in_game_soak_s: float = Field(
-        1200.0,
-        ge=60.0,
-        le=7200.0,
-        description="soak 模式游戏内试玩时长（秒）。",
-    )
-    in_game_play_buffer_s: float = Field(
-        60.0,
-        ge=0.0,
-        le=600.0,
-        description="orchestrator 并行阶段在 play deadline 之外的额外缓冲（秒）。",
+        description="局内试玩模式标签（仅写入交付摘要）。",
     )
     package_install_wait_timeout_s: float = Field(
         120.0,
@@ -374,12 +349,6 @@ class GameSection(BaseModel):
         le=60.0,
         description="稳定性观察期间两次多模态轮询的最小间隔（秒）。",
     )
-    in_game_run_s: float = Field(
-        1200.0,
-        ge=60.0,
-        le=7200.0,
-        description="[compat] 显式覆盖试玩时长；未改默认值时由 in_game_mode 决定 smoke/soak。",
-    )
     in_game_agent_interval_s: float = Field(
         10.0,
         ge=3.0,
@@ -391,6 +360,62 @@ class GameSection(BaseModel):
         ge=0.5,
         le=30.0,
         description="in-game agent 单次 wait 动作的最长等待（秒）。",
+    )
+    in_game_fast_path_enabled: bool = Field(
+        True,
+        description="局内 OCR 启发式快路径（对话/空白继续）；关闭则每轮走 VLM+主脑。",
+    )
+    motion_probe: MotionProbeSection = Field(
+        default_factory=MotionProbeSection,
+        description="局内 OpenCV 动效感知（仅 in_game_agent 节点使用）。",
+    )
+    scene_labels: SceneLabelsSection = Field(
+        default_factory=SceneLabelsSection,
+        description="VLM 动态场景标记注册表与快路径复用。",
+    )
+    dialogue_dim_tap: DialogueDimTapSection = Field(
+        default_factory=DialogueDimTapSection,
+        description="对话压暗背景区域点击兜底。",
+    )
+    in_game_success_confirm_rounds: int = Field(
+        2,
+        ge=1,
+        le=5,
+        description="主脑连续 success verdict 多少次才视为局内任务成功。",
+    )
+    in_game_success_min_confidence: float = Field(
+        0.75,
+        ge=0.5,
+        le=1.0,
+        description="主脑 success verdict 的最低 confidence。",
+    )
+    in_game_fail_confirm_rounds: int = Field(
+        2,
+        ge=1,
+        le=5,
+        description="主脑连续 fail verdict 多少次才视为局内任务失败。",
+    )
+    in_game_fail_min_confidence: float = Field(
+        0.75,
+        ge=0.5,
+        le=1.0,
+        description="主脑 fail verdict 的最低 confidence。",
+    )
+    in_game_vlm_no_progress_fail_rounds: int = Field(
+        10,
+        ge=1,
+        le=50,
+        description="局内连续 VLM 判定无画面进展的动作轮次上限，达到后强制失败。",
+    )
+    in_game_vlm_progress_min_confidence: float = Field(
+        0.55,
+        ge=0.3,
+        le=1.0,
+        description="VLM 局内进展/停滞 judge 的最低 confidence。",
+    )
+    in_game_post_action_vlm_analyze: bool = Field(
+        True,
+        description="行为执行后是否调用 VLM 判断局内画面是否推进。",
     )
     session_poll_interval_s: float = Field(
         1.5,
@@ -414,18 +439,6 @@ class GameSection(BaseModel):
         le=50,
         description="单轮观察者允许的最大会话重启次数；0 表示不限制。",
     )
-
-    def resolve_launch_timeout_s(self) -> float:
-        if self.launch_timeout_s is not None:
-            return float(self.launch_timeout_s)
-        return float(self.timeout_s)
-
-    def resolve_in_game_run_s(self) -> float:
-        if self.in_game_run_s != 1200.0:
-            return float(self.in_game_run_s)
-        if self.in_game_mode == "soak":
-            return float(self.in_game_soak_s)
-        return float(self.in_game_smoke_s)
 
 
 class GameTurboPluginSection(BaseModel):
@@ -464,6 +477,13 @@ class GameTurboSection(BaseModel):
         le=10,
         description="Modify 阶段生成配置补丁时，LLM 请求失败后的最大重试次数（含首次）。",
     )
+    bash_path: str = Field(
+        "",
+        description=(
+            "Git Bash 可执行文件路径（Windows 下 deploy.sh 需要）；"
+            "留空则自动探测 PATH 与常见 Git 安装位置。"
+        ),
+    )
     run_outputs_dir: Path = Field(
         Path("./run_outputs"),
         description="单次任务最终产出目录根路径，子目录为 {gid}_{task_id}。",
@@ -495,6 +515,37 @@ class PreprocessingSection(BaseModel):
     preserved_abis: list[str] = Field(
         default_factory=lambda: ["arm64-v8a", "armeabi-v7a"],
         description="GameTurbo 支持的 ARM ABI 列表；lib/ 下其他 ABI 目录将被移除。",
+    )
+
+
+class ForegroundGuardSection(BaseModel):
+    """并行阶段前台应用守护：检测失焦并 am start 切回目标游戏。"""
+
+    enabled: bool = Field(
+        True,
+        description="为 true 时在并行阶段轮询前台包名，失焦时暂停 executor 并尝试切回。",
+    )
+    poll_interval_s: float = Field(
+        10.0,
+        ge=2.0,
+        le=60.0,
+        description="前台包名轮询间隔（秒）。",
+    )
+    max_recoveries: int = Field(
+        5,
+        ge=1,
+        le=50,
+        description="单轮并行阶段切回目标应用的最大尝试次数。",
+    )
+    recover_verify_delay_s: float = Field(
+        1.5,
+        ge=0.5,
+        le=10.0,
+        description="am start 后等待多久再验证前台（秒）。",
+    )
+    allowed_foreground_packages: list[str] = Field(
+        default_factory=lambda: ["com.android.systemui"],
+        description="与目标包同时视为可接受的前台包（如系统 UI 短暂遮罩）。",
     )
 
 
@@ -687,5 +738,6 @@ class AppConfig(BaseModel):
     preprocessing: PreprocessingSection = Field(default_factory=PreprocessingSection)
     modules: ModulesSection = Field(default_factory=ModulesSection)
     network_anomaly: NetworkAnomalySection = Field(default_factory=NetworkAnomalySection)
+    foreground_guard: ForegroundGuardSection = Field(default_factory=ForegroundGuardSection)
     agent: AgentSection = Field(default_factory=AgentSection)
     logging: LoggingSection = Field(default_factory=LoggingSection)

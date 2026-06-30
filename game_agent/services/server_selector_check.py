@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,46 +15,33 @@ from game_agent.services.server_selector_locator import (
     find_enter_game_bbox,
 )
 from game_agent.utils.ocr_util import OcrBbox, extract_text_with_bbox
+from game_agent.i18n import Concept, compile_lexicon_pattern
+
+logger = logging.getLogger(__name__)
 
 # 独立弹窗标题（整段 OCR）；勿匹配槽位提示 "Click to select Server"
-_MODAL_TITLE_TEXT = re.compile(
-    r"选择服务器|选择区服|服务器列表|区服列表|切换服务器|"
-    r"^Select\s*Server$|^Server\s*List$",
-    re.IGNORECASE,
-)
+_MODAL_TITLE_TEXT = compile_lexicon_pattern(Concept.SERVER_MODAL_TITLE)
 
 # 弹窗侧栏/图例（推荐、已有角色、爆满/流畅/维护等）
-_MODAL_CATEGORY_HINTS = re.compile(
-    r"推荐|已有角色|最新服|我的角色|最近登录|爆满|火爆|流畅|维护|"
-    r"\d+-\d+区|"
-    r"recommended|maintenance|smooth|crowded",
-    re.IGNORECASE,
-)
+_MODAL_CATEGORY_HINTS = compile_lexicon_pattern(Concept.SERVER_MODAL_CATEGORY)
 
-_MODAL_DISMISS_HINT = re.compile(
-    r"点击空白处关闭|tap.*close|click.*blank|click.*empty",
-    re.IGNORECASE,
-)
+_MODAL_DISMISS_HINT = compile_lexicon_pattern(Concept.DISMISS_CLOSE)
 
-_MODAL_CLOSE_TEXT = re.compile(r"^(关闭|关\s*闭|×|X|Close)$", re.IGNORECASE)
+_MODAL_ZONE_RE = re.compile(r"\d+区", re.IGNORECASE)
 
-_STATIC_HINT_ONLY = re.compile(
-    r"^click\s*to\s*select\s*server$|^select\s*server$|^点击选择",
-    re.IGNORECASE,
-)
+_MODAL_CLOSE_TEXT = compile_lexicon_pattern(Concept.DISMISS_CLOSE)
+
+_STATIC_HINT_ONLY = compile_lexicon_pattern(Concept.SERVER_SELECT, Concept.SERVER_HINT)
 
 _DASH_ONLY_SLOT = re.compile(r"^-{2,}$")
 
-_EXCLUDE_LIST_ROW = re.compile(
-    r"login|password|协议|隐私|privacy|agree|copyright|publisher|版本|"
-    r"sub-?account|踏入|开始游戏|进入游戏",
-    re.IGNORECASE,
+_EXCLUDE_LIST_ROW = compile_lexicon_pattern(
+    Concept.EXCLUDE_AUTH_CONTEXT,
+    Concept.ENTER_GAME,
+    Concept.START_GAME,
 )
 
-_DISMISS_HINTS = re.compile(
-    r"^(关闭|关\s*闭|取消|返回|确定|OK|Close|Cancel|Back|×|X)$",
-    re.IGNORECASE,
-)
+_DISMISS_HINTS = compile_lexicon_pattern(Concept.DISMISS_CLOSE, Concept.CANCEL)
 
 _EXIT_CONFIRM_NEGATIVE = re.compile(
     r"取消|返回游戏|否|暂不|继续游戏|留在此页|不退出|"
@@ -81,6 +69,7 @@ class ServerSelectorCheckResult:
     message: str
     taps_used: int = 0
     panel_opened: bool = False
+    recover_bboxes: tuple[OcrBbox, ...] = ()
 
 
 def _text_set(bboxes: list[OcrBbox]) -> set[str]:
@@ -92,13 +81,15 @@ def is_page_navigation(
     after: list[OcrBbox],
     enter_before: OcrBbox,
 ) -> bool:
-    """整页跳转：进入按钮首次出现或位移过大。"""
+    """整页跳转：进入按钮首次出现或位移过大（遮罩弹窗盖住 enter 不算）。"""
+    if has_strong_modal_evidence(after, enter_before):
+        return False
     enter_after = find_enter_game_bbox(after)
     enter_was = find_enter_game_bbox(before)
     if enter_was is None and enter_after is not None:
         return True
     if enter_after is None:
-        return True
+        return False
     if abs(enter_after.cx - enter_before.cx) > ENTER_POSITION_TOLERANCE_PX:
         return True
     if abs(enter_after.cy - enter_before.cy) > ENTER_POSITION_TOLERANCE_PX:
@@ -118,6 +109,60 @@ def enter_still_same(enter_before: OcrBbox, after: list[OcrBbox]) -> bool:
 
 def _has_dismiss(bboxes: list[OcrBbox]) -> bool:
     return any(_DISMISS_HINTS.search(b.text.strip()) for b in bboxes)
+
+
+def _has_modal_title_anywhere(bboxes: list[OcrBbox]) -> bool:
+    for bbox in bboxes:
+        text = bbox.text.strip()
+        if text and _MODAL_TITLE_TEXT.search(text):
+            return True
+    return False
+
+
+def has_strong_modal_evidence(
+    bboxes: list[OcrBbox],
+    enter: OcrBbox,
+) -> bool:
+    """区服列表弹窗强证据（enter 被遮住时仍可用）。"""
+    merged = " ".join(_text_set(bboxes))
+    if _has_modal_title_anywhere(bboxes):
+        return True
+    if _has_modal_title(bboxes, enter):
+        return True
+    if _has_modal_category(merged) and _MODAL_ZONE_RE.search(merged):
+        return True
+    if _has_modal_close(bboxes, enter):
+        return True
+    return False
+
+
+def _positive_modal_evidence(
+    before: list[OcrBbox],
+    after: list[OcrBbox],
+    enter_before: OcrBbox,
+) -> str | None:
+    merged_after = " ".join(_text_set(after))
+    if _has_modal_title_anywhere(after):
+        return "modal_title"
+    if _has_modal_title(after, enter_before):
+        return "modal_title"
+    if _has_modal_category(merged_after) and _MODAL_ZONE_RE.search(merged_after):
+        return "modal_category"
+
+    new_rows = _new_list_rows_above_enter(before, after, enter_before)
+    has_close = _has_modal_close(after, enter_before)
+    if has_close and len(new_rows) >= 1:
+        return "close_plus_new_rows"
+    if has_close and _has_modal_category(merged_after):
+        return "close_plus_category"
+    if _has_modal_dismiss_hint(after) and _has_modal_category(merged_after):
+        return "dismiss_hint_plus_category"
+    if _has_modal_dismiss_hint(after) and len(new_rows) >= 1:
+        return "dismiss_hint_plus_new_rows"
+
+    if has_strong_modal_evidence(after, enter_before) and len(new_rows) >= 2:
+        return "modal_rows"
+    return None
 
 
 def _has_modal_title(bboxes: list[OcrBbox], enter: OcrBbox) -> bool:
@@ -189,7 +234,11 @@ def evaluate_panel_ocr(
     after: list[OcrBbox],
     enter_before: OcrBbox,
 ) -> PanelOcrVerdict:
-    """OCR 快判：独立区服弹窗证据；返回硬否决标记供融合层使用。"""
+    """OCR 快判：独立区服弹窗证据；遮罩盖住 enter 时仍可通过。"""
+    positive = _positive_modal_evidence(before, after, enter_before)
+    if positive:
+        return PanelOcrVerdict(passed=True, evidence=positive)
+
     if is_page_navigation(before, after, enter_before):
         return PanelOcrVerdict(
             passed=False,
@@ -202,23 +251,6 @@ def evaluate_panel_ocr(
             evidence="enter_cta_moved",
             enter_moved=True,
         )
-
-    merged_after = " ".join(_text_set(after))
-    new_rows = _new_list_rows_above_enter(before, after, enter_before)
-
-    if _has_modal_title(after, enter_before):
-        return PanelOcrVerdict(passed=True, evidence="modal_title")
-
-    has_close = _has_modal_close(after, enter_before)
-    if has_close and len(new_rows) >= 1:
-        return PanelOcrVerdict(passed=True, evidence="close_plus_new_rows")
-    if has_close and _has_modal_category(merged_after):
-        return PanelOcrVerdict(passed=True, evidence="close_plus_category")
-
-    if _has_modal_dismiss_hint(after) and _has_modal_category(merged_after):
-        return PanelOcrVerdict(passed=True, evidence="dismiss_hint_plus_category")
-    if _has_modal_dismiss_hint(after) and len(new_rows) >= 1:
-        return PanelOcrVerdict(passed=True, evidence="dismiss_hint_plus_new_rows")
 
     return PanelOcrVerdict(passed=False, evidence="no_modal_evidence")
 
@@ -330,6 +362,57 @@ def _try_close_panel(
     return steps
 
 
+async def try_close_server_panel_async(
+    adb: AdbService,
+    artifact_root: Path,
+    width: int,
+    height: int,
+    *,
+    enter_bbox: OcrBbox | None = None,
+    llm_cfg: object | None = None,
+    deepseek: object | None = None,
+    ocr_summary: str = "",
+) -> list[str]:
+    """启发式关面板；仍打开时由主脑选关闭或选服。"""
+    from game_agent.models.settings import AppConfig, DeepSeekSection, LLMSection
+    from game_agent.services.server_panel_planner import (
+        decide_server_panel_tap,
+        server_panel_still_open,
+    )
+
+    steps = await asyncio.to_thread(_try_close_panel, adb, artifact_root, width, height)
+    _, bboxes = await asyncio.to_thread(_capture_ocr, adb, artifact_root, "server_close_verify")
+    if not server_panel_still_open(bboxes, enter=enter_bbox):
+        return steps
+
+    cfg_llm = llm_cfg if isinstance(llm_cfg, LLMSection) else None
+    ds = deepseek if isinstance(deepseek, DeepSeekSection) else None
+    if cfg_llm is None and isinstance(llm_cfg, AppConfig):
+        cfg_llm = llm_cfg.llm
+        ds = llm_cfg.deepseek
+
+    decision = await decide_server_panel_tap(
+        llm_cfg=cfg_llm,
+        bboxes=bboxes,
+        ocr_summary=ocr_summary,
+        screen_w=width,
+        screen_h=height,
+        deepseek=ds,
+        prefer_close=True,
+    )
+    if decision is None:
+        steps.append("brain: no server panel tap decision")
+        return steps
+
+    msg = adb.tap(decision.x, decision.y, width=width, height=height)
+    steps.append(
+        f"brain {decision.intent} ({decision.x},{decision.y}) "
+        f"source={decision.source} {msg[:80]}"
+    )
+    adb.wait_seconds(0.6)
+    return steps
+
+
 def run_server_selector_check(
     adb: AdbService,
     artifact_root: Path,
@@ -374,7 +457,8 @@ def run_server_selector_check(
             "Use report_flow_done with [E2006]."
         ),
         taps_used=max_taps,
-        panel_opened=False,
+        panel_opened=has_strong_modal_evidence(before_bboxes, enter_bbox),
+        recover_bboxes=tuple(before_bboxes),
     )
 
 
@@ -401,6 +485,16 @@ async def run_server_selector_check_async(
     min_vision_conf = 0.75 if executor is None else executor.server_panel_vision_min_conf
     llm_mm = app_cfg.llm_multimodal if app_cfg is not None else None
     use_vision = fusion_enabled and llm_mm is not None
+    if not use_vision:
+        reasons: list[str] = []
+        if not fusion_enabled:
+            reasons.append("fusion_disabled")
+        if llm_mm is None:
+            reasons.append("llm_multimodal_missing")
+        logger.info(
+            "[ServerCheck] vision fusion off: %s",
+            ",".join(reasons) or "unknown",
+        )
 
     sw, sh = adb.touch_size()
     label_note = f" label={label!r}" if label else ""
@@ -418,17 +512,32 @@ async def run_server_selector_check_async(
         ocr_task = asyncio.to_thread(
             _ocr_from_shot, shot, device_w=cap_sw, device_h=cap_sh
         )
+        vision_verdict = None
         if use_vision:
-            vision_task = probe_server_panel_opened(
-                llm_cfg=llm_mm,
-                screenshot_path=shot,
-                ocr_summary="",
-                round_id=round_id,
+            ocr_summary = " ".join(b.text for b in before_bboxes)[:2000]
+
+            async def _vision_probe() -> ServerPanelVisionVerdict | None:
+                try:
+                    return await probe_server_panel_opened(
+                        llm_cfg=llm_mm,
+                        screenshot_path=shot,
+                        ocr_summary=ocr_summary,
+                        round_id=round_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[ServerCheck] attempt=%d vision probe failed: %s",
+                        attempt,
+                        exc,
+                    )
+                    return None
+
+            after_bboxes, vision_verdict = await asyncio.gather(
+                ocr_task,
+                _vision_probe(),
             )
-            after_bboxes, vision_verdict = await asyncio.gather(ocr_task, vision_task)
         else:
             after_bboxes = await ocr_task
-            vision_verdict = None
 
         ocr_verdict = evaluate_panel_ocr(before_bboxes, after_bboxes, enter_bbox)
         fusion = fuse_panel_verdict(
@@ -437,10 +546,24 @@ async def run_server_selector_check_async(
             min_vision_conf=min_vision_conf,
             fusion_enabled=fusion_enabled,
         )
+        logger.info(
+            "[ServerCheck] attempt=%d fusion passed=%s source=%s ocr=%s msg=%s",
+            attempt,
+            fusion.passed,
+            fusion.source,
+            ocr_verdict.evidence,
+            fusion.message[:160],
+        )
 
         if fusion.passed:
-            close_steps = await asyncio.to_thread(
-                _try_close_panel, adb, artifact_root, sw, sh
+            close_steps = await try_close_server_panel_async(
+                adb,
+                artifact_root,
+                sw,
+                sh,
+                enter_bbox=enter_bbox,
+                llm_cfg=app_cfg,
+                ocr_summary=" ".join(b.text for b in after_bboxes),
             )
             return ServerSelectorCheckResult(
                 ok=True,
@@ -455,6 +578,31 @@ async def run_server_selector_check_async(
             )
         before_bboxes = after_bboxes
 
+    if has_strong_modal_evidence(before_bboxes, enter_bbox):
+        logger.info("[ServerCheck] panel still open after taps — brain close recovery")
+        close_steps = await try_close_server_panel_async(
+            adb,
+            artifact_root,
+            sw,
+            sh,
+            enter_bbox=enter_bbox,
+            llm_cfg=app_cfg,
+            ocr_summary=" ".join(b.text for b in before_bboxes),
+        )
+        _, verify_bboxes = await asyncio.to_thread(
+            _capture_ocr, adb, artifact_root, "server_brain_recover"
+        )
+        if not has_strong_modal_evidence(verify_bboxes, enter_bbox):
+            return ServerSelectorCheckResult(
+                ok=True,
+                message=(
+                    f"[ServerCheck] PASSED brain_recover{label_note} "
+                    f"panel was open; closed via brain. close={' | '.join(close_steps)}"
+                ),
+                taps_used=max_taps,
+                panel_opened=True,
+            )
+
     return ServerSelectorCheckResult(
         ok=False,
         message=(
@@ -463,5 +611,6 @@ async def run_server_selector_check_async(
             "Use report_flow_done with [E2006]."
         ),
         taps_used=max_taps,
-        panel_opened=False,
+        panel_opened=has_strong_modal_evidence(before_bboxes, enter_bbox),
+        recover_bboxes=tuple(before_bboxes),
     )

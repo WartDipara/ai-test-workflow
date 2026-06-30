@@ -88,7 +88,7 @@ class DeepSeekChatModel(OpenAIChatModel):
         items = super()._process_thinking(message) or []
         if items:
             full = "\n\n".join((p.content or "") for p in items).strip()
-            logger.info("DeepSeek thinking 已解析: parts=%d\n%s", len(items), full)
+            logger.info("DeepSeek thinking parsed: parts=%d\n%s", len(items), full)
             return items
 
         reasoning = getattr(message, _REASONING_FIELD, None)
@@ -97,7 +97,7 @@ class DeepSeekChatModel(OpenAIChatModel):
             reasoning = extra.get(_REASONING_FIELD) or extra.get("reasoning")
 
         if isinstance(reasoning, str) and reasoning.strip():
-            logger.info("DeepSeek thinking 通过 message / model_extra 兜底提取成功")
+            logger.info("DeepSeek thinking extracted via message/model_extra fallback")
             return [
                 ThinkingPart(
                     id=_REASONING_FIELD,

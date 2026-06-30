@@ -9,13 +9,11 @@ from typing import TYPE_CHECKING
 from game_agent.external_services.base import (
     ExternalEvidence,
     PreparedApp,
-    RetryDecision,
 )
 from game_agent.external_services.gameturbo.service import GameTurboExternalService
 
 if TYPE_CHECKING:
     from game_agent.external_services.context import ServiceContext
-    from game_agent.models.run_failure import RunFailure
     from game_agent.models.settings import AppConfig
     from game_agent.models.task_config import TaskConfig
     from game_agent.models.task_runtime import TaskRuntime
@@ -101,20 +99,6 @@ class ExternalServiceManager:
   async def after_parallel_phase(self, ctx: ServiceContext) -> None:
       for svc in self._active(ctx):
           await svc.after_parallel_phase(ctx)
-
-  async def on_failure(
-      self,
-      ctx: ServiceContext,
-      failure: RunFailure,
-      *,
-      will_retry: bool,
-  ) -> RetryDecision:
-      decision = RetryDecision()
-      for svc in self._active(ctx):
-          svc_decision = await svc.on_failure(ctx, failure, will_retry=will_retry)
-          if svc_decision.wants_plugin_retry:
-              decision = svc_decision
-      return decision
 
   def collect_all_evidence(self, ctx: ServiceContext) -> dict[str, ExternalEvidence]:
       out: dict[str, ExternalEvidence] = {}
@@ -257,7 +241,7 @@ class ExternalServiceManager:
       winning_artifact_root: Path,
   ) -> Path:
       if not self.gameturbo_enabled():
-          raise RuntimeError("GameTurbo 插件未启用，无法解析合并配置")
+          raise RuntimeError("GameTurbo plugin disabled, cannot resolve merge config")
       from game_agent.external_services.gameturbo.orchestration import (
           require_success_merged_config,
       )

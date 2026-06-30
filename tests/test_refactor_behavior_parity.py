@@ -100,7 +100,7 @@ def test_execution_archive_plan_omits_plugin_when_disabled() -> None:
     assert plan.prepare_artifact is None
 
 
-def test_utils_shims_reexport_same_apply_types() -> None:
+def test_apply_gameturbo_config_patch_changes_file() -> None:
     assert ConfigApplyResult is not None
     patch = GameTurboConfigPatch(direct_patterns=["cdn.example.com"])
     cfg_path = Path(__file__).parent / "_parity_config.json"

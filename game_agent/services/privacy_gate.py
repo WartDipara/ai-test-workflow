@@ -10,20 +10,15 @@ from game_agent.models.launch_graph_state import LaunchFacts
 from game_agent.models.privacy_gate import PrivacyGateJudgment
 from game_agent.utils.ocr_util import OcrBbox
 from game_agent.workers.vision_worker import VisionWorker
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 logger = logging.getLogger(__name__)
 
 _GATE_MIN_CONFIDENCE = 0.55
 
-_DISAGREE_RE = re.compile(r"不同意|拒绝|decline|reject", re.IGNORECASE)
-_MODAL_CONSENT_RE = re.compile(
-    r"同意并进入|同意.*进入|Agree\s*and\s*Enter|^(同意|接受|确认|Agree|Accept)$",
-    re.IGNORECASE,
-)
-_PRIVACY_TERMS_RE = re.compile(
-    r"个人信息保护|隐私政策|用户协议|许可及服务|已阅读并同意|protect.*privacy|privacy\s*policy",
-    re.IGNORECASE,
-)
+_DISAGREE_RE = compile_lexicon_pattern(Concept.PRIVACY_DISAGREE)
+_MODAL_CONSENT_RE = compile_lexicon_pattern(Concept.PRIVACY_MODAL_CONSENT)
+_PRIVACY_TERMS_RE = compile_lexicon_pattern(Concept.PRIVACY, Concept.PRIVACY_TERMS)
 
 
 def ocr_has_privacy_context(ocr_merged: str) -> bool:
@@ -196,6 +191,7 @@ async def resolve_privacy_gate(
     llm_cfg,
     round_id: int = 0,
     privacy_milestones_done: bool = False,
+    attempt_context=None,
 ) -> LaunchFacts:
     """在 plan_route 前由 VLM 统一裁决隐私门禁类型。"""
     _ = (screen_w, screen_h)
@@ -214,12 +210,17 @@ async def resolve_privacy_gate(
             privacy_milestones_done=privacy_milestones_done,
         )
 
-    vision = VisionWorker(llm_cfg)
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
     judgment = await vision.judge_privacy_gate(
         screenshot_path=screenshot_path,
         ocr_summary=ocr_merged,
         round_id=round_id,
     )
+    if discard_if_stale(work_gen, where="privacy_gate", ctx=attempt_context):
+        return facts
     merged = merge_privacy_gate_judgment(
         facts,
         judgment,

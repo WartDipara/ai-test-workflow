@@ -11,6 +11,7 @@ from game_agent.graphs.launch_state_store import (
 )
 from game_agent.graphs.static_priority import has_pending_static_work
 from game_agent.models.launch_graph_state import LaunchFacts, LaunchGraphState
+from game_agent.services.login_stage_probe import split_screen_login_active_reason
 
 _PRE_LOGIN_SCENE_IDS = frozenset({"dialogue", "tutorial", "loading"})
 _VLM_LOGIN_STAGES = frozenset({"login"})
@@ -28,6 +29,17 @@ _VLM_POST_LOGIN_STAGES = frozenset(
 )
 
 
+def _split_screen_login_active(
+    facts: LaunchFacts,
+    state: LaunchGraphState,
+) -> bool:
+    if split_screen_login_active_reason(facts.classify_reason):
+        return True
+    if state.get("split_screen_login"):
+        return True
+    return False
+
+
 def _vlm_indicates_login_screen(
     state: LaunchGraphState,
     facts: LaunchFacts | None = None,
@@ -42,7 +54,8 @@ def _vlm_indicates_login_screen(
         if facts.login_stage in ("clear", "sub_account_select") and not facts.login_blocking:
             return False
         if facts.enter_cta_visible and facts.login_stage != "login_form":
-            return False
+            if not facts.login_blocking and not _split_screen_login_active(facts, state):
+                return False
     if stage in _VLM_LOGIN_STAGES:
         return True
     blockers = judgment.get("blockers") or []
@@ -71,7 +84,8 @@ def is_login_active(state: LaunchGraphState, facts: LaunchFacts) -> bool:
     if facts.login_stage in ("clear", "sub_account_select") and not facts.login_blocking:
         return False
     if facts.enter_cta_visible and facts.login_stage != "login_form":
-        return False
+        if not facts.login_blocking and not _split_screen_login_active(facts, state):
+            return False
     if _vlm_indicates_login_screen(state, facts):
         return True
     if not is_login_done(state):

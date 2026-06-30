@@ -43,7 +43,7 @@ async def run_gameturbo_failure_cleanup(
     if audit is not None:
         audit.log_phase(
             PipelinePhase.CLEANUP.value,
-            "插件日志已导出",
+            "Plugin log exported",
             local_path=str(local_log_path) if local_log_path else None,
         )
 
@@ -71,7 +71,7 @@ async def run_gameturbo_failure_cleanup(
                 unmatched_pending=len(result.unmatched_pending_ips),
             )
         logger.info(
-            "域名/区域分析完成: %d 个域名, tunnel=%d direct=%d unknown=%d",
+            "Domain/region analysis done: %d domains, tunnel=%d direct=%d unknown=%d",
             result.domain_count,
             len(result.tunnel_domains),
             len(result.direct_domains),
@@ -80,16 +80,16 @@ async def run_gameturbo_failure_cleanup(
         if audit is not None:
             audit.log_phase(
                 PipelinePhase.CLEANUP.value,
-                "域名区域分析已写入 JSON",
+                "Domain/region analysis JSON written",
                 path=str(analysis_json),
                 domain_count=result.domain_count,
                 non_china_domains=result.non_china_domains,
             )
     except Exception as e:
-        logger.warning("域名/区域分析失败: %s", e)
+        logger.warning("Domain/region analysis failed: %s", e)
         if audit is not None:
             audit.log_phase(
                 PipelinePhase.CLEANUP.value,
-                "域名区域分析失败",
+                "Domain/region analysis failed",
                 error=str(e)[:500],
             )

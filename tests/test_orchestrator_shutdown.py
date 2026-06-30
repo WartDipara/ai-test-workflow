@@ -46,9 +46,11 @@ def test_on_attempt_failure_skips_retry_on_shutdown(tmp_path: Path) -> None:
 
     handle_mock.assert_called_once()
     assert handle_mock.call_args.kwargs["will_retry"] is False
+    assert orch._last_failure_reason is not None
+    assert "User interrupted" in orch._last_failure_reason
 
 
-def test_retry_handler_skips_modify_when_shutdown() -> None:
+def test_retry_handler_skips_modify_and_ai_report_when_shutdown() -> None:
     from game_agent.controllers.retry_controller import AnomalyHandler
     from game_agent.services.shutdown import get_shutdown_context
 
@@ -72,7 +74,7 @@ def test_retry_handler_skips_modify_when_shutdown() -> None:
         patch(
             "game_agent.controllers.retry_controller.generate_and_save_attempt_failure_report",
             new_callable=AsyncMock,
-        ),
+        ) as report_mock,
     ):
         cleanup_cls.return_value.run = AsyncMock()
         import asyncio
@@ -82,3 +84,4 @@ def test_retry_handler_skips_modify_when_shutdown() -> None:
         )
 
     external_services.run_modify_retry.assert_not_called()
+    report_mock.assert_not_called()

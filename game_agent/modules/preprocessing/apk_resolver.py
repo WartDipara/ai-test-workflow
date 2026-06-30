@@ -44,7 +44,7 @@ def resolve_apk_url(
     downloaded = download_apk(url, cache_dir, timeout_s=timeout_s)
     if downloaded is None:
         return None
-    logger.info("预处理 APK 来源: URL 下载 -> %s", downloaded.name)
+    logger.info("Preprocess APK source: URL download -> %s", downloaded.name)
     return ResolvedApk(downloaded.resolve(), ApkSourceKind.DOWNLOADED)
 
 
@@ -60,9 +60,9 @@ def resolve_apk_for_preprocess(cache_dir: Path) -> ResolvedApk | None:
     if apks_txt.is_file():
         downloaded = download_apk_from_file(apks_txt, cache_dir)
         if downloaded is not None:
-            logger.info("预处理 APK 来源: 下载 -> %s", downloaded.name)
+            logger.info("Preprocess APK source: download -> %s", downloaded.name)
             return ResolvedApk(downloaded.resolve(), ApkSourceKind.DOWNLOADED)
-        logger.warning("apks.txt 存在但下载失败，尝试使用 cache 中已有 APK")
+        logger.warning("apks.txt present but download failed, try cached APK")
 
     candidates = list_cache_apks(cache_dir)
     if not candidates:
@@ -77,7 +77,7 @@ def resolve_apk_for_preprocess(cache_dir: Path) -> ResolvedApk | None:
         )
 
     chosen = candidates[0].resolve()
-    logger.info("预处理 APK 来源: 本地缓存 -> %s", chosen.name)
+    logger.info("Preprocess APK source: local cache -> %s", chosen.name)
     return ResolvedApk(chosen, ApkSourceKind.CACHE)
 
 

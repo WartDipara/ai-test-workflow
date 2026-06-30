@@ -46,7 +46,7 @@ class SamsungInstallMonitor(BaseInstallMonitor):
             try:
                 adb.screencap_png(shot)
             except Exception as e:
-                logger.debug("Samsung 安装监控截图失败: %s", e)
+                logger.debug("Samsung install monitor screenshot failed: %s", e)
                 self.record_error(f"screencap: {e}")
                 self._cleanup(shot)
                 stop_event.wait(poll_interval_s)
@@ -55,7 +55,7 @@ class SamsungInstallMonitor(BaseInstallMonitor):
             try:
                 ocr_text = self.ocr_screen(adb, shot)
             except Exception as e:
-                logger.debug("Samsung 安装监控 OCR 失败: %s", e)
+                logger.debug("Samsung install monitor OCR failed: %s", e)
                 self.record_error(f"ocr: {e}")
                 self._cleanup(shot)
                 stop_event.wait(poll_interval_s)
@@ -95,7 +95,7 @@ class SamsungInstallMonitor(BaseInstallMonitor):
 
             stop_event.wait(poll_interval_s)
 
-        logger.info("Samsung 安装监控已停止（共检查 %d 轮）", self.result.polls)
+        logger.info("Samsung install monitor stopped (%d polls)", self.result.polls)
 
     @staticmethod
     def _cleanup(shot: Path) -> None:

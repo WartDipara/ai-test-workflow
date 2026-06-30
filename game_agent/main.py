@@ -16,7 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg_path = _DEFAULT_SETTINGS.resolve()
     if not cfg_path.is_file():
         print(
-            f"错误: 找不到配置文件 {cfg_path}，可复制 config/settings.example.yaml 为 config/settings.yaml",
+            f"Error: config not found at {cfg_path}; copy config/settings.example.yaml to config/settings.yaml",
             file=sys.stderr,
         )
         return 2
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         with install_signal_handlers():
             return run_orchestrator(cfg_path)
     except (KeyboardInterrupt, ShutdownRequested) as exc:
-        logging.getLogger(__name__).warning("用户中断: %s", exc)
+        logging.getLogger(__name__).warning("User interrupted: %s", exc)
         return shutdown_exit_code(exc)
 
 

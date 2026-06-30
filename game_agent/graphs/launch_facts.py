@@ -4,36 +4,31 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 
 from game_agent.models.launch_graph_state import LaunchFacts
 from game_agent.models.screen_interpretation import ScreenInterpretation
 from game_agent.services.enter_gate_planner import enter_gate_likely_visible
-from game_agent.services.login_stage_probe import probe_login_stage
+from game_agent.services.login_stage_probe import (
+    detect_split_screen_login,
+    probe_login_stage,
+    split_screen_login_active_reason,
+)
 from game_agent.services.server_selector_locator import find_enter_game_bbox, locate_server_selector_target
 from game_agent.utils.ocr_util import OcrBbox
 
-_PRIVACY_CONTEXT_RE = re.compile(
-    r"个人信息保护|隐私政策|用户协议|许可及服务|已阅读并同意|protect.*privacy|privacy\s*policy",
-    re.IGNORECASE,
-)
+from game_agent.i18n import Concept, compile_lexicon_pattern
 from game_agent.services.download_gate import ocr_has_download_context
 from game_agent.graphs.launch_state_store import completed_tree_node, is_privacy_checked
 from game_agent.services.privacy_gate import privacy_modal_still_open
-_ANNOUNCEMENT_RE = re.compile(
-    r"公告|announcement|Notice|日常通知|点击空白|今日不再|不再提示",
-    re.IGNORECASE,
-)
-_OVERLAY_HINT_RE = re.compile(r"Notice|日常通知", re.IGNORECASE)
-_SUB_ACCOUNT_HINT_RE = re.compile(
-    r"sub-?account|小号|子账号|选择小号|上次登录",
-    re.IGNORECASE,
-)
-_CHARACTER_HINT_RE = re.compile(
-    r"创角|创建角色|选择职业|Click\s*to\s*Create|Create\s*Role|Enter\s*World|进入世界|LV\.",
-    re.IGNORECASE,
-)
-_ENTER_WORLD_OCR_RE = re.compile(r"Enter\s*World|进入世界", re.IGNORECASE)
-_PK_AGREEMENT_RE = re.compile(r"PK\s*玩法|接受.*PK", re.IGNORECASE)
+
+_PRIVACY_CONTEXT_RE = compile_lexicon_pattern(Concept.PRIVACY, Concept.PRIVACY_TERMS)
+_ANNOUNCEMENT_RE = compile_lexicon_pattern(Concept.ANNOUNCEMENT, Concept.OVERLAY)
+_OVERLAY_HINT_RE = compile_lexicon_pattern(Concept.DAILY_NOTICE, Concept.ANNOUNCEMENT)
+_SUB_ACCOUNT_HINT_RE = compile_lexicon_pattern(Concept.SUB_ACCOUNT)
+_CHARACTER_HINT_RE = compile_lexicon_pattern(Concept.CHARACTER_CREATION, Concept.ENTER_WORLD, Concept.CHAR_SLOT)
+_ENTER_WORLD_OCR_RE = compile_lexicon_pattern(Concept.ENTER_WORLD)
+_PK_AGREEMENT_RE = compile_lexicon_pattern(Concept.PK_AGREEMENT)
 
 
 def _looks_like_character_select_screen(
@@ -59,9 +54,15 @@ def classify_screen_facts(
     screen_w: int,
     screen_h: int,
     ocr_summary: str = "",
+    sub_account_phrases: Sequence[str] | None = None,
 ) -> LaunchFacts:
     """把 OCR 结果转为 LaunchFacts。"""
-    login_probe = probe_login_stage(bboxes, screen_w=screen_w, screen_h=screen_h)
+    login_probe = probe_login_stage(
+        bboxes,
+        screen_w=screen_w,
+        screen_h=screen_h,
+        sub_account_phrases=sub_account_phrases,
+    )
     enter_anchor = find_enter_game_bbox(bboxes, screen_h=screen_h)
     target, _enter = locate_server_selector_target(bboxes, screen_w=screen_w, screen_h=screen_h)
 
@@ -124,7 +125,69 @@ def _parse_vision_analyze_json(raw: str) -> dict:
         return {}
 
 
-def merge_vision_into_facts(facts: LaunchFacts, vision_raw: str) -> LaunchFacts:
+def _vision_should_set_login_blocking(
+    facts: LaunchFacts,
+    *,
+    bboxes: list[OcrBbox] | None = None,
+    screen_w: int = 0,
+    ocr_merged: str = "",
+) -> bool:
+    if facts.sub_account_blocking:
+        return False
+    split = split_screen_login_active_reason(facts.classify_reason)
+    if not split and bboxes and screen_w > 0:
+        split = detect_split_screen_login(bboxes, screen_w=screen_w, ocr_merged=ocr_merged)
+    if split:
+        return True
+    if facts.login_stage == "login_form":
+        return True
+    if not facts.enter_cta_visible:
+        return True
+    if _ACCOUNT_LABEL_RE.search(ocr_merged):
+        return True
+    return False
+
+
+_ACCOUNT_LABEL_RE = compile_lexicon_pattern(Concept.ACCOUNT_LABEL)
+
+
+def reinforce_login_from_vision(
+    facts: LaunchFacts,
+    *,
+    bboxes: list[OcrBbox],
+    screen_w: int,
+    ocr_merged: str = "",
+) -> LaunchFacts:
+    """classify 路径：异步 VLM stage=login 时与 merge_vision 规则对齐。"""
+    stage = str(facts.vision_stage or "").strip().lower()
+    if stage != "login":
+        return facts
+    if not _vision_should_set_login_blocking(
+        facts,
+        bboxes=bboxes,
+        screen_w=screen_w,
+        ocr_merged=ocr_merged,
+    ):
+        return facts
+    reason = facts.classify_reason
+    reason = f"{reason}; vision_login_reinforced" if reason else "vision_login_reinforced"
+    return facts.model_copy(
+        update={
+            "login_blocking": True,
+            "login_stage": "login_form",
+            "classify_reason": reason[:500],
+        },
+    )
+
+
+def merge_vision_into_facts(
+    facts: LaunchFacts,
+    vision_raw: str,
+    *,
+    bboxes: list[OcrBbox] | None = None,
+    screen_w: int = 0,
+    ocr_merged: str = "",
+) -> LaunchFacts:
     """多模态画面解释补充 OCR facts（OCR 已明确时优先保留 OCR）。"""
     data = _parse_vision_analyze_json(vision_raw)
     stage = str(data.get("stage", "") or "").strip().lower()
@@ -141,7 +204,13 @@ def merge_vision_into_facts(facts: LaunchFacts, vision_raw: str) -> LaunchFacts:
     if stage == "resource_download" and not facts.login_blocking and not facts.initial_privacy_dialog:
         updates["download_visible"] = True
     if stage == "login" and not facts.sub_account_blocking:
-        if not facts.enter_cta_visible or facts.login_stage == "login_form":
+        trial = facts.model_copy(update=updates)
+        if _vision_should_set_login_blocking(
+            trial,
+            bboxes=bboxes,
+            screen_w=screen_w,
+            ocr_merged=ocr_merged,
+        ):
             updates["login_blocking"] = True
             updates["login_stage"] = "login_form"
     if stage == "enter_game" and not facts.enter_cta_visible:
@@ -304,6 +373,10 @@ def needs_async_vision_enrichment(facts: LaunchFacts) -> bool:
 def merge_analyze_screen_response(
     facts: LaunchFacts,
     analyze_response_json: str,
+    *,
+    bboxes: list[OcrBbox] | None = None,
+    screen_w: int = 0,
+    ocr_merged: str = "",
 ) -> tuple[LaunchFacts, str]:
     """解析 run_analyze_screen 的 JSON 回调，合并进 facts 并返回简短 hint。"""
     try:
@@ -328,7 +401,13 @@ def merge_analyze_screen_response(
         },
         ensure_ascii=False,
     )
-    merged = merge_vision_into_facts(facts, vision_raw)
+    merged = merge_vision_into_facts(
+        facts,
+        vision_raw,
+        bboxes=bboxes,
+        screen_w=screen_w,
+        ocr_merged=ocr_merged,
+    )
     hint_parts = [f"vision_stage={merged.vision_stage}"]
     if merged.vision_has_anomaly and merged.vision_anomaly_reason:
         hint_parts.append(f"anomaly={merged.vision_anomaly_reason[:80]}")

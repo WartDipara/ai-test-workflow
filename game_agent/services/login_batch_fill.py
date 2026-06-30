@@ -101,9 +101,9 @@ def fill_login_at_coords(
     screen_width: int,
     screen_height: int,
     submit_via_enter: bool = False,
+    adb: Any | None = None,
 ) -> FillLoginAtCoordsResult:
     """填账号 → Enter 跳密码 → 填密码；提交由 submit_login_after_password 负责。"""
-    del password_xy
     settle = min(executor.credential_fill_settle_s, 0.3)
     ok, message = fill_login_with_enter_flow(
         serial,
@@ -114,6 +114,8 @@ def fill_login_at_coords(
         height=screen_height,
         settle_s=settle,
         submit_via_enter=submit_via_enter,
+        adb=adb,
+        password_xy=password_xy,
     )
     return FillLoginAtCoordsResult(ok=ok, message=message)
 
@@ -131,11 +133,14 @@ def verify_login_with_ocr(
     from game_agent.services.login_secure_keyboard import (
         is_login_secure_keyboard_blackout,
     )
+    from game_agent.utils.screen_coord import resolve_screen_coord_space
 
     sw, sh = screen_width, screen_height
     ts = datetime.now().strftime("%H%M%S_%f")
     shot = artifact_root / f"{tag}_{ts}.png"
     adb.screencap_png(shot)
+    space = resolve_screen_coord_space(adb, shot)
+    sw, sh = space.tap_w, space.tap_h
     summary, bboxes = run_ocr_frame(
         shot, device_w=sw, device_h=sh, worker_key=adb.device_serial,
     )
@@ -147,6 +152,8 @@ def verify_login_with_ocr(
         ts2 = datetime.now().strftime("%H%M%S_%f")
         shot = artifact_root / f"{tag}_after_dismiss_{ts2}.png"
         adb.screencap_png(shot)
+        space = resolve_screen_coord_space(adb, shot)
+        sw, sh = space.tap_w, space.tap_h
         summary, bboxes = run_ocr_frame(
             shot, device_w=sw, device_h=sh, worker_key=adb.device_serial,
         )
@@ -160,6 +167,8 @@ def verify_login_with_ocr(
             ts3 = datetime.now().strftime("%H%M%S_%f")
             shot = artifact_root / f"{tag}_after_keyboard_{ts3}.png"
             adb.screencap_png(shot)
+            space = resolve_screen_coord_space(adb, shot)
+            sw, sh = space.tap_w, space.tap_h
             summary, bboxes = run_ocr_frame(
                 shot, device_w=sw, device_h=sh, worker_key=adb.device_serial,
             )
@@ -209,16 +218,20 @@ def atomic_login_fill_and_submit(
     fill_result = fill_login_at_coords(
         serial,
         account_xy=targets.account_xy,
-        password_xy=None,
+        password_xy=targets.password_xy,
         username=username,
         password=password,
         executor=executor,
         screen_width=sw,
         screen_height=sh,
         submit_via_enter=False,
+        adb=adb,
     )
     parts.append(fill_result.message)
-    logger.info("[atomic_login] fill: %s", fill_result.message)
+    logger.info(
+        "[atomic_login] fill: %s",
+        fill_result.message.replace("\n", " | ")[:500],
+    )
     if not fill_result.ok:
         return AtomicLoginResult(
             ok=False,

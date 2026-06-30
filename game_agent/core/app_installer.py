@@ -39,7 +39,7 @@ class CoreAppInstaller:
         if prepared.skip_install:
             return InstallResult(ok=True, message="Install skipped by plugin", skipped=True)
         if pkg and self._adb.is_package_installed(pkg):
-            logger.info("[CoreInstaller] 设备已安装 %s，跳过 adb install", pkg)
+            logger.info("[CoreInstaller] %s already on device, skip adb install", pkg)
             return InstallResult(ok=True, message=f"Already installed: {pkg}", skipped=True)
         if not prepared.install_apk.is_file():
             return InstallResult(

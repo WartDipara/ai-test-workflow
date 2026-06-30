@@ -90,7 +90,7 @@ class RunAuditLogger:
             handler.flush()
             handler.close()
         except OSError as e:
-            logger.debug("关闭 process.log handler 时忽略: %s", e)
+            logger.debug("Ignored error closing process.log handler: %s", e)
         if handler in root.handlers:
             root.removeHandler(handler)
         self._process_log_handler = None
@@ -213,7 +213,7 @@ class RunAuditLogger:
         try:
             bundle_path.write_text(body, encoding="utf-8")
         except OSError as e:
-            logger.warning("写入 transcript 失败: %s", e)
+            logger.warning("Failed to write transcript: %s", e)
         self.log_user_prompt(phase, round_id, user_parts)
         self.log_llm_messages(phase, round_id, new_messages)
 
@@ -249,7 +249,7 @@ class RunAuditLogger:
             with self._jsonl_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except OSError as e:
-            logger.warning("写入 audit jsonl 失败: %s", e)
+            logger.warning("Failed to write audit jsonl: %s", e)
             return
         self._event_count += 1
         self._index["events"] = self._event_count
@@ -264,7 +264,7 @@ class RunAuditLogger:
             with self._md_path.open("a", encoding="utf-8") as f:
                 f.write(text)
         except OSError as e:
-            logger.warning("写入 ai_trace.md 失败: %s", e)
+            logger.warning("Failed to write ai_trace.md: %s", e)
 
     def _persist_index(self) -> None:
         if not self.enabled:
@@ -273,7 +273,7 @@ class RunAuditLogger:
         try:
             path.write_text(json.dumps(self._index, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError as e:
-            logger.warning("写入 audit index 失败: %s", e)
+            logger.warning("Failed to write audit index: %s", e)
 
 
 def _now_iso() -> str:

@@ -4,7 +4,6 @@ from game_agent.external_services.base import (
     ExternalEvidence,
     ExternalService,
     PreparedApp,
-    RetryDecision,
 )
 from game_agent.external_services.context import ServiceContext
 
@@ -13,7 +12,6 @@ __all__ = [
     "ExternalService",
     "ExternalServiceManager",
     "PreparedApp",
-    "RetryDecision",
     "ServiceContext",
 ]
 

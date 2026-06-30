@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from game_agent.utils.gameturbo_bootstrap import parse_gid_from_apk_name
+from game_agent.core.apk_staging import parse_gid_from_apk_name
 
 
 def test_parse_gid_from_apk_name_ok() -> None:

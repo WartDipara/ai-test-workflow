@@ -63,7 +63,7 @@ class TaskRuntime:
 
     def require_install_apk(self) -> Path:
         if self.install_apk is None or not self.install_apk.is_file():
-            raise RuntimeError("TaskRuntime 缺少有效的 install_apk")
+            raise RuntimeError("TaskRuntime missing valid install_apk")
         return self.install_apk.resolve()
 
     @property
@@ -80,15 +80,15 @@ class TaskRuntime:
 
     def require_identity(self) -> None:
         if not self.package_name.strip():
-            raise RuntimeError("TaskRuntime 缺少 package_name（需先完成 APK 预处理）")
+            raise RuntimeError("TaskRuntime missing package_name (run APK preprocess first)")
         if not self.launch_activity.strip():
-            raise RuntimeError("TaskRuntime 缺少 launch_activity（需先完成 APK 预处理）")
+            raise RuntimeError("TaskRuntime missing launch_activity (run APK preprocess first)")
 
     def require_gameturbo(self) -> None:
         if not self.gid.strip():
-            raise RuntimeError("TaskRuntime 缺少 gid")
+            raise RuntimeError("TaskRuntime missing gid")
         if self.game_config_path is None or not self.game_config_path.is_file():
-            raise RuntimeError("TaskRuntime 缺少有效的 game_config_path")
+            raise RuntimeError("TaskRuntime missing valid game_config_path")
 
 
 class TaskRuntimeRegistry:

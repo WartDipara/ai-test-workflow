@@ -112,6 +112,21 @@ def test_route_server_after_login() -> None:
     assert route_next(state) == "check_server_selector"
 
 
+def test_route_tap_enter_when_server_check_disabled() -> None:
+    state = _state(
+        facts=LaunchFacts(
+            server_slot_visible=True,
+            enter_cta_visible=True,
+            enter_cta_xy=(400, 800),
+        ),
+        login_done=True,
+        privacy_checked=True,
+        server_checked=True,
+        server_selector_check_enabled=False,
+    )
+    assert route_next(state) == "tap_enter_game"
+
+
 def test_route_tap_enter_when_ready() -> None:
     state = _state(
         facts=LaunchFacts(

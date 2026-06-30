@@ -116,6 +116,15 @@ def test_infer_blocked_stage_resource_download_from_ui_stage() -> None:
     assert infer_blocked_stage(reason=reason, ui_stage="resource_download") == "resource_download"
 
 
+def test_infer_blocked_stage_traditional_chinese() -> None:
+    assert infer_blocked_stage(reason="OCR 選服列表", ui_stage="") == "server_select"
+    assert infer_blocked_stage(reason="登入密碼", ui_stage="") == "login"
+
+
+def test_infer_blocked_stage_english_blob() -> None:
+    assert infer_blocked_stage(reason="server select dialog", ui_stage="") == "server_select"
+
+
 def test_observer_fatal_message_includes_ui_stage() -> None:
     msg = format_confirmed_network_anomaly(
         log_reason="log hit",
@@ -173,6 +182,10 @@ def test_network_anomaly_ocr_poll_only_frequent_for_download_stages(tmp_path: Pa
     assert coord._should_run_ocr_poll("character_creation") is False
     coord._last_passive_ocr_monotonic -= 31.0
     assert coord._should_run_ocr_poll("character_creation") is True
+
+    coord._last_passive_ocr_monotonic -= 16.0
+    assert coord._should_run_ocr_poll("unknown") is True
+    assert coord._should_run_ocr_poll("unknown") is False
 
 
 def test_tail_gameturbo_log_lines(tmp_path) -> None:

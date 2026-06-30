@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from pathlib import Path
 
@@ -56,6 +57,17 @@ def test_claim_next_is_atomic(tmp_path: Path) -> None:
     assert len(claimed) == 3
     indexes = sorted(int(item.split(":")[1]) for item in claimed)
     assert indexes == [0, 1, 2]
+
+
+def test_task_queue_lock_clears_stale_holder(tmp_path: Path, monkeypatch) -> None:
+    lock_path = tmp_path / ".task_queue.lock"
+    lock_path.write_text("999999", encoding="ascii")
+    monkeypatch.setattr(
+        "game_agent.controllers.task_queue._process_alive",
+        lambda pid: False,
+    )
+    with TaskQueueLock(lock_path):
+        assert lock_path.read_text(encoding="ascii") == str(os.getpid())
 
 
 def test_task_queue_lock_exclusive(tmp_path: Path) -> None:

@@ -42,7 +42,7 @@ class XiaomiInstallMonitor(BaseInstallMonitor):
             d = u2.connect(serial) if serial else u2.connect()
             d.implicitly_wait(2.0)
         except Exception as e:
-            logger.warning("uiautomator2 连接失败，回退 OCR+adb tap: %s", e)
+            logger.warning("uiautomator2 connect failed, fallback OCR+adb tap: %s", e)
             self.record_error(f"u2_connect_failed: {e}")
             self._monitor_fallback(adb, stop_event, shot_dir, poll_interval_s)
             return
@@ -53,7 +53,7 @@ class XiaomiInstallMonitor(BaseInstallMonitor):
             if clicked:
                 self.record_click()
             else:
-                logger.debug("install monitor 第 %d 轮: 未检测到 Install 按钮", self.result.polls)
+                logger.debug("install monitor poll %d: no Install button", self.result.polls)
             stop_event.wait(poll_interval_s)
 
         logger.info(
@@ -68,10 +68,10 @@ class XiaomiInstallMonitor(BaseInstallMonitor):
                 btn = d(text=text)
                 if btn.exists(timeout=0.5):
                     btn.click()
-                    logger.info("install monitor: u2 已点击 %r", text)
+                    logger.info("install monitor: u2 tapped %r", text)
                     return True
             except Exception as e:
-                logger.debug("install monitor u2 查找 %r 异常: %s", text, e)
+                logger.debug("install monitor u2 find %r error: %s", text, e)
                 self.record_error(f"u2_click_{text}: {e}")
         return False
 
@@ -82,7 +82,7 @@ class XiaomiInstallMonitor(BaseInstallMonitor):
         shot_dir: Path,
         poll_interval_s: float = 1.0,
     ) -> None:
-        logger.info("install monitor 使用回退方案: OCR+adb tap")
+        logger.info("install monitor using fallback: OCR+adb tap")
         while not stop_event.is_set():
             self.record_poll()
             shot = shot_dir / f"install_{self.result.polls}.png"

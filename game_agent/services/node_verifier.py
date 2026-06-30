@@ -8,28 +8,22 @@ from dataclasses import dataclass
 from game_agent.models.screen_interpretation import ScreenInterpretation
 from game_agent.services.privacy_gate import ocr_has_privacy_context, privacy_modal_still_open
 
-_PRIVACY_TERMS_RE = re.compile(
-    r"个人信息保护|隐私政策|用户协议|许可及服务|适龄提示|protect.*privacy|privacy\s*policy",
-    re.IGNORECASE,
-)
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
-_SUB_ACCOUNT_PANEL_RE = re.compile(
-    r"sub-?account|小号|子账号|选择小号|选择角色|last\s*login|上次登录|最近登录",
-    re.IGNORECASE,
+_PRIVACY_TERMS_RE = compile_lexicon_pattern(Concept.PRIVACY, Concept.PRIVACY_TERMS)
+_SUB_ACCOUNT_PANEL_RE = compile_lexicon_pattern(Concept.SUB_ACCOUNT)
+_SERVER_SELECT_RE = compile_lexicon_pattern(
+    Concept.SERVER_SELECT,
+    Concept.SERVER_HINT,
+    Concept.ENTER_GAME,
 )
-_SERVER_SELECT_RE = re.compile(
-    r"选服|服务器|server|踏入|进入游戏|enter\s*game|click\s*to\s*select",
-    re.IGNORECASE,
+_LOGIN_FORM_RE = compile_lexicon_pattern(
+    Concept.LOGIN,
+    Concept.PASSWORD_LABEL,
+    Concept.ACCOUNT_LABEL,
 )
-_LOGIN_FORM_RE = re.compile(
-    r"登录密码|login\s*password|账号|account.*phone|log\s*in",
-    re.IGNORECASE,
-)
-_ANNOUNCEMENT_RE = re.compile(
-    r"公告|announcement|Notice|日常通知|活动",
-    re.IGNORECASE,
-)
-_CHARACTER_CREATION_RE = re.compile(r"创角|创建角色|选择职业|class|avatar", re.IGNORECASE)
+_ANNOUNCEMENT_RE = compile_lexicon_pattern(Concept.ANNOUNCEMENT, Concept.OVERLAY)
+_CHARACTER_CREATION_RE = compile_lexicon_pattern(Concept.CHARACTER_CREATION, Concept.CHAR_SLOT)
 
 
 @dataclass(frozen=True, slots=True)

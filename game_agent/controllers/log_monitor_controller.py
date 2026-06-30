@@ -38,7 +38,7 @@ class LogMonitor:
         skip_initial_bootstrap: bool = False,
     ) -> str | None:
         """兼容旧接口名：仅采集至 stop；流异常断开时返回基础设施错误（非日志判死）。"""
-        logger.info("[LogMonitor] 开始采集 %s 日志（运行期不分析）...", self.collector.service_name)
+        logger.info("[LogMonitor] Collecting %s logs (no runtime analysis)...", self.collector.service_name)
         log_path = self.collector.log_path(self.artifact_root)
         if not skip_initial_bootstrap:
             self.collector.bootstrap_log(self.adb, self.artifact_root)
@@ -48,7 +48,7 @@ class LogMonitor:
                 self._restart_requested.clear()
                 log_path = self.collector.log_path(self.artifact_root)
                 seen_keys = self.collector.read_dedup_keys(log_path)
-                logger.info("[LogMonitor] 会话重启后恢复 logcat 流")
+                logger.info("[LogMonitor] Resumed logcat after session restart")
 
             stream_err = await self._run_one_stream(
                 stop_event,
@@ -77,7 +77,7 @@ class LogMonitor:
         seen_keys: set[str],
     ) -> str | None:
         cmd = self.adb._base() + ["logcat", "-s", self.collector.logcat_tag]
-        logger.info("[LogMonitor] 监听命令: %s", " ".join(cmd))
+        logger.info("[LogMonitor] Watch cmd: %s", " ".join(cmd))
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,

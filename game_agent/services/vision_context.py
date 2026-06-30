@@ -33,6 +33,6 @@ async def summarize_monitor_screenshots(
             )
             blocks.append(f"### {shot.name}\n{summary}")
         except Exception as e:
-            logger.warning("截图多模态摘要失败 %s: %s", shot.name, e)
+            logger.warning("Screenshot multimodal summary failed %s: %s", shot.name, e)
             blocks.append(f"### {shot.name}\n(vision summary failed: {e})")
     return "\n".join(blocks) + "\n"

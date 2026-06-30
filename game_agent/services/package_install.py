@@ -115,7 +115,7 @@ def verify_package_on_device(
     if not pkg:
         raise RuntimeError("verify_package_on_device: empty package_name")
     if adb.is_package_installed(pkg):
-        logger.info("安装校验: 设备已安装 %s", pkg)
+        logger.info("Install verify: %s on device", pkg)
         return
     detail = adb.shell(f"pm path {pkg}", timeout=15.0).strip() or "(empty)"
     raise RuntimeError(

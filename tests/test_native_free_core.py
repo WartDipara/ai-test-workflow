@@ -34,10 +34,6 @@ _CORE_SCAN_ROOTS = (
 
 _FORBIDDEN_IMPORT_MODULES = (
     "game_agent.external_services.gameturbo",
-    "game_agent.utils.gameturbo_bootstrap",
-    "game_agent.utils.gameturbo_config_apply",
-    "game_agent.utils.gameturbo_log_domain_extract",
-    "game_agent.utils.gameturbo_log_skill",
     "game_agent.services.gameturbo_config_retry",
     "game_agent.services.gameturbo_log",
     "game_agent.services.gameturbo_log_anomaly",
@@ -58,10 +54,7 @@ def _iter_core_python_files() -> list[Path]:
             files.append(root)
             continue
         files.extend(root.rglob("*.py"))
-    excluded = (
-        "external_services/gameturbo",
-        "utils/gameturbo_bootstrap.py",
-    )
+    excluded = ("external_services/gameturbo",)
     return [
         path
         for path in files

@@ -121,13 +121,22 @@ async def probe_server_connectivity(
     ocr_summary: str,
     round_id: int = 0,
     bboxes: list[OcrBbox] | None = None,
+    attempt_context=None,
 ) -> ServerConnectivityProbe:
-    vision = VisionWorker(llm_cfg)
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
     raw = await vision.probe_server_connectivity(
         screenshot_path=screenshot_path,
         ocr_summary=ocr_summary,
         round_id=round_id,
     )
+    if discard_if_stale(work_gen, where="server_connectivity_probe", ctx=attempt_context):
+        return ServerConnectivityProbe(
+            reason="stale_session_discard",
+            confidence=0.0,
+        )
     probe = parse_server_connectivity_probe(raw)
     if bboxes:
         probe = merge_ocr_server_error(probe, bboxes)

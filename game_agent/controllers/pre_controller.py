@@ -37,7 +37,7 @@ class PreprocessingController:
             if resolved is None:
                 return PreprocessResult(
                     ok=False,
-                    message=f"APK 下载失败: {apk_url}",
+                    message=f"APK download failed: {apk_url}",
                 )
         else:
             # 无 URL：从任务 cache（或全局 apk_cache）读取已有 APK

@@ -53,27 +53,26 @@ def _decode_output(data: bytes) -> str:
             return data.decode("utf-8", errors="replace")
 
 
-def _find_bash() -> str:
+def _find_bash(bash_path: str | None = None) -> str:
+    custom = (bash_path or "").strip()
+    if custom:
+        candidate = Path(custom)
+        if candidate.is_file():
+            return str(candidate.resolve())
     found = shutil.which("bash")
     if found:
         return found
     candidates = [
         Path("C:/Program Files/Git/bin/bash.exe"),
         Path("C:/Program Files/Git/usr/bin/bash.exe"),
+        Path("C:/Program Files (x86)/Git/bin/bash.exe"),
     ]
     for candidate in candidates:
         if candidate.is_file():
             return str(candidate)
+    if custom:
+        raise RuntimeError(f"Configured bash_path not found: {custom}")
     return "bash"
-
-
-def verify_package_on_device(
-    package_name: str,
-    *,
-    serial: str | None = None,
-) -> None:
-    """Deprecated wrapper — prefer package_install.verify_package_on_device(adb, pkg)."""
-    _verify_package_on_device(AdbService(serial), package_name)
 
 
 def run_deploy(
@@ -87,12 +86,13 @@ def run_deploy(
     install_monitor: BaseInstallMonitor | None = None,
     output_apk: str | None = None,
     merged_config_output: Path | None = None,
+    bash_path: str | None = None,
 ) -> DeployResult:
     """Run GameTurbo android deploy in Git Bash and wait for it to finish."""
     if not DEPLOY_SCRIPT.is_file():
-        raise RuntimeError(f"找不到 deploy.sh: {DEPLOY_SCRIPT}")
+        raise RuntimeError(f"deploy.sh not found: {DEPLOY_SCRIPT}")
 
-    cmd = [_find_bash(), "-l", "./deploy.sh", "-g", gid, "-n"]
+    cmd = [_find_bash(bash_path), "-l", "./deploy.sh", "-g", gid, "-n"]
     if serial:
         cmd.extend(["-d", serial])
 
@@ -111,7 +111,7 @@ def run_deploy(
         cmd.extend(["-m", merged_deploy_path.as_posix()])
 
     log_path = (artifact_root / log_filename) if artifact_root else None
-    logger.info("执行 GameTurbo deploy: %s", " ".join(cmd))
+    logger.info("Running GameTurbo deploy: %s", " ".join(cmd))
 
     adb = AdbService(serial)
     monitor_session = InstallMonitorSession.start(
@@ -222,7 +222,7 @@ def run_deploy(
     if merged_deploy_path is not None:
         merged_final = finalize_merged_config_after_deploy(gid, merged_deploy_path)
 
-    logger.info("GameTurbo deploy 完成 (gid=%s)", gid)
+    logger.info("GameTurbo deploy done (gid=%s)", gid)
     return DeployResult(
         command=cmd,
         cwd=ANDROID_DIR,

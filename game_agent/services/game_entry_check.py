@@ -61,6 +61,7 @@ async def run_in_game_check_on_capture(
     session_index: int = 1,
     confirm_needed: int | None = None,
     provisional: bool = False,
+    attempt_context=None,
 ) -> InGameCheckResult:
     """对已有截图+OCR 做多模态进游戏判定；provisional 时不写 run_state 终局字段。"""
     game_pkg = cfg.game.package_name
@@ -70,7 +71,7 @@ async def run_in_game_check_on_capture(
     if llm_cfg is None:
         body = format_vision_tool_response(
             error_code=VisionToolErrorCode.NO_MULTIMODAL,
-            error_message="llm_multimodal 未配置，check_in_game 需要视觉模型",
+            error_message="llm_multimodal not configured (check_in_game)",
         )
         return InGameCheckResult(
             judgment=None,
@@ -83,7 +84,10 @@ async def run_in_game_check_on_capture(
         )
 
     ocr_creation_hits = match_character_creation_ocr(ocr_summary)
-    vision = VisionWorker(llm_cfg)
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
     try:
         judgment = await vision.judge_in_game_main(
             screenshot_path=shot_path,
@@ -94,7 +98,7 @@ async def run_in_game_check_on_capture(
             sessions_restarted=sessions_restarted,
         )
     except Exception as e:
-        logger.exception("check_in_game 多模态 API 失败")
+        logger.exception("check_in_game multimodal API failed")
         body = format_vision_tool_response(
             error_code=VisionToolErrorCode.API_ERROR,
             error_message=str(e)[:800],
@@ -105,6 +109,20 @@ async def run_in_game_check_on_capture(
             ocr_creation_hits=ocr_creation_hits,
             screenshot_path=shot_path,
             streak=0,
+            confirm_needed=confirm_need,
+            confirmed=False,
+            message=body,
+        )
+    if discard_if_stale(work_gen, where="check_in_game", ctx=attempt_context):
+        body = format_vision_tool_response(
+            error_code=VisionToolErrorCode.API_ERROR,
+            error_message="stale_session_discard",
+        )
+        return InGameCheckResult(
+            judgment=None,
+            ocr_creation_hits=ocr_creation_hits,
+            screenshot_path=shot_path,
+            streak=run_state.in_game_confirm_streak,
             confirm_needed=confirm_need,
             confirmed=False,
             message=body,
@@ -219,6 +237,7 @@ async def run_in_game_check(
     sessions_restarted: int = 0,
     session_index: int = 1,
     provisional: bool = False,
+    attempt_context=None,
 ) -> InGameCheckResult:
     """主脑工具：截图 + OCR + 多模态进游戏判定；更新 confirm streak。"""
     confirm_need = cfg.game.main_screen_confirm_rounds
@@ -226,7 +245,7 @@ async def run_in_game_check(
     if llm_cfg is None:
         body = format_vision_tool_response(
             error_code=VisionToolErrorCode.NO_MULTIMODAL,
-            error_message="llm_multimodal 未配置，check_in_game 需要视觉模型",
+            error_message="llm_multimodal not configured (check_in_game)",
         )
         return InGameCheckResult(
             judgment=None,
@@ -272,4 +291,5 @@ async def run_in_game_check(
         sessions_restarted=sessions_restarted,
         session_index=session_index,
         provisional=provisional,
+        attempt_context=attempt_context,
     )

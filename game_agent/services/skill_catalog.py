@@ -7,12 +7,11 @@ SKILLS_INDEX_PATH = SKILLS_DIR / "SKILL.md"
 
 REPO_SKILL_FILES: dict[str, str] = {
     "game_launch_ocr": "game_launch_ocr_skill.md",
-    "gameturbo_log_baseline": "gameturbo_log_baseline_skill.md",
+    "plugin_accel_log": "plugin_accel_log_skill.md",
 }
 
 _ALIASES: dict[str, str] = {
     "game-launch-ocr": "game_launch_ocr",
-    "gameturbo-log-baseline": "gameturbo_log_baseline",
     "login": "game_launch_ocr",
     "login_flow": "game_launch_ocr",
 }

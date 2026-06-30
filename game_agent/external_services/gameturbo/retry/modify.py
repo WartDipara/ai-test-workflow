@@ -75,12 +75,12 @@ class RetryConfigHandler:
             await self._run_impl(retry_count, reason)
 
     async def _run_impl(self, retry_count: int, reason: str) -> None:
-        logger.info("[RetryConfig] 配置与重试 (第 %d 次): %s", retry_count, reason[:200])
+        logger.info("[RetryConfig] Config retry (attempt %d): %s", retry_count, reason[:200])
         runtime = self.app_config.runtime
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,
-                "进入配置与重试",
+                "Config retry start",
                 reason=reason[:2000],
                 gid=runtime.gid,
                 game_config_path=str(runtime.game_config_path or ""),
@@ -105,7 +105,7 @@ class RetryConfigHandler:
             if self.audit is not None:
                 self.audit.log_phase(
                     PipelinePhase.MODIFY.value,
-                    "GameTurbo 配置备份/恢复",
+                    "GameTurbo config backup/restore",
                     failed_attempt=retry_count,
                     next_attempt=retry_count + 1,
                     restored_from=restored_from or "",
@@ -139,7 +139,7 @@ class RetryConfigHandler:
             apply_result = apply_gameturbo_config_patch(game_config_path, patch)
             rec.ok(changed=apply_result.changed, summary=apply_result.summary)
 
-        logger.info("GameTurbo 配置补丁应用结果: %s", apply_result.summary or ["无变更"])
+        logger.info("GameTurbo config patch apply: %s", apply_result.summary or ["no changes"])
         self._require_config_changed(apply_result, patch)
 
         if deliverable is not None and backup_before is not None:
@@ -157,7 +157,7 @@ class RetryConfigHandler:
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,
-                "GameTurbo 配置补丁已处理",
+                "GameTurbo config patch applied",
                 changed=apply_result.changed,
                 patch=patch.model_dump(mode="json"),
                 summary=apply_result.summary,
@@ -182,19 +182,19 @@ class RetryConfigHandler:
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,
-                "deploy.sh 已执行",
+                "deploy.sh finished",
                 gid=gid,
                 deploy_log=str(deploy_result.log_path or ""),
                 output_apk=str(apk_path),
             )
 
         if self.audit is not None:
-            self.audit.log_phase(PipelinePhase.MODIFY.value, "配置与重试阶段完成")
+            self.audit.log_phase(PipelinePhase.MODIFY.value, "Config retry stage done")
 
     def _require_domain_analysis_json(self, local_log_path: Path) -> dict:
         if not self.artifact_root:
             raise ConfigPatchGenerationError(
-                "缺少 artifact_root，无法生成 domain_region_analysis.json",
+                "missing artifact_root, cannot build domain_region_analysis.json",
                 stage="domain_analysis",
             )
         json_path = self.artifact_root / DEFAULT_OUTPUT_NAME
@@ -208,7 +208,7 @@ class RetryConfigHandler:
             analysis_log = _nonempty_log_path(local_log_path)
         if analysis_log is None:
             raise ConfigPatchGenerationError(
-                "缺少有效 gameturbo.log，无法执行域名/区域分析",
+                "missing valid gameturbo.log for domain/region analysis",
                 stage="domain_analysis",
             )
         try:
@@ -224,9 +224,9 @@ class RetryConfigHandler:
                 rec.ok(domain_count=result.domain_count)
             return result.to_json_dict()
         except Exception as e:
-            logger.error("域名/区域分析失败: %s", e)
+            logger.error("Domain/region analysis failed: %s", e)
             raise ConfigPatchGenerationError(
-                f"域名/区域分析失败，无法进入 Modify: {e}",
+                f"Domain/region analysis failed, cannot enter Modify: {e}",
                 stage="domain_analysis",
             ) from e
 
@@ -234,9 +234,9 @@ class RetryConfigHandler:
         if _patch_has_actionable_changes(patch):
             return
         analysis = (patch.analysis or "").strip()
-        summary = analysis[:1500] if analysis else "AI 未说明原因"
+        summary = analysis[:1500] if analysis else "AI gave no reason"
         raise ConfigPatchRejectedError(
-            "AI 分析认为当前日志/域名下无可安全追加的配置变更（direct_patterns/port_rules 均为空）",
+            "AI found no safe config changes for current log/domains (direct_patterns/port_rules empty)",
             analysis=summary,
         )
 
@@ -248,7 +248,7 @@ class RetryConfigHandler:
         if apply_result.changed:
             return
         raise ConfigPatchGenerationError(
-            "配置补丁应用后无任何变更（可能全部为重复项或无效规则），"
+            "Config patch applied with no changes (duplicates or invalid rules), "
             f"summary={apply_result.summary or []}",
             stage="noop_patch",
         )
@@ -277,7 +277,7 @@ class RetryConfigHandler:
             except ConfigPatchLlmError as exc:
                 last_llm_error = exc
                 logger.warning(
-                    "Modify AI 请求失败 (%d/%d): %s",
+                    "Modify AI request failed (%d/%d): %s",
                     attempt,
                     max_attempts,
                     exc,
@@ -285,7 +285,7 @@ class RetryConfigHandler:
                 if self.audit is not None:
                     self.audit.log_phase(
                         PipelinePhase.MODIFY.value,
-                        "AI 配置补丁请求失败",
+                        "AI config patch request failed",
                         attempt=attempt,
                         max_attempts=max_attempts,
                         error=str(exc)[:800],
@@ -293,19 +293,19 @@ class RetryConfigHandler:
                 if attempt < max_attempts:
                     continue
                 raise ConfigPatchLlmError(
-                    f"Modify 阶段 AI 请求失败，已重试 {max_attempts} 次仍无法生成配置补丁: {exc}",
+                    f"Modify stage AI request failed after {max_attempts} attempts: {exc}",
                     attempt=max_attempts,
                     max_attempts=max_attempts,
                 ) from exc
             else:
                 if attempt > 1:
-                    logger.info("Modify AI 请求在第 %d 次尝试后成功", attempt)
+                    logger.info("Modify AI request succeeded on attempt %d", attempt)
                 return patch
 
         if last_llm_error is not None:
             raise last_llm_error
         raise ConfigPatchLlmError(
-            "Modify 阶段 AI 请求失败",
+            "Modify stage AI request failed",
             attempt=max_attempts,
             max_attempts=max_attempts,
         )
@@ -320,7 +320,7 @@ class RetryConfigHandler:
         failed_attempt: int,
     ) -> GameTurboConfigPatch:
         cfg = self.app_config
-        logger.info("AI 二次日志分析并生成配置补丁...")
+        logger.info("AI log re-analysis for config patch...")
         agent = AnalysisAgent(cfg.llm, deepseek=cfg.deepseek)
         log_content = ""
         if local_log_path.is_file():
@@ -352,7 +352,7 @@ class RetryConfigHandler:
 
             current_config = json.loads(game_config_path.read_text(encoding="utf-8"))
         except Exception as e:
-            raise RuntimeError(f"读取 GameTurbo 配置失败: {game_config_path}: {e}") from e
+            raise RuntimeError(f"Failed to read GameTurbo config: {game_config_path}: {e}") from e
 
         patch = await agent.analyze_and_propose_patch(
             anomaly_reason=reason,
@@ -363,11 +363,11 @@ class RetryConfigHandler:
             blocked_stage_hint=self.blocked_stage_hint,
             prior_patch_restored=bool(self.task_deliverable_root and failed_attempt >= 1),
         )
-        logger.info("AI 配置补丁:\n%s", patch.model_dump_json(indent=2))
+        logger.info("AI config patch:\n%s", patch.model_dump_json(indent=2))
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.MODIFY.value,
-                "AI 配置补丁生成完成",
+                "AI config patch generated",
                 analysis=patch.analysis[:4000],
                 patch=patch.model_dump(mode="json"),
             )

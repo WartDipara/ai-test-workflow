@@ -9,16 +9,33 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_EDIT_TEXT_CLASS_PATTERN = ".*(EditText|AutoCompleteTextView).*"
+
+_MIN_PASSWORD_BELOW_USERNAME_PX = 48
+_SAME_FIELD_CENTER_PX = 55
+
+
+def _login_fill_log(event: str, **fields: object) -> None:
+    """诊断日志：fill_path / edits_count 等，便于复盘 WebView 登录填表路径。"""
+    parts = [f"[LoginFill] {event}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    logger.info(" ".join(parts))
+
+
+def _format_xy(xy: tuple[int, int] | None) -> str:
+    if xy is None:
+        return "-"
+    return f"({xy[0]},{xy[1]})"
+
+
 _device_lock = threading.Lock()
 _devices: dict[str, Any] = {}
 
 _last_username_center: dict[str, tuple[int, int]] = {}
 _last_password_center: dict[str, tuple[int, int]] = {}
-
-_EDIT_TEXT_CLASS_PATTERN = ".*(EditText|AutoCompleteTextView).*"
-
-_MIN_PASSWORD_BELOW_USERNAME_PX = 48
-_SAME_FIELD_CENTER_PX = 55
 
 
 def get_last_password_center_y(serial: str | None) -> int | None:
@@ -31,8 +48,8 @@ def _connect_u2(serial: str | None) -> Any:
         import uiautomator2 as u2
     except ImportError as e:
         raise RuntimeError(
-            "未安装 uiautomator2。请执行: pip install uiautomator2，"
-            "并在设备上运行一次: python -m uiautomator2 init"
+            "uiautomator2 not installed. Run: pip install uiautomator2, "
+            "then on device: python -m uiautomator2 init"
         ) from e
 
     key = serial or "__default__"
@@ -40,7 +57,7 @@ def _connect_u2(serial: str | None) -> Any:
         cached = _devices.get(key)
         if cached is not None:
             return cached
-        logger.info("uiautomator2 连接设备 serial=%s", serial or "(default)")
+        logger.info("uiautomator2 connected serial=%s", serial or "(default)")
         device = u2.connect(serial) if serial else u2.connect()
         _devices[key] = device
         return device
@@ -426,6 +443,366 @@ def press_enter_key(device: Any, *, settle_s: float = 0.25) -> str:
     return _press_enter_submit(device, settle_s)
 
 
+def fill_login_with_ocr_tap_fallback(
+    adb: Any,
+    *,
+    serial: str | None,
+    account_xy: tuple[int, int],
+    password_xy: tuple[int, int] | None,
+    username: str,
+    password: str,
+    width: int,
+    height: int,
+    settle_s: float = 0.35,
+) -> tuple[bool, str]:
+    """WebView 无 EditText 节点时：OCR 坐标 tap + u2 setText（adb 粘贴兜底）。"""
+    device = _connect_u2(serial)
+    edits_count = len(_enumerate_edits(device))
+    webview_no_edits = edits_count == 0
+    _login_fill_log(
+        "route",
+        fill_path="ocr-hybrid",
+        edits_count=edits_count,
+        account_xy=_format_xy(account_xy),
+        password_xy=_format_xy(password_xy),
+        screen=f"{width}x{height}",
+    )
+
+    ax, ay = account_xy
+    if not (0 <= ax < width and 0 <= ay < height):
+        return False, f"account coords ({ax},{ay}) outside {width}x{height}"
+
+    wait = max(0.15, min(float(settle_s), 0.6))
+    parts: list[str] = []
+    key = serial or "__default__"
+
+    ok_acc, acc_msg, acc_center = _fill_credential_at_ocr_coord(
+        adb,
+        serial,
+        ax,
+        ay,
+        username,
+        width=width,
+        height=height,
+        settle_s=wait,
+        field_label="username",
+        webview_no_edits=webview_no_edits,
+    )
+    parts.append(f"account: {acc_msg}")
+    if not ok_acc:
+        _login_fill_log("done", fill_path="ocr-hybrid", ok=False, stage="account")
+        return False, "fill_path=ocr-hybrid | " + " | ".join(parts)
+    if acc_center is not None:
+        _last_username_center[key] = acc_center
+
+    if password_xy is not None:
+        px, py = password_xy
+    else:
+        px, py = ax, ay + max(_MIN_PASSWORD_BELOW_USERNAME_PX, int(height * 0.10))
+    if not (0 <= px < width and 0 <= py < height):
+        return False, f"password coords ({px},{py}) outside {width}x{height}; " + " | ".join(parts)
+
+    time.sleep(wait)
+    ok_pwd, pwd_msg, pwd_center = _fill_credential_at_ocr_coord(
+        adb,
+        serial,
+        px,
+        py,
+        password,
+        width=width,
+        height=height,
+        settle_s=wait,
+        field_label="password",
+        username_center=_last_username_center.get(key),
+        webview_no_edits=webview_no_edits,
+    )
+    parts.append(f"password: {pwd_msg}")
+    if pwd_center is not None:
+        _last_password_center[key] = pwd_center
+    if not ok_pwd:
+        _login_fill_log("done", fill_path="ocr-hybrid", ok=False, stage="password")
+        return False, "fill_path=ocr-hybrid | " + " | ".join(parts)
+    _login_fill_log("done", fill_path="ocr-hybrid", ok=True)
+    return True, "fill_path=ocr-hybrid | " + " | ".join(parts)
+
+
+def _try_enable_fastinput_ime(device: Any) -> None:
+    try:
+        device.set_fastinput_ime(True)
+    except Exception as e:
+        logger.debug("set_fastinput_ime: %s", e)
+
+
+def _tap_at(adb: Any, device: Any, x: int, y: int, *, width: int, height: int, wait: float) -> str:
+    tap_msg = adb.tap(x, y, width=width, height=height)
+    time.sleep(wait)
+    try:
+        device.click(x, y)
+    except Exception as e:
+        logger.debug("u2 click (%s,%s): %s", x, y, e)
+    time.sleep(wait)
+    return tap_msg
+
+
+def _attempt_ime_send_keys(
+    adb: Any,
+    device: Any,
+    x: int,
+    y: int,
+    text: str,
+    *,
+    width: int,
+    height: int,
+    wait: float,
+    taps: int = 2,
+) -> tuple[bool, str]:
+    """WebView 无 EditText 节点时：聚焦后用 IME send_keys（内部多走剪贴板粘贴）。"""
+    tap_msg = ""
+    for _ in range(max(1, taps)):
+        tap_msg = adb.tap(x, y, width=width, height=height)
+        time.sleep(wait)
+        try:
+            device.click(x, y)
+        except Exception:
+            pass
+        time.sleep(wait)
+    _try_enable_fastinput_ime(device)
+    try:
+        device.send_keys(text)
+        return True, f"{tap_msg} ime-send_keys"
+    except Exception as e:
+        return False, f"{tap_msg} ime-send_keys failed: {e!s}"
+
+
+def _attempt_light_paste(
+    adb: Any,
+    device: Any,
+    x: int,
+    y: int,
+    text: str,
+    *,
+    width: int,
+    height: int,
+    wait: float,
+) -> tuple[bool, str]:
+    """点击聚焦后直接粘贴，不做大批量 DEL 清空（WebView 易被清焦点）。"""
+    tap_msg = _tap_at(adb, device, x, y, width=width, height=height, wait=wait)
+    adb.tap(x, y, width=width, height=height)
+    time.sleep(max(wait, 0.35))
+    paste_msg = adb.paste_text(text)
+    if "Pasted via clipboard" in paste_msg or "Typed via adb" in paste_msg:
+        return True, f"{tap_msg} light-paste: {paste_msg[:60]}"
+    return False, f"{tap_msg} light-paste failed: {paste_msg[:80]}"
+
+
+def _fill_credential_at_ocr_coord(
+    adb: Any,
+    serial: str | None,
+    x: int,
+    y: int,
+    text: str,
+    *,
+    width: int,
+    height: int,
+    settle_s: float,
+    field_label: str,
+    username_center: tuple[int, int] | None = None,
+    webview_no_edits: bool = False,
+) -> tuple[bool, str, tuple[int, int] | None]:
+    """点击 OCR 坐标后优先 u2 setText；WebView 分屏登录常无法 adb 粘贴。"""
+    wait = max(0.15, min(float(settle_s), 0.6))
+    device = _connect_u2(serial)
+    is_password = (field_label or "").strip().lower() in ("password", "pwd")
+
+    tap_offsets: list[tuple[int, int, str]] = [
+        (0, 0, "center"),
+        (100, 0, "right100"),
+        (180, 0, "right180"),
+        (0, 24, "down24"),
+        (120, 20, "right120-down20"),
+        (60, 12, "right60"),
+        (0, 48, "down48"),
+        (-50, 20, "left50"),
+    ]
+    last_msg = ""
+
+    for dx, dy, tag in tap_offsets:
+        tx, ty = x + dx, y + dy
+        if not (0 <= tx < width and 0 <= ty < height):
+            continue
+        tap_msg = _tap_at(adb, device, tx, ty, width=width, height=height, wait=wait)
+        adb.tap(tx, ty, width=width, height=height)
+        time.sleep(wait)
+
+        focused = _focused_editable(device)
+        if focused is not None:
+            fill_edit_text_u2(focused, device, text)
+            if _credential_fill_verified(focused, text, is_password=is_password):
+                fcx, fcy, _ = _node_center_distance(focused, tx, ty)
+                _login_fill_log(
+                    "field",
+                    field=field_label,
+                    method="u2-focused",
+                    offset=tag,
+                    tap=f"({tx},{ty})",
+                )
+                return True, f"{tap_msg} u2-focused/{tag}", (fcx, fcy)
+            last_msg = f"{tap_msg} focused-unverified/{tag}"
+
+        target, pick, cx, cy = _pick_credential_edit(
+            device,
+            tx,
+            ty,
+            field_label,
+            username_center=username_center,
+        )
+        if target is not None:
+            try:
+                target.click()
+            except Exception:
+                device.click(cx, cy)
+            time.sleep(wait)
+            active = _focused_editable(device) or target
+            fill_edit_text_u2(active, device, text)
+            if _credential_fill_verified(active, text, is_password=is_password):
+                _login_fill_log(
+                    "field",
+                    field=field_label,
+                    method=f"u2-{pick}",
+                    offset=tag,
+                    tap=f"({tx},{ty})",
+                )
+                return True, f"{tap_msg} u2-{pick}/{tag}", (cx, cy)
+            last_msg = f"{tap_msg} u2-{pick}-unverified/{tag}"
+
+        ime_ok, ime_msg = _attempt_ime_send_keys(
+            adb,
+            device,
+            tx,
+            ty,
+            text,
+            width=width,
+            height=height,
+            wait=wait,
+            taps=1,
+        )
+        if ime_ok:
+            focused_after = _focused_editable(device)
+            if focused_after is not None and _credential_fill_verified(
+                focused_after, text, is_password=is_password,
+            ):
+                fcx, fcy, _ = _node_center_distance(focused_after, tx, ty)
+                _login_fill_log(
+                    "field",
+                    field=field_label,
+                    method="ime-send_keys+verified",
+                    offset=tag,
+                    tap=f"({tx},{ty})",
+                )
+                return True, f"{ime_msg}/{tag}+verified", (fcx, fcy)
+            if webview_no_edits:
+                _login_fill_log(
+                    "field",
+                    field=field_label,
+                    method="ime-send_keys",
+                    offset=tag,
+                    tap=f"({tx},{ty})",
+                    note="webview_no_edits",
+                )
+                return True, f"{ime_msg}/{tag}", (tx, ty)
+
+        paste_ok, paste_msg = _attempt_light_paste(
+            adb,
+            device,
+            tx,
+            ty,
+            text,
+            width=width,
+            height=height,
+            wait=wait,
+        )
+        if paste_ok:
+            focused_after = _focused_editable(device)
+            if focused_after is not None and _credential_fill_verified(
+                focused_after, text, is_password=is_password,
+            ):
+                fcx, fcy, _ = _node_center_distance(focused_after, tx, ty)
+                _login_fill_log(
+                    "field",
+                    field=field_label,
+                    method="light-paste+verified",
+                    offset=tag,
+                    tap=f"({tx},{ty})",
+                )
+                return True, f"{paste_msg}/{tag}+verified", (fcx, fcy)
+            if webview_no_edits:
+                _login_fill_log(
+                    "field",
+                    field=field_label,
+                    method="light-paste",
+                    offset=tag,
+                    tap=f"({tx},{ty})",
+                    note="webview_no_edits",
+                )
+                return True, f"{paste_msg}/{tag}", (tx, ty)
+            last_msg = f"{paste_msg} unverified/{tag}"
+
+    ime_ok, ime_msg = _attempt_ime_send_keys(
+        adb, device, x, y, text, width=width, height=height, wait=wait, taps=3,
+    )
+    if ime_ok and webview_no_edits:
+        _login_fill_log(
+            "field",
+            field=field_label,
+            method="ime-send_keys-final",
+            tap=f"({x},{y})",
+        )
+        return True, ime_msg, (x, y)
+
+    paste_ok, paste_msg = _attempt_light_paste(
+        adb, device, x, y, text, width=width, height=height, wait=wait,
+    )
+    if paste_ok and webview_no_edits:
+        _login_fill_log(
+            "field",
+            field=field_label,
+            method="light-paste-final",
+            tap=f"({x},{y})",
+        )
+        return True, paste_msg, (x, y)
+
+    if last_msg:
+        _login_fill_log(
+            "field",
+            field=field_label,
+            method="all-failed",
+            tap=f"({x},{y})",
+        )
+        return False, f"{last_msg}; final: {paste_msg}", None
+    _login_fill_log(
+        "field",
+        field=field_label,
+        method="all-failed",
+        tap=f"({x},{y})",
+    )
+    return False, f"all methods failed; final: {paste_msg}", None
+
+
+def _credential_fill_verified(target: Any, expected: str, *, is_password: bool) -> bool:
+    actual = _read_editable_text(target)
+    if not actual:
+        return False
+    if is_password:
+        if actual == expected:
+            return True
+        if _is_masked_secret(actual) and len(actual) == len(expected):
+            return True
+        return len(actual) >= max(1, len(expected) // 2)
+    if actual == expected or actual.lower() == expected.lower():
+        return True
+    return len(actual) >= max(3, len(expected) // 2)
+
+
 def fill_login_with_enter_flow(
     serial: str | None,
     *,
@@ -436,6 +813,8 @@ def fill_login_with_enter_flow(
     height: int,
     settle_s: float = 0.25,
     submit_via_enter: bool = False,
+    adb: Any | None = None,
+    password_xy: tuple[int, int] | None = None,
 ) -> tuple[bool, str]:
     """
     标准登录：点账号框 → 清空并填账号 → Enter 跳密码 → 清空并填密码。
@@ -453,8 +832,28 @@ def fill_login_with_enter_flow(
     parts: list[str] = []
 
     edits = _enumerate_edits(device)
+    _login_fill_log(
+        "probe",
+        edits_count=len(edits),
+        account_xy=_format_xy(account_xy),
+        password_xy=_format_xy(password_xy),
+        screen=f"{width}x{height}",
+    )
     if not edits and account_xy is None:
-        return False, "no visible EditText on login form"
+        return False, "fill_path=none | no visible EditText on login form"
+    if not edits and account_xy is not None and adb is not None:
+        _login_fill_log("route", fill_path="ocr-hybrid", reason="no_edits")
+        return fill_login_with_ocr_tap_fallback(
+            adb,
+            serial=serial,
+            account_xy=account_xy,
+            password_xy=password_xy,
+            username=username,
+            password=password,
+            width=width,
+            height=height,
+            settle_s=settle_s,
+        )
 
     if account_xy is not None:
         ax, ay = account_xy
@@ -464,6 +863,24 @@ def fill_login_with_enter_flow(
             device, ax, ay, "username",
         )
         if account_el is None:
+            if adb is not None and account_xy is not None:
+                _login_fill_log(
+                    "route",
+                    fill_path="ocr-hybrid",
+                    reason="no_pick_at_ocr",
+                    edits_count=len(edits),
+                )
+                return fill_login_with_ocr_tap_fallback(
+                    adb,
+                    serial=serial,
+                    account_xy=account_xy,
+                    password_xy=password_xy,
+                    username=username,
+                    password=password,
+                    width=width,
+                    height=height,
+                    settle_s=settle_s,
+                )
             if not edits:
                 return False, "no account EditText"
             account_el, click_x, click_y, _b = edits[0]
@@ -471,6 +888,13 @@ def fill_login_with_enter_flow(
     else:
         account_el, click_x, click_y, _b = edits[0]
         pick = "first-edit"
+
+    _login_fill_log(
+        "route",
+        fill_path="u2-enter-flow",
+        edits_count=len(edits),
+        account_pick=pick,
+    )
 
     try:
         account_el.click()
@@ -516,7 +940,8 @@ def fill_login_with_enter_flow(
             username_center=username_center,
         )
         if pwd_el is None:
-            return False, "password field not found after ENTER; " + " | ".join(parts)
+            _login_fill_log("done", fill_path="u2-enter-flow", ok=False, stage="password")
+            return False, "fill_path=u2-enter-flow | password field not found after ENTER; " + " | ".join(parts)
         try:
             pwd_el.click()
         except Exception:
@@ -536,7 +961,8 @@ def fill_login_with_enter_flow(
         time.sleep(wait)
         parts.append(f"ENTER submit: {press_enter_key(device, settle_s=wait)}")
 
-    return True, " | ".join(parts)
+    _login_fill_log("done", fill_path="u2-enter-flow", ok=True, password_pick=pwd_pick)
+    return True, f"fill_path=u2-enter-flow | " + " | ".join(parts)
 
 
 def _apply_set_text(target: Any, device: Any, text: str, pick: str) -> tuple[str, str | None]:

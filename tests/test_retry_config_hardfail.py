@@ -27,7 +27,7 @@ def test_classify_config_patch_llm_error_non_retryable() -> None:
     failure = classify_failure(str(exc), exc=exc)
     assert failure.code == ErrorCode.LLM_API
     assert failure.retryable is False
-    assert "Modify 阶段 AI 请求失败" in failure.message
+    assert "Modify stage AI request failed" in failure.message
     assert "attempts=3/3" in failure.detail
 
 
@@ -39,7 +39,7 @@ def test_classify_config_patch_rejected_non_retryable() -> None:
     failure = classify_failure(str(exc), exc=exc)
     assert failure.code == ErrorCode.CONFIG
     assert failure.retryable is False
-    assert "无可修改配置" in failure.message
+    assert "no safe config change" in failure.message
     assert "no CDN candidates" in failure.detail
 
 
@@ -291,7 +291,7 @@ def test_retry_config_llm_exhausted_raises(tmp_path: Path) -> None:
             )
         assert exc_info.value.attempt == 2
         assert exc_info.value.max_attempts == 2
-        assert "已重试 2 次" in str(exc_info.value)
+        assert f"after {2} attempts" in str(exc_info.value)
         assert invoke.await_count == 2
 
     asyncio.run(_run())

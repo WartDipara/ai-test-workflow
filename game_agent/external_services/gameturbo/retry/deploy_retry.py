@@ -110,6 +110,7 @@ async def run_deploy_with_ai_retry(
                     expected_package=app_config.runtime.package_name,
                     output_apk=output_apk_name(gid),
                     merged_config_output=merged_config_path(gid),
+                    bash_path=app_config.gameturbo.bash_path or None,
                 )
                 rec.ok(returncode=0, attempt=attempt)
                 if audit is not None:
@@ -183,33 +184,12 @@ async def run_deploy_with_ai_retry(
                     summary=apply_result.summary,
                 )
         else:
-            logger.info("[DeployRetry] AI 建议仅重试 deploy，不改配置")
+            logger.info("[DeployRetry] AI suggests deploy-only retry, no config change")
 
         await asyncio.sleep(1.0)
 
     msg = (
         f"deploy.sh 在 {max_attempts} 次尝试后仍失败 (gid={gid})。"
-        f"最后错误: {last_error[:1500]}"
+        f"Last error: {last_error[:1500]}"
     )
     raise DeployPhaseError(msg, log_path=last_log_path, attempts=max_attempts)
-
-
-def run_deploy_with_ai_retry_sync(
-    app_config: TaskConfig,
-    *,
-    gid: str,
-    game_config_path: Path,
-    artifact_root: Path | None,
-    audit: RunAuditLogger | None = None,
-    phase: str = "init",
-) -> DeployResult:
-    return asyncio.run(
-        run_deploy_with_ai_retry(
-            app_config,
-            gid=gid,
-            game_config_path=game_config_path,
-            artifact_root=artifact_root,
-            audit=audit,
-            phase=phase,
-        ),
-    )

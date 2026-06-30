@@ -1,4 +1,4 @@
-"""多模态输出完整日志（process.log 分段写入，不裁剪内容）。"""
+"""Chunked full multimodal output logging (process.log, no truncation)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def log_full_text(
     *,
     level: int = logging.INFO,
 ) -> None:
-    """将完整文本分段写入日志，避免单条 handler 截断。"""
+    """Write full text in chunks so handlers do not truncate a single record."""
     body = text or ""
     logger.log(level, "%s full_output_begin len=%d", prefix, len(body))
     if not body:

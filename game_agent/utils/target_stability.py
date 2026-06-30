@@ -16,17 +16,16 @@ CHECKER_SCRIPT_PATH = REPO_ROOT / "GameTurbo-Native" / "check_target_stability.p
 
 @lru_cache(maxsize=1)
 def get_checker_module() -> Any:
-    """加载 GameTurbo-Native 中的 check_target_stability.py（不修改原文件）。"""
     path = CHECKER_SCRIPT_PATH
     if not path.is_file():
         raise FileNotFoundError(
-            f"找不到 check_target_stability.py: {path}，"
-            "请确认 GameTurbo-Native 子模块已就绪。",
+            f"check_target_stability.py not found: {path}; "
+            "ensure GameTurbo-Native submodule is ready.",
         )
     module_name = "gameturbo_check_target_stability"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"无法加载模块: {path}")
+        raise ImportError(f"Cannot load module: {path}")
     mod = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = mod
     spec.loader.exec_module(mod)
@@ -71,7 +70,7 @@ def probe_domain_stability(
             "geo_summary": "UNKNOWN",
             "is_china": False,
             "ip_probes": [],
-            "error": f"目标解析失败: {exc}",
+            "error": f"Target resolve failed: {exc}",
             "checker_script": str(CHECKER_SCRIPT_PATH),
         }
 
@@ -82,7 +81,7 @@ def probe_domain_stability(
             "geo_summary": "UNKNOWN",
             "is_china": False,
             "ip_probes": [],
-            "error": "没有解析到可用 IP",
+            "error": "No usable IP resolved",
             "checker_script": str(CHECKER_SCRIPT_PATH),
         }
 

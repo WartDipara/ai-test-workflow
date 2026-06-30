@@ -189,7 +189,7 @@ def archive_attempt_logs(
             ),
         )
         logger.info(
-            "已归档执行日志 attempt=%s -> %s (%d files)",
+            "Archived execution logs attempt=%s -> %s (%d files)",
             retry_no,
             logs_dir.name,
             len(sizes),
@@ -307,7 +307,7 @@ def build_final_logs(
         _write_banner(out, "End of execution log", char="-")
         out.write(f"  manifest: {deliverable.root / EXECUTION_MANIFEST_NAME}\n")
 
-    logger.info("已写入 %s (%d bytes)", out_path, out_path.stat().st_size)
+    logger.info("Wrote %s (%d bytes)", out_path, out_path.stat().st_size)
     return out_path
 
 

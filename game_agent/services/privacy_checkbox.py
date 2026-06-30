@@ -187,6 +187,7 @@ async def ensure_privacy_checkbox_checked_multimodal(
     max_steps: int = 1,
     change_threshold: float = _ROI_CHANGE_THRESHOLD,
     vision_confidence: float = _VISION_CHECKED_CONFIDENCE,
+    attempt_context=None,
 ) -> PrivacyCheckboxEnsureResult:
     """
     多模态 ensure：点击前判定是否已勾选；未勾选则 tap 一次后用 before/after 多模态 + ROI 辅助验证。
@@ -243,7 +244,10 @@ async def ensure_privacy_checkbox_checked_multimodal(
 
     box = checkbox_roi_box(located, sw, sh)
     ocr_summary = extract_text_with_bounds(before_shot, device_w=sw, device_h=sh)
-    vision = VisionWorker(llm_cfg)
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
 
     before_judgment = await vision.judge_privacy_checkbox_state(
         screenshot_path=before_shot,
@@ -253,6 +257,12 @@ async def ensure_privacy_checkbox_checked_multimodal(
         roi_box=box,
         round_id=round_id,
     )
+    if discard_if_stale(work_gen, where="privacy_checkbox:before", ctx=attempt_context):
+        return PrivacyCheckboxEnsureResult(
+            action="skipped",
+            message="[PrivacyCheckbox] SKIPPED — stale session.",
+            screenshot=before_shot,
+        )
     if _vision_trusts_checked(
         before_judgment.state,
         before_judgment.confidence,
@@ -315,6 +325,13 @@ async def ensure_privacy_checkbox_checked_multimodal(
         before_screenshot_path=before_shot,
         round_id=round_id,
     )
+    if discard_if_stale(work_gen, where="privacy_checkbox:after", ctx=attempt_context):
+        return PrivacyCheckboxEnsureResult(
+            action="skipped",
+            message="[PrivacyCheckbox] SKIPPED — stale session after tap.",
+            screenshot=after_shot,
+            tapped=True,
+        )
 
     debug_path = artifact_root / f"{prefix}_after_marked_{after_ts}.png"
     mark_checkbox_tap_on_image(

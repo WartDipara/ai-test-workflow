@@ -43,11 +43,11 @@ class FailureCleanup:
 
     async def _run_impl(self, reason: str) -> None:
         cfg = self.app_config
-        logger.error("[FailureCleanup] 失败收尾: %s", reason)
+        logger.error("[FailureCleanup] %s", reason)
         if self.audit is not None:
             self.audit.log_phase(
                 PipelinePhase.CLEANUP.value,
-                "开始失败收尾",
+                "Failure cleanup started",
                 reason=reason[:2000],
                 gid=self.app_config.runtime.gid,
                 game_config_path=str(self.app_config.runtime.game_config_path or ""),
@@ -82,12 +82,12 @@ class FailureCleanup:
             if game_pkg:
                 self.audit.log_phase(
                     PipelinePhase.CLEANUP.value,
-                    "已处理设备游戏包（force-stop + 卸载若已安装）",
+                    "Game package handled (force-stop + uninstall if installed)",
                     package=game_pkg,
                 )
             else:
-                logger.warning("TaskRuntime.package_name 为空，跳过卸载")
-                self.audit.log_phase(PipelinePhase.CLEANUP.value, "跳过卸载（包名为空）")
+                logger.warning("TaskRuntime.package_name empty, skip uninstall")
+                self.audit.log_phase(PipelinePhase.CLEANUP.value, "Skip uninstall (empty package_name)")
 
         if self.audit is not None:
-            self.audit.log_phase(PipelinePhase.CLEANUP.value, "失败收尾完成")
+            self.audit.log_phase(PipelinePhase.CLEANUP.value, "Failure cleanup done")

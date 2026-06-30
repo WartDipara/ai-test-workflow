@@ -8,11 +8,9 @@ from game_agent.external_services.base import (
     ExternalEvidence,
     ExternalService,
     PreparedApp,
-    RetryDecision,
 )
 from game_agent.external_services.context import ServiceContext
 from game_agent.models.pipeline_phase import PipelinePhase
-from game_agent.models.run_failure import RunFailure
 from game_agent.models.task_runtime import TaskRuntimeRegistry
 from game_agent.external_services.gameturbo.log import (
     GAMETURBO_LOG_COLLECTOR,
@@ -81,12 +79,12 @@ class GameTurboExternalService(ExternalService):
             if ctx.audit is not None:
                 ctx.audit.log_phase(
                     PipelinePhase.INIT.value,
-                    "进入 GameTurbo 前置处理",
+                    "GameTurbo bootstrap start",
                     output_apk=str(output_apk),
                 )
             source_apk = _resolve_source_apk(ctx)
             if source_apk is None:
-                raise RuntimeError("缺少 source_apk，无法 bootstrap GameTurbo")
+                raise RuntimeError("Missing source_apk, cannot bootstrap GameTurbo")
             result = run_bootstrap_from_source(source_apk, gid=deploy_gid)
             runtime.update_gameturbo(
                 gid=result.gid,
@@ -107,7 +105,7 @@ class GameTurboExternalService(ExternalService):
             if ctx.audit is not None:
                 ctx.audit.log_phase(
                     PipelinePhase.INIT.value,
-                    "GameTurbo 配置已准备",
+                    "GameTurbo config ready",
                     gid=result.gid,
                     game_config_path=str(result.game_config_path),
                     source_apk=str(result.source_apk),
@@ -117,14 +115,14 @@ class GameTurboExternalService(ExternalService):
             gid = runtime.gid
             game_config_path = runtime.game_config_path
             logger.info(
-                "跳过 GameTurbo Init，使用已有上下文 gid=%s config=%s",
+                "Skip GameTurbo Init, reuse context gid=%s config=%s",
                 gid,
                 game_config_path,
             )
             if ctx.audit is not None:
                 ctx.audit.log_phase(
                     PipelinePhase.INIT.value,
-                    "跳过 bootstrap，复用 gameturbo 上下文",
+                    "Skip bootstrap, reuse gameturbo context",
                     gid=gid,
                     game_config_path=str(game_config_path),
                     output_apk=str(output_apk),
@@ -143,14 +141,14 @@ class GameTurboExternalService(ExternalService):
             )
             TaskRuntimeRegistry.register(runtime)
             logger.info(
-                "已从现有 gameturbo 产物恢复上下文: gid=%s config=%s",
+                "Restored gameturbo context from artifacts: gid=%s config=%s",
                 gid,
                 game_config_path,
             )
             if ctx.audit is not None:
                 ctx.audit.log_phase(
                     PipelinePhase.INIT.value,
-                    "恢复 GameTurbo 上下文",
+                    "Restored GameTurbo context",
                     gid=gid,
                     game_config_path=str(game_config_path),
                     source_apk=str(source_apk),
@@ -164,17 +162,18 @@ class GameTurboExternalService(ExternalService):
         skip_install = not needs_gameturbo_deploy(
             output_apk,
             package_installed=package_installed,
+            game_config_path=game_config_path,
         )
         if skip_install:
             logger.info(
-                "跳过 deploy：设备已安装 %s（产物 %s）",
+                "Skip deploy: %s already on device (artifact %s)",
                 target_pkg,
-                output_apk.name if output_apk.is_file() else "已清理/缺失",
+                output_apk.name if output_apk.is_file() else "cleaned/missing",
             )
             if ctx.audit is not None:
                 ctx.audit.log_phase(
                     PipelinePhase.INIT.value,
-                    "跳过 deploy，设备已安装",
+                    "Skip deploy, package on device",
                     gid=gid,
                     package=target_pkg,
                     output_apk=str(output_apk),
@@ -182,17 +181,17 @@ class GameTurboExternalService(ExternalService):
         else:
             if output_apk.is_file():
                 logger.info(
-                    "本地已有 %s 但设备未安装 %s，重新 deploy",
+                    "Local %s exists but %s not on device, redeploy",
                     output_apk.name,
                     target_pkg or "(unknown)",
                 )
             else:
-                logger.info("缺少 deploy 产物，开始 GameTurbo deploy gid=%s", gid)
+                logger.info("Missing deploy artifact, starting GameTurbo deploy gid=%s", gid)
             from game_agent.external_services.gameturbo.retry.deploy_retry import (
-                run_deploy_with_ai_retry_sync,
+                run_deploy_with_ai_retry,
             )
 
-            deploy_result = run_deploy_with_ai_retry_sync(
+            deploy_result = await run_deploy_with_ai_retry(
                 ctx.app_config,
                 gid=gid,
                 game_config_path=game_config_path,
@@ -211,7 +210,7 @@ class GameTurboExternalService(ExternalService):
 
         install_apk = output_apk if output_apk.is_file() else runtime.source_apk
         if install_apk is None or not install_apk.is_file():
-            raise DeployPhaseError("GameTurbo deploy 后缺少可安装 APK")
+            raise DeployPhaseError("No installable APK after GameTurbo deploy")
 
         runtime.install_apk = install_apk.resolve()
         TaskRuntimeRegistry.register(runtime)
@@ -243,20 +242,6 @@ class GameTurboExternalService(ExternalService):
             return None
         return GAMETURBO_LOG_COLLECTOR
 
-    async def on_failure(
-        self,
-        ctx: ServiceContext,
-        failure: RunFailure,
-        *,
-        will_retry: bool,
-    ) -> RetryDecision:
-        if will_retry and failure.retryable:
-            return RetryDecision(
-                wants_plugin_retry=True,
-                reason="GameTurbo Modify/deploy retry",
-            )
-        return RetryDecision()
-
     def collect_evidence(self, ctx: ServiceContext) -> ExternalEvidence | None:
         gid = (ctx.app_config.runtime.gid or "").strip()
         if not gid:
@@ -280,9 +265,3 @@ class GameTurboExternalService(ExternalService):
             files=files,
             metadata=metadata,
         )
-
-    def effective_log_monitor(self, ctx: ServiceContext, modules_log_monitor: bool) -> bool:
-        return modules_log_monitor
-
-    def effective_retry_config(self, ctx: ServiceContext, modules_retry: bool) -> bool:
-        return modules_retry

@@ -3,7 +3,6 @@ from game_agent.external_services.gameturbo.deploy.runner import (
     DEPLOY_SCRIPT,
     DeployResult,
     run_deploy,
-    verify_package_on_device,
 )
 
 __all__ = [
@@ -11,5 +10,4 @@ __all__ = [
     "DEPLOY_SCRIPT",
     "DeployResult",
     "run_deploy",
-    "verify_package_on_device",
 ]

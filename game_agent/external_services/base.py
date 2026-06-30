@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from game_agent.external_services.context import ServiceContext
-    from game_agent.models.run_failure import RunFailure
     from game_agent.services.external_log_base import ExternalLogCollector
 
 
@@ -24,20 +23,12 @@ class PreparedApp:
 
 
 @dataclass(slots=True)
-class RetryDecision:
-    """Plugin-level retry hint after a failed attempt."""
-
-    wants_plugin_retry: bool = False
-    reason: str = ""
-
-
-@dataclass(slots=True)
 class ExternalEvidence:
     """Optional plugin artifacts merged into task deliverables."""
 
     service_name: str
     files: dict[str, str] = field(default_factory=dict)
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 class ExternalService(ABC):
@@ -65,25 +56,8 @@ class ExternalService(ABC):
     async def after_parallel_phase(self, ctx: ServiceContext) -> None:
         return None
 
-    async def on_failure(
-        self,
-        ctx: ServiceContext,
-        failure: RunFailure,
-        *,
-        will_retry: bool,
-    ) -> RetryDecision:
-        return RetryDecision()
-
     def collect_evidence(self, ctx: ServiceContext) -> ExternalEvidence | None:
         return None
 
     def log_collector(self, ctx: ServiceContext) -> ExternalLogCollector | None:
         return None
-
-    def effective_log_monitor(self, ctx: ServiceContext, modules_log_monitor: bool) -> bool:
-        """Whether parallel phase should run plugin log monitor."""
-        return False
-
-    def effective_retry_config(self, ctx: ServiceContext, modules_retry: bool) -> bool:
-        """Whether failure handler may run plugin Modify/deploy retry."""
-        return False

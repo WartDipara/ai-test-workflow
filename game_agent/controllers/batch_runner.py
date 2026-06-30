@@ -27,9 +27,8 @@ _JOIN_POLL_S = 0.5
 
 
 def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
-    """批跑入口：1 条或多条 URL 均走同一队列与 worker 模型。"""
     if not urls:
-        logger.error("批跑失败：无可用 APK 来源（请配置 apks.txt 或 apk_cache/*.apk）")
+        logger.error("Batch run failed: no available APK sources (please configure apks.txt or apk_cache/*.apk)")
         return 1
 
     cfg = load_app_config(config_path)
@@ -42,7 +41,7 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
     lock_path = out_dir / ".task_queue.lock"
     devices = list_connected_devices()
     if not devices:
-        logger.error("批跑失败：adb devices 中无 state=device 的设备")
+        logger.error("Batch run failed: no devices in adb devices with state=device")
         cleanup_batch_workspace(
             batch_root,
             BatchManifest(batch_root=batch_root, devices=[], tasks=[]),
@@ -87,20 +86,22 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
                         )
                     except ShutdownRequested as exc:
                         logger.warning(
-                            "批跑任务被用户中断 index=%d serial=%s",
+                            "Batch run task interrupted by user index=%d serial=%s",
                             task.index,
                             serial,
                         )
+                        from game_agent.models.run_failure import USER_INTERRUPT_MESSAGE
+
                         queue.mark_finished(
                             task.task_id,
                             success=False,
                             result_code=130,
-                            error=str(exc.reason)[:500],
+                            error=USER_INTERRUPT_MESSAGE,
                         )
                         return
                     except Exception as exc:
                         logger.exception(
-                            "批跑任务异常 index=%d serial=%s",
+                            "Batch run task exception index=%d serial=%s",
                             task.index,
                             serial,
                         )
@@ -131,7 +132,7 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
                     break
                 if is_shutdown_requested():
                     interrupted = True
-                    logger.warning("批跑收到停止请求，等待 worker 收尾…")
+                    logger.warning("Batch run received stop request, waiting for worker to finish…")
                 for thread in alive:
                     thread.join(timeout=_JOIN_POLL_S)
 
@@ -146,14 +147,14 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
                 run_outputs_dir=out_dir,
             )
             if cleanup_failed:
-                logger.warning("批跑收尾清理部分失败: %s", cleanup_failed)
+                logger.warning("Batch run cleanup failed: %s", cleanup_failed)
             elif archived:
-                logger.debug("batch_manifest 归档完成: %d 处", len(archived))
+                logger.debug("Batch run manifest archived: %d tasks", len(archived))
 
         if interrupted:
             failed = [t for t in manifest.tasks if t.status != ApkTaskStatus.SUCCEEDED]
             logger.error(
-                "批跑被用户中断：%d/%d 任务未完成，manifest=%s",
+                "Batch run interrupted: %d/%d tasks incomplete, manifest=%s",
                 len(failed),
                 len(manifest.tasks),
                 manifest.path,
@@ -163,14 +164,14 @@ def run_batch_orchestrator(config_path: Path, urls: list[str]) -> int:
         failed = [t for t in manifest.tasks if t.status != ApkTaskStatus.SUCCEEDED]
         if failed:
             logger.error(
-                "批跑结束：%d/%d 任务失败，manifest=%s",
+                "Batch run finished: %d/%d tasks failed, manifest=%s",
                 len(failed),
                 len(manifest.tasks),
                 manifest.path,
             )
             return 1
 
-        logger.info("批跑全部成功，manifest=%s", manifest.path)
+        logger.info("Batch run finished: all tasks succeeded, manifest=%s", manifest.path)
         return 0
     finally:
         TaskRuntimeRegistry.clear()

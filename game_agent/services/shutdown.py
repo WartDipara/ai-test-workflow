@@ -42,8 +42,8 @@ class ShutdownContext:
             self._force = force
             self._event.set()
         logger.warning(
-            "[Shutdown] 已请求停止%s: %s",
-            "（强制）" if force else "",
+            "[Shutdown] Shutdown requested%s: %s",
+            "(forced)" if force else "",
             self._reason,
         )
 
@@ -108,7 +108,7 @@ def _handle_signal(signum: int, _frame: object | None) -> None:
     ctx = get_shutdown_context()
     name = "SIGINT" if signum == signal.SIGINT else f"signal {signum}"
     if ctx.is_requested():
-        logger.error("[Shutdown] 第二次中断，强制停止")
+        logger.error("[Shutdown] Second interrupt, force exit")
         ctx.request_shutdown(f"{name} (force)", force=True)
         raise SystemExit(_EXIT_SIGINT)
     ctx.request_shutdown(name)

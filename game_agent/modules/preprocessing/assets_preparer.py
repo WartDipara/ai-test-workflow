@@ -31,7 +31,7 @@ def read_apk_urls(apks_txt: Path) -> list[str]:
         有效的 URL 列表。
     """
     if not apks_txt.is_file():
-        logger.warning("apks.txt 不存在: %s", apks_txt)
+        logger.warning("apks.txt missing: %s", apks_txt)
         return []
 
     urls: list[str] = []
@@ -41,7 +41,7 @@ def read_apk_urls(apks_txt: Path) -> list[str]:
             continue
         urls.append(stripped)
 
-    logger.info("从 %s 读取到 %d 个 APK 下载链接", apks_txt.name, len(urls))
+    logger.info("Read %d APK URL(s) from %s", len(urls), apks_txt.name)
     return urls
 
 
@@ -76,14 +76,14 @@ def download_apk(
         raw_name += ".apk"
     target = cache_dir / raw_name
 
-    logger.info("正在下载 APK: %s", url)
+    logger.info("Downloading APK: %s", url)
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_s), follow_redirects=True) as client:
             response = client.get(url)
             response.raise_for_status()
             content = response.content
     except httpx.HTTPError as e:
-        logger.error("APK 下载失败 (HTTP): %s: %s", url, e)
+        logger.error("APK download failed (HTTP): %s: %s", url, e)
         return None
     except (ssl.SSLError, OSError) as e:
         logger.error(
@@ -94,18 +94,18 @@ def download_apk(
         return None
 
     # 写入文件（先写临时文件再重命名，避免下载中断产生残缺文件）
-    logger.info("APK 下载完成 (%d bytes)，正在写入缓存...", len(content))
+    logger.info("APK download done (%d bytes), writing cache...", len(content))
     tmp = cache_dir / f"._{raw_name}.tmp"
     try:
         tmp.write_bytes(content)
         tmp.rename(target)
     except OSError as e:
-        logger.error("APK 写入失败: %s: %s", target, e)
+        logger.error("APK write failed: %s: %s", target, e)
         tmp.unlink(missing_ok=True)
         return None
 
     size_mb = target.stat().st_size / (1024 * 1024)
-    logger.info("APK 写入完成: %s (%.1f MB)", target.name, size_mb)
+    logger.info("APK written: %s (%.1f MB)", target.name, size_mb)
     return target
 
 
@@ -158,7 +158,7 @@ def cli() -> int:
     apks_txt = args.apks_txt or (args.cache_dir / _APKS_TXT_FILENAME)
     result = download_apk_from_file(apks_txt, args.cache_dir)
     if result is None:
-        logger.error("APK 下载失败或 apks.txt 无有效链接")
+        logger.error("APK download failed or apks.txt has no valid URLs")
         return 1
     return 0
 

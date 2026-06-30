@@ -94,7 +94,7 @@ class ExternalLogCollector:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            logger.warning("[%s] logcat -d 超时 (%.0fs)", self.service_name, timeout_s)
+            logger.warning("[%s] logcat -d timeout (%.0fs)", self.service_name, timeout_s)
             return []
         return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
 
@@ -128,9 +128,9 @@ class ExternalLogCollector:
                 timeout=timeout_s,
                 check=False,
             )
-            logger.info("[%s] 已执行 logcat -c", self.service_name)
+            logger.info("[%s] ran logcat -c", self.service_name)
         except subprocess.TimeoutExpired:
-            logger.warning("[%s] logcat -c 超时 (%.0fs)", self.service_name, timeout_s)
+            logger.warning("[%s] logcat -c timeout (%.0fs)", self.service_name, timeout_s)
             raise
 
     def merge_session_archives(self, artifact_root: Path) -> Path:
@@ -198,7 +198,7 @@ class ExternalLogCollector:
         archived = self.session_archive_path(artifact_root, session_index)
         shutil.copy2(active, archived)
         active.write_text("", encoding="utf-8")
-        logger.info("[%s] 已归档会话副本 %s", self.service_name, archived.name)
+        logger.info("[%s] archived session copy %s", self.service_name, archived.name)
         return archived
 
     def bootstrap_log(self, adb: AdbService, artifact_root: Path) -> Path:
@@ -206,7 +206,7 @@ class ExternalLogCollector:
         lines = self.fetch_device_lines(adb)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
-        logger.info("[%s] 初始快照已写入 %s | %d 行", self.service_name, path, len(lines))
+        logger.info("[%s] initial snapshot %s | %d lines", self.service_name, path, len(lines))
         return path
 
     def append_line(self, path: Path, line: str) -> None:
@@ -300,11 +300,11 @@ class ExternalLogCollector:
         else:
             added = self.append_unique_lines(path, dump_lines, seen_keys)
             if added:
-                logger.info("[%s] 收尾追加设备缓冲区 %d 行", self.service_name, added)
+                logger.info("[%s] appended device buffer %d lines", self.service_name, added)
         self.merge_session_archives(artifact_root)
         path = self.ensure_log_for_analysis(artifact_root)
         if path is None:
-            logger.warning("[%s] 未收集到日志: %s", self.service_name, self.log_path(artifact_root))
+            logger.warning("[%s] no logs collected: %s", self.service_name, self.log_path(artifact_root))
             return None
-        logger.info("[%s] 归档完成 %s | 共 %d 行", self.service_name, self.log_filename, _count_nonempty_lines(path))
+        logger.info("[%s] archive done %s | %d lines", self.service_name, self.log_filename, _count_nonempty_lines(path))
         return path

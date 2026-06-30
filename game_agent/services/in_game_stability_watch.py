@@ -50,6 +50,7 @@ async def run_stability_check(
     artifact_root: Path,
     round_id: int,
     audit: RunAuditLogger | None = None,
+    attempt_context=None,
 ) -> StabilityCheckResult:
     """截图 + OCR + 多模态稳定性判定。"""
     from datetime import datetime
@@ -73,12 +74,23 @@ async def run_stability_check(
             screenshot_path=shot_path,
         )
 
-    vision = VisionWorker(llm_cfg)
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
     raw = await vision.judge_in_game_stability(
         screenshot_path=shot_path,
         ocr_summary=ocr_summary,
         round_id=round_id,
     )
+    if discard_if_stale(work_gen, where="stability_observe", ctx=attempt_context):
+        return StabilityCheckResult(
+            has_fatal_anomaly=False,
+            loading_ok=True,
+            stage="unknown",
+            reason="stale_session_discard",
+            screenshot_path=shot_path,
+        )
     data = _parse_stability_raw(raw)
     anomaly_reason = str(data.get("anomaly_reason", "") or "")
     reason = str(data.get("reason", "") or anomaly_reason or "")

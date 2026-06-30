@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from game_agent.models.settings import OcrSection
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ def _format_v2_result(result, *, scale_x: float, scale_y: float) -> list[str]:
 def warmup_ocr(*, worker_key: str | None = None) -> None:
     """可选预热：加载模型。不跑完整屏推理以免拖慢开局。"""
     get_ocr_instance(worker_key=worker_key)
-    logger.info("PaddleOCR 模型已加载（warmup）")
+    logger.info("PaddleOCR model loaded (warmup)")
 
 
 def _frame_cache_key(
@@ -181,7 +182,7 @@ def _infer_ocr_frame(
     from game_agent.utils.ocr_worker import get_ocr_worker
 
     src = Path(image_path)
-    logger.debug("OCR 开始: %s", src.name)
+    logger.debug("OCR start: %s", src.name)
     worker = get_ocr_worker(worker_key=worker_key)
     ocr = worker.get_ocr_instance()
     prepared = _prepare_image_for_ocr(src, device_w=device_w, device_h=device_h)
@@ -203,16 +204,16 @@ def _infer_ocr_frame(
             lines = _format_v2_result(raw, scale_x=sx, scale_y=sy)
             bboxes = _v2_to_bboxes(raw, scale_x=sx, scale_y=sy)
     except NotImplementedError as e:
-        logger.exception("PaddleOCR 识别失败（多为 Windows oneDNN/PIR 兼容问题）: %s", src)
+        logger.exception("PaddleOCR failed (often Windows oneDNN/PIR): %s", src)
         err = (
-            "[OCR 识别失败] Paddle CPU 推理与 oneDNN 不兼容。"
-            "已在代码中设置 enable_mkldnn=False；若仍失败可尝试降级 paddlepaddle 至 3.2.x。"
-            f" 详情: {e}"
+            "[OCR failed] Paddle CPU inference incompatible with oneDNN."
+            "enable_mkldnn=False set in code; try downgrading paddlepaddle to 3.2.x if still fails."
+            f" details: {e}"
         )
         return err, []
     except Exception as e:
-        logger.exception("PaddleOCR 识别失败: %s", src)
-        return f"[OCR 识别失败] {e}", []
+        logger.exception("PaddleOCR failed: %s", src)
+        return f"[OCR failed] {e}", []
     finally:
         if prepared.temp_path is not None and prepared.temp_path.is_file():
             try:
@@ -223,7 +224,7 @@ def _infer_ocr_frame(
     elapsed = time.perf_counter() - t0
     device_label = worker.effective_device
     logger.info(
-        "OCR 完成 %.2fs device=%s profile=%s src=%s infer=%sx%s",
+        "OCR done %.2fs device=%s profile=%s src=%s infer=%sx%s",
         elapsed,
         device_label,
         _OCR_CONFIG.model_profile,
@@ -233,7 +234,7 @@ def _infer_ocr_frame(
     )
 
     if not lines:
-        return "[OCR] 未识别到任何文字", bboxes
+        return "[OCR] no text recognized", bboxes
     return "\n".join(lines), bboxes
 
 
@@ -438,15 +439,16 @@ def format_device_ocr_for_executor(
     ime_lines: list[str] = []
     other: list[str] = []
 
-    _dialog_btn = re.compile(
-        r"(同意|不同意|^(登录|立即登录)$|确认|确定|取消|进入游戏|"
-        r"^login$|forgot\s*password)",
-        re.IGNORECASE,
+    _dialog_btn = compile_lexicon_pattern(
+        Concept.AGREE,
+        Concept.CANCEL,
+        Concept.PRIVACY_DISAGREE,
+        Concept.LOGIN_BUTTON,
+        Concept.CONFIRM,
+        Concept.ENTER_GAME,
+        Concept.FORGOT_PASSWORD,
     )
-    _compound_login = re.compile(
-        r"login\s*/\s*sign|sign\s*up\s*with|login/sign",
-        re.IGNORECASE,
-    )
+    _compound_login = compile_lexicon_pattern(Concept.COMPOUND_LOGIN)
 
     for line in (ocr_body or "").splitlines():
         m = _OCR_LINE_RE.match(line.strip())

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from game_agent.utils.ocr_util import OcrBbox
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 _OVERLAY_NOISE_RE = re.compile(
     r"GT\[|ms\s*S:|B/s|^\d{1,2}:\d{2}$|CADPA|^\d+\+$",
@@ -12,6 +13,11 @@ _OVERLAY_NOISE_RE = re.compile(
 )
 _DIALOGUE_BOTTOM_RATIO = 0.50
 _MIN_NARRATIVE_CHARS = 3
+_BLANK_CONTINUE_RE = re.compile(
+    compile_lexicon_pattern(Concept.DISMISS_CLOSE).pattern
+    + r"|轻触.*继续|点按空白|tap\s+.*continue|tap\s+to\s+continue",
+    re.IGNORECASE,
+)
 
 
 def _zh_count(text: str) -> int:
@@ -84,6 +90,14 @@ def dialogue_box_fallback_xy(screen_w: int, screen_h: int) -> tuple[int, int]:
     w = max(screen_w, 720)
     h = max(screen_h, 1280)
     return int(w * 0.5), int(h * 0.82)
+
+
+def is_blank_continue_cta(text: str) -> bool:
+    return bool(_BLANK_CONTINUE_RE.search((text or "").strip()))
+
+
+def ocr_has_blank_continue_cta(bboxes: list[OcrBbox]) -> bool:
+    return any(is_blank_continue_cta(b.text or "") for b in bboxes)
 
 
 def score_dialogue_from_bboxes(

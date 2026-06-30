@@ -27,13 +27,15 @@ from game_agent.graphs.launch_nodes import (
     select_sub_account_node,
     stability_observe_node,
     in_game_agent_node,
+    session_relogin_node,
     tap_enter_game_node,
     free_node,
     dynamic_action_node,
     scene_action_node,
 )
 from game_agent.graphs.launch_routing import consume_planned_route
-from game_agent.graphs.launch_limits import seed_launch_graph_limits
+from game_agent.graphs.launch_limits import seed_launch_graph_executor_flags, seed_launch_graph_limits
+from game_agent.models.run_failure import compact_failure_message
 from game_agent.models.launch_graph_state import LaunchGraphState, empty_launch_graph_state
 from game_agent.models.run_state import RunState
 from game_agent.models.settings import AppConfig
@@ -56,6 +58,7 @@ _ACTION_NODES = (
     "check_in_game",
     "stability_observe",
     "in_game_agent",
+    "session_relogin",
     "adaptive_phase",
     "dynamic_action",
     "scene_action",
@@ -66,6 +69,22 @@ _ACTION_NODES = (
 
 def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     """构建带 deps 闭包的 LangGraph。"""
+    from game_agent.graphs.launch_state_store import mark_tree_node_done
+    from game_agent.modules.session_invalidation import guard_session_work
+
+    def _with_stale_guard(node: str):
+        def decorator(fn):
+            async def wrapped(state: LaunchGraphState) -> LaunchGraphState:
+                if guard_session_work(state, ctx=deps.attempt_context, where=node):
+                    state = dict(state)
+                    mark_tree_node_done(state, node, evidence="stale_session_discard")
+                    state["recover_hint"] = f"{node}:stale_session_discard"
+                    return state
+                return await fn(state)
+
+            return wrapped
+
+        return decorator
 
     async def _observe(state: LaunchGraphState) -> LaunchGraphState:
         return await observe_screen(state, deps)
@@ -73,51 +92,71 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     async def _classify(state: LaunchGraphState) -> LaunchGraphState:
         return await classify_screen(state, deps)
 
+    @_with_stale_guard("handle_initial_privacy_dialog")
     async def _initial_privacy(state: LaunchGraphState) -> LaunchGraphState:
         return await handle_initial_privacy_dialog_node(state, deps)
 
+    @_with_stale_guard("ensure_privacy_checkbox")
     async def _checkbox(state: LaunchGraphState) -> LaunchGraphState:
         return await ensure_privacy_checkbox_node(state, deps)
 
+    @_with_stale_guard("handle_download")
     async def _download(state: LaunchGraphState) -> LaunchGraphState:
         return await handle_download_node(state, deps)
 
+    @_with_stale_guard("dismiss_blocking_overlay")
     async def _dismiss_overlay(state: LaunchGraphState) -> LaunchGraphState:
         return await dismiss_blocking_overlay_node(state, deps)
 
+    @_with_stale_guard("atomic_login")
     async def _atomic_login(state: LaunchGraphState) -> LaunchGraphState:
         return await atomic_login_node(state, deps)
 
+    @_with_stale_guard("select_sub_account")
     async def _sub_account(state: LaunchGraphState) -> LaunchGraphState:
         return await select_sub_account_node(state, deps)
 
+    @_with_stale_guard("check_server_selector")
     async def _server(state: LaunchGraphState) -> LaunchGraphState:
         return await check_server_selector_node(state, deps)
 
+    @_with_stale_guard("tap_enter_game")
     async def _enter(state: LaunchGraphState) -> LaunchGraphState:
         return await tap_enter_game_node(state, deps)
 
+    @_with_stale_guard("check_in_game")
     async def _in_game(state: LaunchGraphState) -> LaunchGraphState:
         return await check_in_game_node(state, deps)
 
+    @_with_stale_guard("stability_observe")
     async def _stability(state: LaunchGraphState) -> LaunchGraphState:
         return await stability_observe_node(state, deps)
 
+    @_with_stale_guard("in_game_agent")
     async def _in_game_agent(state: LaunchGraphState) -> LaunchGraphState:
         return await in_game_agent_node(state, deps)
 
+    @_with_stale_guard("session_relogin")
+    async def _session_relogin(state: LaunchGraphState) -> LaunchGraphState:
+        return await session_relogin_node(state, deps)
+
+    @_with_stale_guard("adaptive_phase")
     async def _adaptive(state: LaunchGraphState) -> LaunchGraphState:
         return await adaptive_phase_node(state, deps)
 
+    @_with_stale_guard("recover_from_failure")
     async def _recover(state: LaunchGraphState) -> LaunchGraphState:
         return await recover_from_failure_node(state, deps)
 
+    @_with_stale_guard("free")
     async def _free(state: LaunchGraphState) -> LaunchGraphState:
         return await free_node(state, deps)
 
+    @_with_stale_guard("dynamic_action")
     async def _dynamic(state: LaunchGraphState) -> LaunchGraphState:
         return await dynamic_action_node(state, deps)
 
+    @_with_stale_guard("scene_action")
     async def _scene(state: LaunchGraphState) -> LaunchGraphState:
         return await scene_action_node(state, deps)
 
@@ -141,6 +180,7 @@ def build_launch_graph(deps: LaunchGraphDeps) -> Any:
     workflow.add_node("check_in_game", _in_game)
     workflow.add_node("stability_observe", _stability)
     workflow.add_node("in_game_agent", _in_game_agent)
+    workflow.add_node("session_relogin", _session_relogin)
     workflow.add_node("adaptive_phase", _adaptive)
     workflow.add_node("dynamic_action", _dynamic)
     workflow.add_node("scene_action", _scene)
@@ -178,7 +218,7 @@ def _sync_run_state_from_graph(run_state: RunState, graph_state: LaunchGraphStat
         graph_state.get("in_game_play_completed") or graph_state.get("in_game_confirmed")
     )
     if graph_state.get("terminal_error"):
-        run_state.note = str(graph_state["terminal_error"])[:2000]
+        run_state.note = compact_failure_message(str(graph_state["terminal_error"]))
         run_state.last_error = run_state.note
     run_state.launch_stage = str(graph_state.get("current_stage") or run_state.launch_stage)
     run_state.graph_state_snapshot = dict(graph_state)
@@ -256,6 +296,7 @@ async def run_launch_graph_async(
     graph = build_launch_graph(deps)
     state: LaunchGraphState = empty_launch_graph_state()
     seed_launch_graph_limits(state, app_config)
+    seed_launch_graph_executor_flags(state, app_config)
     state["privacy_checked"] = run_state.privacy_checkbox_tapped
     state["server_checked"] = run_state.server_checked
 
@@ -267,7 +308,10 @@ async def run_launch_graph_async(
         return run_state
 
     try:
-        state = await graph.ainvoke(state)
+        from game_agent.modules.session_invalidation import bind_executor_attempt_context
+
+        with bind_executor_attempt_context(attempt_context):
+            state = await graph.ainvoke(state)
     finally:
         await vision_queue.shutdown()
     _sync_run_state_from_graph(run_state, state)
@@ -276,7 +320,7 @@ async def run_launch_graph_async(
         run_state.finished = True
         run_state.success = False
         err = state.get("terminal_error") or state.get("recover_hint") or "launch graph iteration limit"
-        run_state.note = str(err)[:2000]
+        run_state.note = compact_failure_message(str(err))
 
     return run_state
 

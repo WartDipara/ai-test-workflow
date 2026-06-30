@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from game_agent.graphs.launch_state_store import completed_tree_node, is_login_done
 from game_agent.graphs.static_priority import has_pending_static_work
@@ -16,13 +17,21 @@ from game_agent.models.scene import (
 )
 from game_agent.services.dialogue_heuristics import (
     dialogue_box_fallback_xy,
+    is_blank_continue_cta,
     pick_dialogue_advance_bbox,
 )
 from game_agent.utils.ocr_util import OcrBbox
+from game_agent.i18n import Concept, compile_lexicon_pattern
+from game_agent.models.motion_probe import MotionProbeResult
+from game_agent.services.tutorial_intent import needs_visual_tap_locator
+from game_agent.services.tutorial_pulse_locator import resolve_tutorial_visual_tap
 
-_SKIP_RE = re.compile(r"跳过|Skip", re.IGNORECASE)
-_CONTINUE_RE = re.compile(r"继续|Continue|下一步|点击继续|点击屏幕", re.IGNORECASE)
-_CONFIRM_RE = re.compile(r"^(确定|确认|OK|Agree|Confirm)$", re.IGNORECASE)
+_SKIP_RE = compile_lexicon_pattern(Concept.SKIP)
+_CONTINUE_RE = compile_lexicon_pattern(Concept.CONTINUE)
+_CONFIRM_RE = re.compile(
+    rf"^(?:{compile_lexicon_pattern(Concept.CONFIRM, Concept.AGREE).pattern})$",
+    re.IGNORECASE,
+)
 
 _SCENE_LOW_CONFIDENCE_DEACTIVATE_STREAK = 2
 
@@ -50,6 +59,8 @@ def plan_dialogue_action(
     screen_w: int,
     screen_h: int,
     transition: SceneTransition,
+    advance_mode: str = "ocr",
+    dim_tap_xy: tuple[int, int] | None = None,
 ) -> SceneActionPlan:
     if transition.kind == "animation_or_loading":
         return SceneActionPlan(
@@ -57,6 +68,16 @@ def plan_dialogue_action(
             wait_s=2.0,
             reason="dialogue:wait_observe_animation",
             mode="wait_observe",
+        )
+
+    if advance_mode == "dim_region" and dim_tap_xy is not None:
+        x, y = dim_tap_xy
+        return SceneActionPlan(
+            action="tap_xy",
+            x=x,
+            y=y,
+            reason="dialogue:dim_region",
+            mode="dim_advance",
         )
 
     skip_bbox = _bbox_for_pattern(bboxes, _SKIP_RE)
@@ -71,6 +92,8 @@ def plan_dialogue_action(
         )
 
     narrative_bbox = pick_dialogue_advance_bbox(bboxes, screen_h=screen_h)
+    if narrative_bbox is not None and is_blank_continue_cta(narrative_bbox.text or ""):
+        narrative_bbox = None
     if narrative_bbox is not None:
         return SceneActionPlan(
             action="tap_xy",
@@ -87,6 +110,8 @@ def plan_dialogue_action(
     ):
         bbox = _bbox_for_pattern(bboxes, pattern)
         if bbox is not None:
+            if is_blank_continue_cta(bbox.text or ""):
+                continue
             return SceneActionPlan(
                 action="tap_xy",
                 x=bbox.cx,
@@ -113,6 +138,8 @@ def plan_tutorial_action(
     screen_w: int,
     screen_h: int,
     transition: SceneTransition,
+    screenshot_path: Path | str | None = None,
+    motion_result: MotionProbeResult | None = None,
 ) -> SceneActionPlan:
     if transition.kind == "animation_or_loading":
         return SceneActionPlan(
@@ -137,6 +164,32 @@ def plan_tutorial_action(
                 reason=f"tutorial:heuristic_{label}",
                 mode="advance",
             )
+
+    if needs_visual_tap_locator(ocr_summary, bboxes):
+        shot = Path(screenshot_path) if screenshot_path else None
+        tap = resolve_tutorial_visual_tap(
+            motion=motion_result,
+            screenshot_path=shot if shot and shot.is_file() else None,
+            screen_w=screen_w,
+            screen_h=screen_h,
+            ocr_summary=ocr_summary,
+            bboxes=bboxes,
+            vlm_pick=None,
+        )
+        if tap is not None:
+            return SceneActionPlan(
+                action="tap_xy",
+                x=tap.x,
+                y=tap.y,
+                reason=f"tutorial:{tap.reason}",
+                mode="advance",
+            )
+        return SceneActionPlan(
+            action="wait",
+            wait_s=1.5,
+            reason="tutorial:pulse_not_found",
+            mode="wait_observe",
+        )
 
     x, y = _safe_dialogue_tap(screen_w, screen_h)
     return SceneActionPlan(
@@ -194,6 +247,10 @@ def plan_scene_action(
     screen_w: int,
     screen_h: int,
     transition: SceneTransition,
+    advance_mode: str = "ocr",
+    dim_tap_xy: tuple[int, int] | None = None,
+    screenshot_path: Path | str | None = None,
+    motion_result: MotionProbeResult | None = None,
 ) -> SceneActionPlan:
     if scene_id == "dialogue":
         return plan_dialogue_action(
@@ -202,6 +259,8 @@ def plan_scene_action(
             screen_w=screen_w,
             screen_h=screen_h,
             transition=transition,
+            advance_mode=advance_mode,
+            dim_tap_xy=dim_tap_xy,
         )
     if scene_id == "tutorial":
         return plan_tutorial_action(
@@ -210,6 +269,8 @@ def plan_scene_action(
             screen_w=screen_w,
             screen_h=screen_h,
             transition=transition,
+            screenshot_path=screenshot_path,
+            motion_result=motion_result,
         )
     if scene_id == "loading":
         return plan_loading_action(transition=transition)
@@ -221,6 +282,8 @@ def should_activate_scene_strategy(
     classification: SceneClassification,
     facts: LaunchFacts,
 ) -> bool:
+    if state.get("session_agent_active"):
+        return False
     if is_pre_login_passive_wait(
         state,
         facts,
@@ -319,7 +382,8 @@ def apply_scene_classification(
 
     if should_activate_scene_strategy(state, classification, facts):
         state["scene_strategy_active"] = True
-        state["active_scene_strategy"] = classification.scene_id
+        label_slug = str(state.get("scene_label_slug") or "").strip()
+        state["active_scene_strategy"] = label_slug or classification.scene_id
         return
 
     if (

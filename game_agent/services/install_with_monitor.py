@@ -30,7 +30,7 @@ def _run_monitor_thread(
     except Exception as e:
         monitor.result.thread_crashed = True
         monitor.record_error(f"thread_crash: {e}")
-        logger.exception("安装监控线程异常退出")
+        logger.exception("Install monitor thread crashed")
     finally:
         result_holder.append(monitor.result)
 
@@ -95,10 +95,10 @@ class InstallMonitorSession:
         self._stop_event.set()
         self._thread.join(timeout=join_timeout_s)
         if self._thread.is_alive():
-            logger.warning("安装监控线程在 %.0fs 内未结束", join_timeout_s)
+            logger.warning("Install monitor thread did not finish within %.0fs", join_timeout_s)
         summary = summarize_monitor_result(self.monitor, self._results)
         if summary:
-            logger.info("安装监控汇总: %s", summary)
+            logger.info("Install monitor summary: %s", summary)
         return summary
 
 
@@ -111,7 +111,7 @@ def install_apk_with_monitor(
     install_monitor: BaseInstallMonitor | None = None,
 ) -> tuple[str, str]:
     """
-    ``adb install -r`` 与安装安全弹窗监控并行（小米/三星/vivo 等 OCR 点 Install）。
+    ``adb install -r`` 与安装安全弹窗监控并行（小米/三星等 OCR 点 Install）。
     返回 (install_message, monitor_summary)。
     """
     session = InstallMonitorSession.start(

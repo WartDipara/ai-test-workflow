@@ -17,7 +17,7 @@ from game_agent.external_services.gameturbo.log.domain_extract import (
     format_domain_analysis_for_ai,
 )
 from game_agent.external_services.gameturbo.retry.prompts import (
-    gameturbo_log_baseline_prompt_block,
+    plugin_accel_log_prompt_block,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ Do not suggest changing _platform, default_action, tunnel_patterns (invalid at d
                 rec.ok(retry_only=patch.retry_only, game_id=patch.game_id)
                 return patch
         except Exception as e:
-            logger.error("deploy 失败 AI 分析异常: %s", e)
+            logger.error("Deploy failure AI analysis error: %s", e)
             return DeployRecoveryPatch(
                 analysis=f"AI analysis failed; retrying deploy: {e}",
                 retry_only=True,
@@ -112,11 +112,11 @@ Do not suggest changing _platform, default_action, tunnel_patterns (invalid at d
         blocked_stage_hint: str = "",
         prior_patch_restored: bool = False,
     ) -> GameTurboConfigPatch:
-        logger.info("AnalysisAgent 开始生成结构化 GameTurbo 配置补丁...")
+        logger.info("AnalysisAgent: generating GameTurbo config patch...")
         if not domain_analysis:
             raise ConfigPatchGenerationError(
-                "缺少 domain_region_analysis.json，无法基于域名/区域分析生成配置补丁。"
-                "请确认 gameturbo.log 已导出且 extract_domain_region_from_log 成功。",
+                "Missing domain_region_analysis.json; need gameturbo.log export "
+                "and successful extract_domain_region_from_log.",
                 stage="domain_analysis",
             )
 
@@ -137,7 +137,7 @@ Do not suggest changing _platform, default_action, tunnel_patterns (invalid at d
         )
 
         prompt = f"""
-{gameturbo_log_baseline_prompt_block()}
+{plugin_accel_log_prompt_block()}
 
 You are the GameTurbo network-acceleration config fix assistant. This project tests **tunnel acceleration**; only tunnel traffic is accelerated.
 Bulk-adding business domains to direct_patterns may let the game connect but skips acceleration — wrong direction.
@@ -222,9 +222,9 @@ GameTurbo log tail (auxiliary):
             try:
                 result = await self._patch_agent.run(prompt)
             except Exception as e:
-                logger.error("AnalysisAgent 生成配置补丁失败: %s", e)
+                logger.error("AnalysisAgent config patch failed: %s", e)
                 rec.fail(error=str(e)[:500])
-                raise ConfigPatchLlmError(f"AI 配置补丁请求失败: {e}") from e
+                raise ConfigPatchLlmError(f"AI config patch request failed: {e}") from e
             if result.output is None:
                 rec.fail(error="empty_model_output")
                 raise ConfigPatchLlmError(
@@ -241,7 +241,7 @@ GameTurbo log tail (auxiliary):
         self,
         prompt_messages: list,
     ) -> AttemptRoundDiagnosis:
-        logger.info("AnalysisAgent 生成本轮失败诊断报告...")
+        logger.info("AnalysisAgent: attempt failure diagnosis...")
         try:
             result = await self._attempt_round_agent.run(prompt_messages)
             return result.output or AttemptRoundDiagnosis(
@@ -249,14 +249,14 @@ GameTurbo log tail (auxiliary):
                 confidence="low",
             )
         except Exception as e:
-            logger.error("AnalysisAgent 本轮失败诊断生成失败: %s", e)
+            logger.error("AnalysisAgent attempt diagnosis failed: %s", e)
             raise
 
     async def generate_failure_diagnosis(
         self,
         prompt_messages: list,
     ) -> FailureDiagnosisReport:
-        logger.info("AnalysisAgent 生成最终失败诊断报告...")
+        logger.info("AnalysisAgent: final failure diagnosis...")
         try:
             result = await self._failure_report_agent.run(prompt_messages)
             return result.output or FailureDiagnosisReport(
@@ -264,5 +264,5 @@ GameTurbo log tail (auxiliary):
                 confidence="low",
             )
         except Exception as e:
-            logger.error("AnalysisAgent 失败诊断报告生成失败: %s", e)
+            logger.error("AnalysisAgent failure diagnosis failed: %s", e)
             raise

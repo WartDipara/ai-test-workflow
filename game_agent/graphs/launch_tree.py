@@ -62,6 +62,20 @@ def _overlay_blocking(_s: LaunchGraphState, f: LaunchFacts) -> bool:
     return not completed_tree_node(_s, "dismiss_blocking_overlay")
 
 
+def _server_selector_check_enabled(s: LaunchGraphState) -> bool:
+    return bool(s.get("server_selector_check_enabled", True))
+
+
+def _server_check_required(s: LaunchGraphState, f: LaunchFacts) -> bool:
+    if not _server_selector_check_enabled(s):
+        return False
+    return bool(
+        f.server_slot_visible
+        and not is_server_checked(s)
+        and is_login_done(s)
+    )
+
+
 def _can_tap_enter(s: LaunchGraphState, f: LaunchFacts) -> bool:
     if _overlay_blocking(s, f):
         return False
@@ -75,7 +89,7 @@ def _can_tap_enter(s: LaunchGraphState, f: LaunchFacts) -> bool:
         return False
     if f.terms_checkbox_visible and not is_privacy_checked(s):
         return False
-    if f.server_slot_visible and not is_server_checked(s) and is_login_done(s):
+    if _server_check_required(s, f):
         return False
     return True
 
@@ -92,6 +106,8 @@ def _adaptive_phase_failed(s: LaunchGraphState) -> bool:
 
 
 def _needs_adaptive_phase(s: LaunchGraphState, f: LaunchFacts) -> bool:
+    if s.get("session_agent_active"):
+        return False
     if not is_login_done(s):
         return False
     if s.get("in_game_confirmed"):
@@ -123,6 +139,8 @@ def _needs_adaptive_phase(s: LaunchGraphState, f: LaunchFacts) -> bool:
 
 
 def _should_check_in_game(s: LaunchGraphState, f: LaunchFacts) -> bool:
+    if s.get("session_agent_active"):
+        return False
     if s.get("in_game_entry_passed"):
         return False
     if not s.get("adaptive_flow_done") and _needs_adaptive_phase(s, f):
@@ -137,7 +155,11 @@ def _should_check_in_game(s: LaunchGraphState, f: LaunchFacts) -> bool:
         return False
     if f.terms_checkbox_visible and not is_privacy_checked(s):
         return False
-    if f.server_slot_visible and not is_server_checked(s):
+    if (
+        f.server_slot_visible
+        and not is_server_checked(s)
+        and _server_selector_check_enabled(s)
+    ):
         return False
     if not is_login_done(s) and f.login_stage == "login_form":
         return False
@@ -145,6 +167,8 @@ def _should_check_in_game(s: LaunchGraphState, f: LaunchFacts) -> bool:
 
 
 def _should_stability_observe(s: LaunchGraphState, _f: LaunchFacts) -> bool:
+    if s.get("session_agent_active"):
+        return False
     if s.get("in_game_confirmed"):
         return False
     return bool(s.get("in_game_entry_passed")) and not bool(s.get("stability_observe_complete"))
@@ -153,7 +177,9 @@ def _should_stability_observe(s: LaunchGraphState, _f: LaunchFacts) -> bool:
 def _should_in_game_agent(s: LaunchGraphState, _f: LaunchFacts) -> bool:
     if s.get("in_game_confirmed"):
         return False
-    return bool(s.get("stability_observe_complete")) and not bool(s.get("in_game_agent_done"))
+    if s.get("in_game_agent_done"):
+        return False
+    return bool(s.get("session_agent_active"))
 
 
 LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = StateTreeNode(
@@ -208,7 +234,8 @@ LAUNCH_TREE: StateTreeNode[LaunchGraphState, LaunchFacts, LaunchRouteTarget] = S
             id="server.check",
             action="check_server_selector",
             guard=lambda s, f: bool(
-                f.server_slot_visible
+                _server_selector_check_enabled(s)
+                and f.server_slot_visible
                 and not is_server_checked(s)
                 and (is_login_done(s) or not f.login_blocking)
                 and not _overlay_blocking(s, f)

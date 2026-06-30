@@ -9,29 +9,24 @@ from pathlib import Path
 from game_agent.services.adb_service import AdbService
 from game_agent.services.install_monitor.result import InstallMonitorResult
 from game_agent.utils.ocr_util import extract_text_with_bounds
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 logger = logging.getLogger(__name__)
 
 _INSTALL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"install", re.IGNORECASE),
-    re.compile(r"安装"),
+    compile_lexicon_pattern(Concept.INSTALL),
 )
 
 _DETAIL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"更多详情"),
-    re.compile(r"more\s*details", re.IGNORECASE),
-    re.compile(r"detail", re.IGNORECASE),
+    compile_lexicon_pattern(Concept.INSTALL_DETAILS),
 )
 
 _INSTALL_ANYWAY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"仍要安装"),
-    re.compile(r"install\s*anyway", re.IGNORECASE),
-    re.compile(r"install\s*still", re.IGNORECASE),
+    compile_lexicon_pattern(Concept.INSTALL_ANYWAY),
 )
 
 _CONTINUE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"继续安装"),
-    re.compile(r"continue\s*install", re.IGNORECASE),
+    compile_lexicon_pattern(Concept.CONTINUE_INSTALL),
 )
 
 
@@ -52,7 +47,7 @@ class BaseInstallMonitor(ABC):
             brand = adb.shell("getprop ro.product.brand").strip().lower()
             manufacturer = adb.shell("getprop ro.product.manufacturer").strip().lower()
         except Exception as e:
-            logger.warning("无法读取设备品牌: %s", e)
+            logger.warning("Cannot read device brand: %s", e)
             return False
         self.result.brand = brand or manufacturer
         return bool(
@@ -67,7 +62,6 @@ class BaseInstallMonitor(ABC):
         shot_dir: Path | None = None,
         poll_interval_s: float = 2.0,
     ) -> None:
-        """默认空实现——无安装拦截的设备无需处理。"""
         pass
 
     @staticmethod
@@ -102,13 +96,13 @@ class BaseInstallMonitor(ABC):
         try:
             adb.screencap_png(shot)
         except Exception as e:
-            logger.debug("install monitor 截图失败: %s", e)
+            logger.debug("install monitor screenshot failed: %s", e)
             return False
 
         try:
             ocr_text = BaseInstallMonitor.ocr_screen(adb, shot)
         except Exception as e:
-            logger.debug("install monitor OCR 失败: %s", e)
+            logger.debug("install monitor OCR failed: %s", e)
             return False
         finally:
             if shot.is_file():
@@ -120,7 +114,7 @@ class BaseInstallMonitor(ABC):
         x, y = coord
         width, height = adb.wm_size()
         result = adb.tap(x, y, width=width, height=height)
-        logger.info("install monitor 已点击 Install 按钮 (%d, %d): %s", x, y, result)
+        logger.info("install monitor tapped Install (%d, %d): %s", x, y, result)
         return True
 
 

@@ -63,7 +63,7 @@ class ExecutorFlowController:
         attempt_context: AttemptContext | None = None,
     ) -> RunState:
         if self._app_config is None:
-            raise RuntimeError("请先调用 load_settings()")
+            raise RuntimeError("Call load_settings() first")
         cfg = self._app_config
         view = ConsoleView(logger)
 
@@ -76,7 +76,7 @@ class ExecutorFlowController:
         executor_art.mkdir(parents=True, exist_ok=True)
         view.banner(f"artifacts -> {artifact_root}")
         if audit is not None:
-            audit.log_phase("executor", f"开始执行者阶段 artifact={artifact_root.name}")
+            audit.log_phase("executor", f"Executor phase start artifact={artifact_root.name}")
 
         adb = AdbService(cfg.adb.serial)
         w, h = adb.touch_size()
@@ -89,14 +89,14 @@ class ExecutorFlowController:
             f"max_width={cfg.ocr.max_image_width}",
         )
         if cfg.ocr.warmup_on_start:
-            view.banner("正在预热 PaddleOCR 模型…")
+            view.banner("Warming up PaddleOCR…")
             warmup_ocr()
 
         run_state = RunState()
         if attempt_context is not None and attempt_context.deploy_package_verified:
             run_state.package_install_confirmed = True
 
-        view.banner("执行者编排: LangGraph 进入游戏流程")
+        view.banner("Executor: LangGraph launch flow")
         if audit is not None:
             audit.log_phase("executor", "langgraph launch flow start")
         from game_agent.graphs.launch_flow import run_launch_graph_async

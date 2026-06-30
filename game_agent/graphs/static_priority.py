@@ -38,7 +38,11 @@ def has_pending_static_work(state: LaunchGraphState, facts: LaunchFacts) -> bool
         return True
     if facts.announcement_overlay and not completed_tree_node(state, "dismiss_blocking_overlay"):
         return True
-    if facts.server_slot_visible and not is_server_checked(state):
+    if (
+        facts.server_slot_visible
+        and not is_server_checked(state)
+        and state.get("server_selector_check_enabled", True)
+    ):
         return True
     return False
 

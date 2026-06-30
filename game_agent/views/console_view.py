@@ -5,8 +5,6 @@ from typing import Any
 
 
 class ConsoleView:
-    """简单控制台视图：与业务 Model 分离，仅负责呈现。"""
-
     def __init__(self, logger: logging.Logger | None = None) -> None:
         self._log = logger or logging.getLogger("game_agent.view")
 

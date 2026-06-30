@@ -43,14 +43,14 @@ class Preprocessor:
         if source_apk is None:
             return PreprocessResult(
                 ok=False,
-                message=f"未指定 apk_path 且 cache 中未找到 APK 文件: {self._cache_dir}",
+                message=f"No apk_path and no APK in cache: {self._cache_dir}",
             )
 
         stripped_apk, removed_abis, kept_abis = self._strip_abis(source_apk)
         if stripped_apk is None:
             return PreprocessResult(
                 ok=False,
-                message="APK ABI 剥离失败",
+                message="APK ABI strip failed",
                 source_apk=source_apk,
             )
 
@@ -62,21 +62,21 @@ class Preprocessor:
             dest = "cache" if self._packages_dir is None else "packages/"
             return PreprocessResult(
                 ok=False,
-                message=f"移动 APK 到 {dest} 失败: {source_apk.name}",
+                message=f"Failed to move APK to {dest}: {source_apk.name}",
                 source_apk=source_apk,
             )
 
         if stripped_apk != source_apk and source_apk.exists():
             source_apk.unlink()
-            logger.info("已清理 apk_cache 中的原始 APK: %s", source_apk.name)
+            logger.info("Removed source APK from apk_cache: %s", source_apk.name)
 
         kept_sorted = sorted(kept_abis)
         return PreprocessResult(
             ok=True,
             message=(
-                f"预处理完成: {source_apk.name} → {final_apk.name}, "
-                f"保留 ABI: {kept_sorted}"
-                + (f", 移除: {removed_abis}" if removed_abis else "")
+                f"Preprocess done: {source_apk.name} -> {final_apk.name}, "
+                f"kept ABI: {kept_sorted}"
+                + (f", removed: {removed_abis}" if removed_abis else "")
             ),
             source_apk=source_apk,
             processed_apk=final_apk,
@@ -92,19 +92,19 @@ class Preprocessor:
             if p.is_file()
         )
         if not candidates:
-            logger.warning("apk_cache 目录为空，请将原始 APK 放入 %s", self._cache_dir)
+            logger.warning("apk_cache empty, place source APK in %s", self._cache_dir)
             return None
         if len(candidates) > 1:
             names = ", ".join(p.name for p in candidates)
             logger.warning(
-                "apk_cache 中存在多个 APK，将使用第一个: %s  (全部: %s)",
+                "Multiple APKs in apk_cache, using first: %s  (all: %s)",
                 candidates[0].name,
                 names,
             )
         return candidates[0]
 
     def _strip_abis(self, apk_path: Path) -> tuple[Path | None, list[str], list[str]]:
-        logger.info("正在检查 %s 的 lib/ ABI 目录...", apk_path.name)
+        logger.info("Checking lib/ ABI dirs in %s...", apk_path.name)
         try:
             with zipfile.ZipFile(apk_path, "r") as zin:
                 all_abis = self._collect_all_abis(zin)
@@ -112,13 +112,13 @@ class Preprocessor:
                 removed = sorted(a for a in all_abis if a not in self._preserved_abis)
                 if not removed:
                     logger.info(
-                        "无需 ABI 剥离，lib/ 仅包含保留 ABI: %s",
+                        "No ABI stripping needed, lib/ only contains preserved ABIs: %s",
                         kept or sorted(self._preserved_abis),
                     )
                     return apk_path, [], kept or sorted(self._preserved_abis)
 
                 logger.info(
-                    "检测到非保留 ABI: %s，将仅保留 %s",
+                    "Non-preserved ABIs detected: %s, will only keep %s",
                     removed,
                     sorted(self._preserved_abis),
                 )
@@ -130,14 +130,14 @@ class Preprocessor:
                     output.unlink(missing_ok=True)
                     raise
 
-                logger.info("ABI 剥离完成: %s", output.name)
+                logger.info("ABI strip done: %s", output.name)
                 return output, removed, kept
 
         except zipfile.BadZipFile:
-            logger.error("%s 不是有效的 ZIP/APK 文件", apk_path.name)
+            logger.error("%s is not a valid ZIP/APK", apk_path.name)
             return None, [], []
         except OSError as e:
-            logger.error("读取 APK 失败: %s", e)
+            logger.error("Failed to read APK: %s", e)
             return None, [], []
 
     @staticmethod
@@ -181,15 +181,15 @@ class Preprocessor:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         target = self._cache_dir / target_name
         if target.exists() and target.resolve() != source.resolve():
-            logger.info("cache 中已存在 %s，将被覆盖", target_name)
+            logger.info("cache already has %s, will overwrite", target_name)
             target.unlink()
         try:
             if source.resolve() != target.resolve():
                 shutil.move(str(source), str(target))
-            logger.info("APK 已保留在 cache: %s", target)
+            logger.info("APK kept in cache: %s", target)
             return target
         except OSError as e:
-            logger.error("保留 APK 到 cache 失败: %s → %s: %s", source, target, e)
+            logger.error("Failed to keep APK in cache: %s -> %s: %s", source, target, e)
             return None
 
     def _move_to_packages(self, source: Path, target_name: str) -> Path | None:
@@ -198,13 +198,13 @@ class Preprocessor:
         target = self._packages_dir / target_name
 
         if target.exists():
-            logger.info("packages/ 中已存在 %s，将被覆盖", target_name)
+            logger.info("packages/ already has %s, will overwrite", target_name)
             target.unlink()
 
         try:
             shutil.move(str(source), str(target))
-            logger.info("APK 已移动到: %s", target)
+            logger.info("APK moved to: %s", target)
             return target
         except OSError as e:
-            logger.error("移动 APK 失败: %s → %s: %s", source, target, e)
+            logger.error("Failed to move APK: %s -> %s: %s", source, target, e)
             return None

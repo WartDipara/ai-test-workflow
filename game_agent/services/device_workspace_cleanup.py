@@ -61,7 +61,7 @@ def remove_leftover_game_installations(
     results: list[DevicePackageCleanupResult] = []
     for pkg in targets:
         if not adb.is_package_installed(pkg):
-            logger.info("设备未安装 %s，无需卸载", pkg)
+            logger.info("Device does not have %s, skip uninstall", pkg)
             results.append(
                 DevicePackageCleanupResult(
                     package=pkg,
@@ -71,14 +71,14 @@ def remove_leftover_game_installations(
             )
             continue
 
-        logger.info("检测到设备遗留安装 %s，force-stop 后卸载", pkg)
+        logger.info("Leftover install %s on device, force-stop then uninstall", pkg)
         fs_out = adb.force_stop_package(pkg)
         un_out = adb.uninstall(pkg)
         still_there = adb.is_package_installed(pkg)
         if still_there:
-            logger.warning("卸载后 %s 仍在设备上: %s", pkg, un_out)
+            logger.warning("After uninstall %s still on device: %s", pkg, un_out)
         else:
-            logger.info("已卸载设备遗留 %s: %s", pkg, un_out)
+            logger.info("Uninstalled leftover %s: %s", pkg, un_out)
         results.append(
             DevicePackageCleanupResult(
                 package=pkg,
@@ -97,6 +97,6 @@ def prepare_device_for_new_task(
     """新任务开始前：按 TaskRuntime.package_name 清理设备遗留安装。"""
     pkg = (game_package or "").strip()
     if not pkg:
-        logger.info("package_name 为空，跳过设备遗留卸载")
+        logger.info("package_name empty, skip device leftover uninstall")
         return []
     return remove_leftover_game_installations(adb, [pkg])

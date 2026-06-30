@@ -18,6 +18,7 @@ LaunchRouteTarget = Literal[
     "check_in_game",
     "stability_observe",
     "in_game_agent",
+    "session_relogin",
     "adaptive_phase",
     "dynamic_action",
     "scene_action",
@@ -104,7 +105,10 @@ class LaunchGraphState(TypedDict, total=False):
     login_done: bool
     sub_account_selected: bool
     server_checked: bool
+    server_selector_check_enabled: bool
     enter_tapped_count: int
+    session_agent_active: bool
+    session_agent_started_at: float
     in_game_entry_passed: bool
     in_game_confirmed: bool
     recover_hint: str
@@ -138,20 +142,17 @@ class LaunchGraphState(TypedDict, total=False):
     stability_rounds: int
     stability_observe_complete: bool
     in_game_agent_started_at: float
-    in_game_agent_deadline: float
     in_game_agent_rounds: int
     in_game_agent_last_action_signature: str
     in_game_agent_last_action_at: float
     in_game_agent_same_action_streak: int
     in_game_agent_done: bool
     in_game_play_started_at: float
-    in_game_play_deadline: float
     in_game_play_completed: bool
     in_game_play_failed_reason: str
     in_game_play_rounds: int
     in_game_play_chains_built: int
     in_game_play_steps_executed: int
-    llm_cache_hash: str
     in_game_behavior_chain: list[dict[str, Any]]
     in_game_behavior_cursor: int
     in_game_behavior_no_progress: int
@@ -159,6 +160,18 @@ class LaunchGraphState(TypedDict, total=False):
     in_game_behavior_failure_trace: list[dict[str, Any]]
     in_game_behavior_replan_count: int
     in_game_behavior_last_failed_step_id: str
+    last_in_game_screen_analysis: dict[str, Any]
+    in_game_analyze_cache_hash: str
+    in_game_brain_success_streak: int
+    in_game_brain_fail_streak: int
+    in_game_brain_last_verdict: str
+    in_game_vlm_no_progress_streak: int
+    last_in_game_progress_analysis: dict[str, Any]
+    last_in_game_session_decision: dict[str, Any]
+    last_motion_summary: str
+    last_spatial_hints: str
+    last_motion_probe_enabled: bool
+    motion_probe_rounds: int
     free_in_game_ocr_hits: list[str]
     adaptive_flow_done: bool
     adaptive_rounds: int
@@ -188,9 +201,39 @@ class LaunchGraphState(TypedDict, total=False):
     scene_gate_confidence: float
     scene_gate_description: str
     scene_gate_action: str
+    scene_gate_use_dim_region_tap: bool
+    scene_gate_dim_region_hint: str
     last_game_entry_judgment: dict[str, Any]
     action_failure_trace: list[dict[str, Any]]
     last_reflection: dict[str, Any]
+    dialogue_advance_mode: str
+    dialogue_advance_stall_streak: int
+    dialogue_dim_last_tap: list[int]
+    scene_memory_hits: int
+    scene_memory_misses: int
+    scene_memory_learns: int
+    last_scene_memory_match: dict[str, Any]
+    last_scene_memory_learned: dict[str, Any]
+    scene_label_slug: str
+    scene_label_id: str
+    scene_label_display: str
+    scene_label_coord_strategy: str
+    scene_label_semantic_target: str
+    scene_label_fast_path: bool
+    scene_label_hits: int
+    scene_label_misses: int
+    scene_label_learns: int
+    last_scene_label_match: dict[str, Any]
+    last_scene_label_judgment: dict[str, Any]
+    session_relogin_recovery_active: bool
+    session_relogin_rounds: int
+    session_relogin_started_at: float
+    session_relogin_session_index: int
+    session_restart_phase: str
+    session_restart_checkpoint: dict[str, Any]
+    screen_rotation: int
+    screen_is_landscape: bool
+    screen_aspect_corrected: bool
 
 
 def empty_launch_graph_state() -> LaunchGraphState:
@@ -214,7 +257,10 @@ def empty_launch_graph_state() -> LaunchGraphState:
         login_done=False,
         sub_account_selected=False,
         server_checked=False,
+        server_selector_check_enabled=True,
         enter_tapped_count=0,
+        session_agent_active=False,
+        session_agent_started_at=0.0,
         in_game_entry_passed=False,
         in_game_confirmed=False,
         recover_hint="",
@@ -248,20 +294,17 @@ def empty_launch_graph_state() -> LaunchGraphState:
         stability_rounds=0,
         stability_observe_complete=False,
         in_game_agent_started_at=0.0,
-        in_game_agent_deadline=0.0,
         in_game_agent_rounds=0,
         in_game_agent_last_action_signature="",
         in_game_agent_last_action_at=0.0,
         in_game_agent_same_action_streak=0,
         in_game_agent_done=False,
         in_game_play_started_at=0.0,
-        in_game_play_deadline=0.0,
         in_game_play_completed=False,
         in_game_play_failed_reason="",
         in_game_play_rounds=0,
         in_game_play_chains_built=0,
         in_game_play_steps_executed=0,
-        llm_cache_hash="",
         in_game_behavior_chain=[],
         in_game_behavior_cursor=0,
         in_game_behavior_no_progress=0,
@@ -269,6 +312,18 @@ def empty_launch_graph_state() -> LaunchGraphState:
         in_game_behavior_failure_trace=[],
         in_game_behavior_replan_count=0,
         in_game_behavior_last_failed_step_id="",
+        last_in_game_screen_analysis={},
+        in_game_analyze_cache_hash="",
+        in_game_brain_success_streak=0,
+        in_game_brain_fail_streak=0,
+        in_game_brain_last_verdict="",
+        in_game_vlm_no_progress_streak=0,
+        last_in_game_progress_analysis={},
+        last_in_game_session_decision={},
+        last_motion_summary="",
+        last_spatial_hints="",
+        last_motion_probe_enabled=False,
+        motion_probe_rounds=0,
         free_in_game_ocr_hits=[],
         adaptive_flow_done=False,
         adaptive_rounds=0,
@@ -298,8 +353,38 @@ def empty_launch_graph_state() -> LaunchGraphState:
         scene_gate_confidence=0.0,
         scene_gate_description="",
         scene_gate_action="",
+        scene_gate_use_dim_region_tap=False,
+        scene_gate_dim_region_hint="",
         action_failure_trace=[],
         last_reflection={},
+        dialogue_advance_mode="ocr",
+        dialogue_advance_stall_streak=0,
+        dialogue_dim_last_tap=[],
+        scene_memory_hits=0,
+        scene_memory_misses=0,
+        scene_memory_learns=0,
+        last_scene_memory_match={},
+        last_scene_memory_learned={},
+        scene_label_slug="",
+        scene_label_id="",
+        scene_label_display="",
+        scene_label_coord_strategy="",
+        scene_label_semantic_target="",
+        scene_label_fast_path=False,
+        scene_label_hits=0,
+        scene_label_misses=0,
+        scene_label_learns=0,
+        last_scene_label_match={},
+        last_scene_label_judgment={},
+        session_relogin_recovery_active=False,
+        session_relogin_rounds=0,
+        session_relogin_started_at=0.0,
+        session_relogin_session_index=0,
+        session_restart_phase="",
+        session_restart_checkpoint={},
+        screen_rotation=0,
+        screen_is_landscape=False,
+        screen_aspect_corrected=False,
     )
 
 

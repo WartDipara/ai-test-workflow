@@ -46,7 +46,7 @@ def cleanup_deploy_artifacts(
             path.unlink()
             removed.append(path.name)
     if removed:
-        logger.info("已清理 packages 下 deploy 产物: %s", ", ".join(removed))
+        logger.info("Cleaned deploy artifacts in packages: %s", ", ".join(removed))
     return removed
 
 
@@ -62,7 +62,7 @@ def cleanup_task_packages(
         name = source_apk.name
         source_apk.resolve().unlink()
         source_removed.append(name)
-        logger.info("已删除原包: %s", name)
+        logger.info("Removed source package: %s", name)
     return {
         "deploy": deploy_removed,
         "source": source_removed,

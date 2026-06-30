@@ -47,4 +47,4 @@ def test_classify_shutdown_exception() -> None:
 
     failure = classify_exception(ShutdownRequested("SIGINT"))
     assert failure.retryable is False
-    assert "Interrupted" in failure.message
+    assert failure.message == "User interrupted"

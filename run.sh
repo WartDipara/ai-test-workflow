@@ -29,8 +29,7 @@ fi
 
 # 启动
 echo "=========================================="
-echo " GameTurbo 自动化测试框架"
-echo " 目录: $SCRIPT_DIR"
+echo " Android AI Driven Test Framework"
 echo "=========================================="
 echo ""
 

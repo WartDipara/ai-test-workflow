@@ -52,6 +52,8 @@ executor:
   credential_verify_after_fill: true      # 填表后无障碍回读校验位置与内容
   credential_fill_max_distance_px: 150    # 节点中心与 OCR 点击点最大允许距离
   credential_fill_retry_on_verify_fail: true
+  server_selector_check_enabled: true   # false：跳过区服列表弹窗验证节点
+  server_panel_fusion_enabled: true     # 区服 tap 后 OCR+多模态融合判定弹窗
 
 # LangGraph 进游戏：轮次上限与无进展熔断（省略则使用下列默认值）
 launch_graph:
@@ -83,6 +85,42 @@ game:
   session_absent_threshold_s: 2.0
   clear_logcat_on_session_restart: true
   max_session_restarts: 0
+  # OpenCV 连拍脉冲：Session Agent（点进入游戏后）与局内 in_game_agent 阶段可用
+  motion_probe:
+    enabled: true
+    frame_count: 10
+    interval_s: 0.5
+    save_heatmaps: true
+    pulse_min_area: 200
+    motion_min_area: 800
+    ocr_fuse_radius_px: 120
+    always_burst: false
+    burst_on_forced_guidance: true
+    burst_on_no_progress: true
+    hsv_yellow_boost: true
+    fast_loop_enabled: false
+    fast_loop_max_frames: 15
+    fast_loop_interval_s: 0.1
+  scene_labels:
+    enabled: true
+    min_retrieve_similarity: 0.35
+    min_learn_confidence: 0.45
+    max_known_labels_in_prompt: 20
+    bootstrap_legacy_archetypes: true
+  in_game_success_confirm_rounds: 2
+  in_game_success_min_confidence: 0.75
+  in_game_fail_confirm_rounds: 2
+  in_game_fail_min_confidence: 0.75
+  in_game_vlm_no_progress_fail_rounds: 10
+  in_game_vlm_progress_min_confidence: 0.55
+  in_game_post_action_vlm_analyze: true
+  in_game_fast_path_enabled: true
+  dialogue_dim_tap:
+    stall_threshold: 2
+    dark_percentile: 40
+    ocr_exclude_margin_px: 24
+    min_region_area_ratio: 0.05
+    save_annotate: true
 
 external_services:
   gameturbo:
@@ -93,6 +131,8 @@ gameturbo:
   deploy_timeout_s: 900.0
   deploy_max_ai_retries: 3   # deploy 失败后 AI 读 deploy.log 并重试（含首次）的次数
   modify_patch_max_llm_retries: 3   # Modify 生成补丁时 LLM 请求失败的重试次数（含首次）
+  # Windows 下 deploy.sh 需要 Git Bash；留空自动探测，或填写例如 C:/Program Files/Git/bin/bash.exe
+  bash_path: ""
   # 单次任务最终产出：run_outputs/{gid}_{task_id}/（核心 result.json；插件开启时另有 merged config 等）
   run_outputs_dir: "./run_outputs"
 
@@ -108,6 +148,15 @@ network_anomaly:
   download_progress_stall_s: 90.0
   use_ocr_poll: true
   exclude_top_ratio: 0.15
+
+# 并行阶段前台守护：点击跳转浏览器等导致失焦时自动 am start 切回
+foreground_guard:
+  enabled: true
+  poll_interval_s: 10.0
+  max_recoveries: 5
+  recover_verify_delay_s: 1.5
+  allowed_foreground_packages:
+    - com.android.systemui
 
 # 流水线模块开关（便于单独测试）
 modules:

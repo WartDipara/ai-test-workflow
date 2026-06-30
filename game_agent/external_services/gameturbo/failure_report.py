@@ -11,7 +11,7 @@ from game_agent.external_services.gameturbo.log.domain_extract import (
 )
 from game_agent.external_services.gameturbo.retry.analysis import AnalysisAgent
 from game_agent.external_services.gameturbo.retry.prompts import (
-    gameturbo_log_baseline_prompt_block,
+    plugin_accel_log_prompt_block,
 )
 from game_agent.models.failure_report import (
     AttemptFailureInsight,
@@ -103,17 +103,17 @@ def _collect_attempt_bundle(
 
 def _guess_failure_stage(reason: str) -> str:
     lower = reason.lower()
-    if "前置处理" in reason or "deploy" in lower or "bootstrap" in lower:
+    if "preprocess" in lower or "deploy" in lower or "bootstrap" in lower:
         return "init"
     if "log anomaly" in lower or "tunnel closed" in lower or "channel closed" in lower:
         return "observer"
     if "screen anomaly" in lower or "network" in lower and "popup" in lower:
         return "observer"
-    if "执行者" in reason or "executor" in lower or "in-game" in lower or "check_in_game" in lower:
+    if "executor" in lower or "in-game" in lower or "check_in_game" in lower:
         return "executor"
-    if "screen" in lower or "画面" in reason or "observer" in lower or "parallel game" in lower:
+    if "screen" in lower or "observer" in lower or "parallel game" in lower:
         return "observer"
-    if "retry" in lower or "配置" in reason:
+    if "retry" in lower or "config" in lower or "modify" in lower:
         return "modify"
     return "unknown"
 
@@ -156,7 +156,7 @@ async def generate_and_save_attempt_failure_report(
         report.model_dump_json(indent=2) + "\n",
         encoding="utf-8",
     )
-    logger.info("本轮 AI 失败报告已写入: %s", md_path)
+    logger.info("Attempt AI failure report written: %s", md_path)
     return md_path
 
 
@@ -182,7 +182,7 @@ async def generate_attempt_failure_report(
     )
 
     prompt = f"""
-{gameturbo_log_baseline_prompt_block()}
+{plugin_accel_log_prompt_block()}
 
 You are a GameTurbo triage expert. Automated test **attempt {retry_no}** failed — output AttemptRoundDiagnosis for this round only.
 {retry_note}
@@ -228,7 +228,7 @@ Analyze **this attempt only** — not a multi-attempt executive summary.
             report.failure_stage = _guess_failure_stage(reason)
         return report
     except Exception as e:
-        logger.error("生成本轮 AI 失败报告异常: %s", e)
+        logger.error("Attempt AI failure report error: %s", e)
         return AttemptRoundDiagnosis(
             round_summary=f"AI attempt report failed: {e}",
             failure_stage=_guess_failure_stage(reason),
@@ -264,7 +264,7 @@ async def generate_failure_diagnosis_report(
         config_block = _read_text(game_config_path, limit=12000)
 
     prompt = f"""
-{gameturbo_log_baseline_prompt_block()}
+{plugin_accel_log_prompt_block()}
 
 You are a senior GameTurbo/Android network-acceleration triage expert. The automated task **failed finally** — produce a high-quality report for **human** investigation.
 Do not only restate "an exception occurred"; use logs, domain JSON, screenshots, audit trail for actionable conclusions.
@@ -332,7 +332,7 @@ Final failure report for humans — no empty "retry will fix it" claims.
             ]
         return report
     except Exception as e:
-        logger.error("生成 AI 失败诊断报告异常: %s", e)
+        logger.error("AI failure diagnosis report error: %s", e)
         return FailureDiagnosisReport(
             executive_summary=f"AI report generation failed: {e}",
             overall_verdict=last_reason[:500],

@@ -10,20 +10,20 @@ from game_agent.models.scene import SceneClassification, SceneTransition
 from game_agent.services.dialogue_heuristics import score_dialogue_from_bboxes
 from game_agent.utils.in_game_hud_ocr import match_in_game_hud_ocr, should_trigger_in_game_hud_check
 from game_agent.utils.ocr_util import OcrBbox, is_screencap_mostly_black
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
-_SKIP_RE = re.compile(r"跳过|Skip", re.IGNORECASE)
-_CONTINUE_RE = re.compile(r"继续|Continue|下一步|点击继续|点击屏幕", re.IGNORECASE)
-_CONFIRM_RE = re.compile(r"^(确定|确认|OK|Agree)$", re.IGNORECASE)
-_TUTORIAL_RE = re.compile(r"点击|引导|教程|tutorial|手指|轻触", re.IGNORECASE)
-_LOADING_RE = re.compile(
-    r"加载|loading|请稍候|正在进入|连接中|载入",
+_SKIP_RE = compile_lexicon_pattern(Concept.SKIP)
+_CONTINUE_RE = compile_lexicon_pattern(Concept.CONTINUE)
+_CONFIRM_RE = re.compile(
+    rf"^(?:{compile_lexicon_pattern(Concept.CONFIRM, Concept.AGREE).pattern})$",
     re.IGNORECASE,
 )
-_ENTER_WORLD_RE = re.compile(
-    r"进入世界|Enter\s*World|进入游戏|开始游戏|Click\s*to\s*Create|创建角色|创角",
-    re.IGNORECASE,
-)
-_CHAR_SLOT_RE = re.compile(r"LV\.|等级|Lv\.|选择角色|已有角色", re.IGNORECASE)
+_TUTORIAL_RE = compile_lexicon_pattern(Concept.TUTORIAL)
+_TECHNIQUE_RE = compile_lexicon_pattern(Concept.TECHNIQUE)
+_SELECTION_RE = compile_lexicon_pattern(Concept.SELECTION)
+_LOADING_RE = compile_lexicon_pattern(Concept.LOADING, Concept.RESOURCE_DOWNLOAD)
+_ENTER_WORLD_RE = compile_lexicon_pattern(Concept.ENTER_WORLD, Concept.START_GAME)
+_CHAR_SLOT_RE = compile_lexicon_pattern(Concept.CHAR_SLOT)
 _NARRATIVE_RE = re.compile(r"[\u4e00-\u9fff]{6,}")
 
 _LOW_CONFIDENCE_THRESHOLD = 0.4
@@ -56,6 +56,17 @@ def compute_scene_fingerprint(
     return f"{scene_id}|{(ocr_summary or '')[:240]}"
 
 
+def _is_technique_selection_ocr(ocr_summary: str) -> bool:
+    merged = ocr_summary or ""
+    return bool(_TECHNIQUE_RE.search(merged) and _SELECTION_RE.search(merged))
+
+
+def _score_technique_selection(ocr_summary: str) -> tuple[float, str]:
+    if not _is_technique_selection_ocr(ocr_summary):
+        return 0.0, ""
+    return 0.72, "technique_selection_modal"
+
+
 def _score_dialogue(
     bboxes: list[OcrBbox],
     ocr_summary: str,
@@ -63,6 +74,8 @@ def _score_dialogue(
     facts: LaunchFacts,
 ) -> tuple[float, str]:
     merged = ocr_summary or ""
+    if _is_technique_selection_ocr(merged):
+        return 0.0, ""
     if facts.login_blocking or facts.sub_account_blocking:
         return 0.0, ""
     if facts.initial_privacy_dialog or facts.announcement_overlay:
@@ -185,6 +198,17 @@ def classify_scene(
             source="rule",
         )
 
+    technique_score, technique_ev = _score_technique_selection(merged)
+    if technique_score >= 0.55:
+        fp = compute_scene_fingerprint("tutorial", ocr_summary=merged, bboxes=bboxes, screen_h=screen_h)
+        return SceneClassification(
+            scene_id="tutorial",
+            confidence=technique_score,
+            evidence=technique_ev,
+            fingerprint=fp,
+            source="rule",
+        )
+
     dialogue_score, dialogue_ev = _score_dialogue(bboxes, merged, screen_h, facts)
     if dialogue_score >= 0.55:
         fp = compute_scene_fingerprint("dialogue", ocr_summary=merged, bboxes=bboxes, screen_h=screen_h)
@@ -276,6 +300,14 @@ def detect_scene_transition(
             to_scene=new_id,
         )
 
+    if (
+        prev_fingerprint
+        and classification.fingerprint
+        and prev_fingerprint != classification.fingerprint
+        and new_id == prev_scene_id
+    ):
+        return SceneTransition(kind="none", reason="fingerprint_progress", from_scene=prev_scene_id, to_scene=new_id)
+
     if classification.confidence < _LOW_CONFIDENCE_THRESHOLD and prev_scene_id in (
         "dialogue",
         "tutorial",
@@ -287,13 +319,5 @@ def detect_scene_transition(
             from_scene=prev_scene_id,
             to_scene=new_id,
         )
-
-    if (
-        prev_fingerprint
-        and classification.fingerprint
-        and prev_fingerprint != classification.fingerprint
-        and new_id == prev_scene_id
-    ):
-        return SceneTransition(kind="none", reason="fingerprint_progress", from_scene=prev_scene_id, to_scene=new_id)
 
     return SceneTransition(kind="none", reason="", from_scene=prev_scene_id, to_scene=new_id)

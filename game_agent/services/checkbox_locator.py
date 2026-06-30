@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from game_agent.utils.ocr_util import OcrBbox
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 if TYPE_CHECKING:
     from game_agent.models.settings import MolmopointSection
@@ -18,19 +19,13 @@ logger = logging.getLogger(__name__)
 LocateMethod = Literal["ocr_offset", "molmopoint"]
 
 # 弱关键词：不要求整句识别
-_TERMS_WEAK = re.compile(
-    r"同意|协议|隐私|许可|政策|条款|已阅读|阅读|agree|term|privacy|policy|license",
-    re.IGNORECASE,
-)
+_TERMS_WEAK = compile_lexicon_pattern(Concept.PRIVACY, Concept.PRIVACY_TERMS, Concept.AGREE)
 # 可点击跳转的协议链接文案（勿作 checkbox 左锚）
-_LINK_TEXT = re.compile(
-    r"许可及服务|服务协议|用户协议|隐私政策|隐私权|政策及|协议及|《|》",
-    re.IGNORECASE,
-)
+_LINK_TEXT = compile_lexicon_pattern(Concept.PRIVACY_TERMS)
 # 适龄/CADPA 图标区，勿并入协议行
-_AGE_HINT = re.compile(r"适龄|通龄|CADPA|16\+", re.IGNORECASE)
+_AGE_HINT = compile_lexicon_pattern(Concept.HEALTH_ADVISORY)
 # 左侧前缀说明（「已阅读并同意」类，checkbox 在其左）
-_PREFIX_TEXT = re.compile(r"已阅读|阅读|同意|我已", re.IGNORECASE)
+_PREFIX_TEXT = compile_lexicon_pattern(Concept.AGREE, Concept.PRIVACY_MODAL_CONSENT)
 
 _ROW_Y_TOLERANCE_RATIO = 0.55
 _ROW_MAX_H_GAP_PX = 140

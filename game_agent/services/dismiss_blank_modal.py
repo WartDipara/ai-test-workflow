@@ -8,12 +8,9 @@ from dataclasses import dataclass
 from game_agent.models.phase_template import PhaseSpec
 from game_agent.services.blocking_overlay import blank_area_tap_xy
 from game_agent.utils.ocr_util import OcrBbox
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
-_BLANK_DISMISS_HINT_RE = re.compile(
-    r"点击空白|tap\s*blank|click\s*blank|click\s*empty|tap\s*empty|"
-    r"点击.*关闭|tap\s*to\s*close|press\s*anywhere",
-    re.IGNORECASE,
-)
+_BLANK_DISMISS_HINT_RE = compile_lexicon_pattern(Concept.DISMISS_CLOSE, Concept.CONTINUE)
 
 
 @dataclass(frozen=True, slots=True)

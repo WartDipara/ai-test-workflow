@@ -112,10 +112,11 @@ def test_in_game_entry_passed_skips_download_route() -> None:
         login_done=True,
         privacy_checked=True,
         enter_tapped_count=1,
+        session_agent_active=True,
+        session_agent_started_at=1.0,
         in_game_entry_passed=True,
         stability_observe_complete=True,
         in_game_agent_started_at=1.0,
-        in_game_agent_deadline=999999.0,
         last_ocr_summary=ocr,
     )
     state["facts"] = facts.model_dump()

@@ -32,13 +32,13 @@ class DeployBuildLock:
                 fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.write(fd, str(os.getpid()).encode("ascii"))
                 self._fd = fd
-                logger.debug("已获取 deploy build 锁: %s", self._path)
+                logger.debug("Acquired deploy build lock: %s", self._path)
                 return
             except FileExistsError:
                 if self._maybe_clear_stale():
                     continue
                 if time.monotonic() >= deadline:
-                    raise TimeoutError(f"等待 deploy build 锁超时: {self._path}")
+                    raise TimeoutError(f"deploy build lock timeout: {self._path}")
                 time.sleep(0.5)
 
     def release(self) -> None:
@@ -51,7 +51,7 @@ class DeployBuildLock:
         try:
             self._path.unlink(missing_ok=True)
         except OSError as exc:
-            logger.warning("释放 deploy build 锁失败: %s", exc)
+            logger.warning("Failed to release deploy build lock: %s", exc)
 
     def _maybe_clear_stale(self) -> bool:
         try:
@@ -62,7 +62,7 @@ class DeployBuildLock:
             return False
         try:
             self._path.unlink()
-            logger.warning("已清理过期 deploy build 锁: %s (age=%.0fs)", self._path, age)
+            logger.warning("Cleaned stale deploy build lock: %s (age=%.0fs)", self._path, age)
             return True
         except OSError:
             return False

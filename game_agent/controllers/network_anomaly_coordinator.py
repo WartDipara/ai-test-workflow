@@ -133,6 +133,8 @@ class NetworkAnomalyCoordinator:
         if self._should_run_ocr_poll(effective_stage):
             if self.attempt_context is not None and self.attempt_context.is_ocr_busy():
                 logger.debug("[NetworkAnomaly] skip OCR poll — executor busy")
+            elif self.attempt_context is not None and self.attempt_context.is_foreground_lost():
+                logger.debug("[NetworkAnomaly] skip OCR poll — foreground lost")
             else:
                 ocr_summary, dialog_hint, shot_path = await asyncio.to_thread(
                     self._capture_ocr_summary,
@@ -183,8 +185,10 @@ class NetworkAnomalyCoordinator:
 
         if need_vision and llm_mm is not None and shot_path:
             from game_agent.workers.vision_worker import VisionWorker
+            from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
 
-            vision = VisionWorker(llm_mm)
+            work_gen = capture_session_generation(self.attempt_context)
+            vision = VisionWorker(llm_mm, attempt_context=self.attempt_context)
             try:
                 vision_raw = await vision.analyze_game_state(
                     screenshot_path=Path(shot_path),
@@ -195,9 +199,12 @@ class NetworkAnomalyCoordinator:
             except Exception as e:
                 logger.warning("[NetworkAnomaly] multimodal confirm failed: %s", e)
             else:
-                vision_has_anomaly, vision_stage, vision_reason = _parse_vision_anomaly(
-                    vision_raw,
-                )
+                if discard_if_stale(work_gen, where="network_anomaly", ctx=self.attempt_context):
+                    vision_raw = ""
+                if vision_raw:
+                    vision_has_anomaly, vision_stage, vision_reason = _parse_vision_anomaly(
+                        vision_raw,
+                    )
 
         confirmed = False
         if cfg.require_multimodal_confirm:
@@ -242,7 +249,7 @@ class NetworkAnomalyCoordinator:
             vision_stage=vision_stage,
             ui_stage=ui_stage,
         )
-        logger.warning("[NetworkAnomaly] 已确认: %s", msg[:500])
+        logger.warning("[NetworkAnomaly] Confirmed: %s", msg[:500])
         if self.audit is not None:
             self.audit.log_observer(
                 kind="network_anomaly_confirmed",
@@ -262,13 +269,16 @@ class NetworkAnomalyCoordinator:
         if not cfg.use_ocr_poll:
             return False
         stage = (effective_stage or "unknown").strip()
-        if stage in ("", "unknown"):
-            return True
         if is_download_stall_watch_stage(stage):
             return True
 
         now = time.monotonic()
-        min_interval = max(_PASSIVE_OCR_MIN_INTERVAL_S, float(cfg.poll_interval_s) * 6.0)
+        poll_s = float(cfg.poll_interval_s)
+        # 下载阶段每轮 OCR；其余阶段（含 unknown）走被动间隔，避免与 executor 争抢 CPU
+        min_interval = max(_PASSIVE_OCR_MIN_INTERVAL_S, poll_s * 6.0)
+        if stage in ("", "unknown"):
+            min_interval = max(15.0, poll_s * 3.0)
+
         if now - self._last_passive_ocr_monotonic >= min_interval:
             self._last_passive_ocr_monotonic = now
             logger.debug(

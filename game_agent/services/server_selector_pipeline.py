@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ from game_agent.services.server_error_ocr_scan import (
 )
 from game_agent.services.server_selector_check import (
     ServerSelectorCheckResult,
+    has_strong_modal_evidence,
     run_server_selector_check_async,
 )
 from game_agent.services.server_selector_locator import (
@@ -117,6 +119,31 @@ def _fail_fast_e2006(probe_msg: str, reason: str) -> ServerSelectorCheckResult:
     )
 
 
+def _probe_indicates_ready_skip(probe: ServerConnectivityProbe | None) -> bool:
+    if probe is None:
+        return False
+    return (
+        probe.server_slot_status == "ready"
+        and probe.recommendation == "tap_verify"
+        and probe.enter_button_visible
+        and not probe.blocking_overlay
+        and not probe.has_network_error_ui
+    )
+
+
+def _ready_skip_result(probe_msg: str, probe: ServerConnectivityProbe) -> ServerSelectorCheckResult:
+    return ServerSelectorCheckResult(
+        ok=True,
+        message=(
+            f"{probe_msg}[ServerCheck] PASSED source=probe_ready_skip "
+            f"server_slot_status=ready recommendation=tap_verify "
+            f"reason={probe.reason!r}"
+        ),
+        taps_used=0,
+        panel_opened=False,
+    )
+
+
 def _ocr_indicates_empty_slot(
     bboxes: list[OcrBbox],
     enter: OcrBbox,
@@ -133,6 +160,28 @@ def _ocr_indicates_empty_slot(
     )
 
 
+_SERVER_NAME_IN_BAND_RE = re.compile(r"[\u4e00-\u9fff]{2,8}")
+
+
+def _ocr_has_named_server_in_band(
+    bboxes: list[OcrBbox],
+    enter: OcrBbox,
+    screen_w: int,
+    screen_h: int,
+) -> bool:
+    """槽位带内已有区服名（非仅 -- 占位）时，不算 empty。"""
+    band = server_band(enter, screen_w, screen_h)
+    for bbox in bboxes:
+        text = (bbox.text or "").strip()
+        if not text or text in ("点击选区", "点击选择"):
+            continue
+        if not _SERVER_NAME_IN_BAND_RE.fullmatch(text):
+            continue
+        if band.y1 <= bbox.cy <= band.y2 and band.x1 <= bbox.cx <= band.x2:
+            return True
+    return False
+
+
 def _slot_empty_for_tap_upgrade(
     probe: ServerConnectivityProbe | None,
     bboxes: list[OcrBbox],
@@ -140,7 +189,11 @@ def _slot_empty_for_tap_upgrade(
     screen_w: int,
     screen_h: int,
 ) -> bool:
+    if _ocr_has_named_server_in_band(bboxes, enter, screen_w, screen_h):
+        return False
     if probe is not None and probe.server_slot_status == "empty":
+        if not _ocr_indicates_empty_slot(bboxes, enter, screen_w, screen_h):
+            return False
         return True
     return _ocr_indicates_empty_slot(bboxes, enter, screen_w, screen_h)
 
@@ -222,8 +275,10 @@ def finalize_tap_check_result(
     probe: ServerConnectivityProbe | None,
     tap_result: ServerSelectorCheckResult,
     slot_empty: bool,
+    last_after_bboxes: list[OcrBbox] | None = None,
+    enter_bbox: OcrBbox | None = None,
 ) -> ServerSelectorCheckResult:
-    """tap 验证后：empty 槽且列表未打开 → 升级为 E2006。"""
+    """tap 验证后：empty 槽且列表未打开 → 升级为 E2006（强弹窗证据时降级）。"""
     if tap_result.ok:
         return ServerSelectorCheckResult(
             ok=True,
@@ -232,6 +287,20 @@ def finalize_tap_check_result(
             panel_opened=tap_result.panel_opened,
         )
     if slot_empty:
+        if (
+            last_after_bboxes
+            and enter_bbox is not None
+            and has_strong_modal_evidence(last_after_bboxes, enter_bbox)
+        ):
+            return ServerSelectorCheckResult(
+                ok=False,
+                message=(
+                    f"{probe_msg}{tap_result.message}; "
+                    "panel modal evidence present — not upgrading to E2006"
+                ),
+                taps_used=tap_result.taps_used,
+                panel_opened=True,
+            )
         return ServerSelectorCheckResult(
             ok=False,
             message=(
@@ -366,6 +435,9 @@ async def run_full_server_selector_check(
         if probe.recommendation == "fail_fast":
             return _fail_fast_e2006(probe_msg, probe.reason)
 
+        if _probe_indicates_ready_skip(probe):
+            return _ready_skip_result(probe_msg, probe)
+
         if probe.recommendation == "dismiss_overlay" or probe.blocking_overlay:
             shot, bboxes, ocr_body, dismiss_msg = await _try_dismiss_blocking_overlay(
                 adb,
@@ -408,6 +480,8 @@ async def run_full_server_selector_check(
                             "still present after dismiss attempts."
                         ),
                     )
+                if _probe_indicates_ready_skip(probe):
+                    return _ready_skip_result(probe_msg, probe)
 
     elif detect_blocking_overlay(ocr_summary=ocr_body, bboxes=bboxes).suspected:
         shot, bboxes, ocr_body, dismiss_msg = await _try_dismiss_blocking_overlay(
@@ -463,11 +537,14 @@ async def run_full_server_selector_check(
         round_id=round_id,
     )
     slot_empty = _slot_empty_for_tap_upgrade(probe, bboxes, enter, sw, sh)
+    recover = list(tap_result.recover_bboxes)
     return finalize_tap_check_result(
         probe_msg=probe_msg,
         probe=probe,
         tap_result=tap_result,
         slot_empty=slot_empty,
+        last_after_bboxes=recover if recover else None,
+        enter_bbox=enter,
     )
 
 

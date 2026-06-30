@@ -43,11 +43,13 @@ async def _capture_ocr(
     shot_path,
     *,
     actx,
+    state: LaunchGraphState | None = None,
 ) -> tuple[str, list]:
-    sw, sh = deps.screen_width, deps.screen_height
-    if not sw or not sh:
-        sw, sh = deps.adb.touch_size()
-        deps.screen_width, deps.screen_height = sw, sh
+    from game_agent.utils.screen_coord import resolve_and_sync
+
+    st = state if state is not None else {}
+    space = resolve_and_sync(deps.adb, shot_path, deps=deps, state=st)
+    sw, sh = space.tap_w, space.tap_h
     if actx is not None:
         actx.set_ocr_busy(True)
     try:
@@ -76,7 +78,7 @@ async def _think_phase_spec(
     llm_cfg = deps.app_config.llm_multimodal
     if llm_cfg is None:
         return None
-    vision = VisionWorker(llm_cfg)
+    vision = VisionWorker(llm_cfg, attempt_context=deps.attempt_context)
     return await plan_phase_spec(
         vision,
         screenshot_path=shot,
@@ -189,6 +191,18 @@ async def _run_act_verify(
     sh: int,
     actx,
 ) -> LaunchGraphState:
+    fg_cfg = deps.app_config.foreground_guard
+    if fg_cfg.enabled:
+        from game_agent.modules.run_context import block_until_foreground_ready
+
+        if not block_until_foreground_ready(actx, poll_interval_s=fg_cfg.poll_interval_s):
+            state["recover_hint"] = (
+                actx.get_fatal_reason() if actx is not None else "foreground guard stop"
+            ) or "foreground guard stop"
+            state["finished"] = True
+            state["terminal_error"] = str(state["recover_hint"])[:2000]
+            return state  # type: ignore[return-value]
+
     limits = _launch_limits(deps)
     active = get_active_tree_node(state)
     spec = get_active_spec(state)
@@ -324,8 +338,8 @@ async def run_once(state: LaunchGraphState, deps: LaunchGraphDeps) -> LaunchGrap
 
     ts = datetime.now().strftime("%H%M%S_%f")
     shot = deps.artifact_root / f"graph_adaptive_round_{rounds:03d}_{ts}.png"
-    deps.adb.screencap_png(shot)
-    ocr_summary, bboxes = await _capture_ocr(deps, shot, actx=actx)
+    deps.    adb.screencap_png(shot)
+    ocr_summary, bboxes = await _capture_ocr(deps, shot, actx=actx, state=state)
     state["last_screenshot"] = str(shot.resolve())
     state["last_ocr_summary"] = ocr_summary
     state["last_bboxes"] = serialize_bboxes(bboxes)

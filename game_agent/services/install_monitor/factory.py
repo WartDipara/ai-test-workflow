@@ -5,7 +5,6 @@ import logging
 from game_agent.services.adb_service import AdbService
 from game_agent.services.install_monitor.base import BaseInstallMonitor, NullInstallMonitor
 from game_agent.services.install_monitor.samsung import SamsungInstallMonitor
-from game_agent.services.install_monitor.vivo import VivoInstallMonitor
 from game_agent.services.install_monitor.xiaomi import XiaomiInstallMonitor
 
 logger = logging.getLogger(__name__)
@@ -13,7 +12,6 @@ logger = logging.getLogger(__name__)
 _INSTALL_MONITOR_CLASSES: list[type[BaseInstallMonitor]] = [
     XiaomiInstallMonitor,
     SamsungInstallMonitor,
-    VivoInstallMonitor,
 ]
 
 
@@ -22,9 +20,9 @@ def create_install_monitor(adb: AdbService) -> BaseInstallMonitor:
         try:
             monitor = cls()
             if monitor.should_monitor(adb):
-                logger.info("安装监控: 匹配 %s", cls.__name__)
+                logger.info("Install monitor: matched %s", cls.__name__)
                 return monitor
         except Exception as e:
-            logger.warning("安装监控 %s 初始化失败: %s", cls.__name__, e)
-    logger.info("安装监控: 无匹配品牌，使用 NullInstallMonitor")
+            logger.warning("Install monitor %s init failed: %s", cls.__name__, e)
+    logger.info("Install monitor: no brand match, using NullInstallMonitor")
     return NullInstallMonitor()

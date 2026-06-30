@@ -22,9 +22,9 @@ def resolve_batch_urls(cache_dir: Path) -> list[str]:
     apks_txt = cache_dir / _APKS_TXT
     urls = read_apk_urls(apks_txt) if apks_txt.is_file() else []
     if urls:
-        logger.info("批跑任务来源 apks.txt: %d 条 URL", len(urls))
+        logger.info("Batch task source apks.txt: %d URL(s)", len(urls))
         return urls
     if list_cache_apks(cache_dir):
-        logger.info("批跑任务来源 apk_cache 缓存（单任务）")
+        logger.info("Batch task source apk_cache (single task)")
         return [""]
     return []

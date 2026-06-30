@@ -64,6 +64,14 @@ def test_fusion_ocr_only_when_no_vision() -> None:
     r = fuse_panel_verdict(ocr=ocr, vision=None)
     assert r.passed is True
     assert r.source == "ocr_only"
+    assert "vision_unavailable" in r.message
+
+
+def test_fusion_disabled_skips_vision() -> None:
+    ocr = PanelOcrVerdict(passed=False, evidence="no_modal_evidence")
+    r = fuse_panel_verdict(ocr=ocr, vision=None, fusion_enabled=False)
+    assert r.passed is False
+    assert "fusion_disabled" in r.message
 
 
 def test_fusion_hard_veto_page_navigation() -> None:

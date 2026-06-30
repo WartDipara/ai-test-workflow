@@ -190,7 +190,7 @@ class GameTurboLogDomainExtractor:
 
     def analyze_log_file(self, log_path: Path) -> DomainRegionAnalysis:
         if not log_path.is_file():
-            raise FileNotFoundError(f"日志文件不存在: {log_path}")
+            raise FileNotFoundError(f"Log file not found: {log_path}")
         log_text = normalize_gameturbo_log_text(
             log_path.read_text(encoding="utf-8", errors="replace"),
         )
@@ -213,7 +213,7 @@ class GameTurboLogDomainExtractor:
                 try:
                     probe = probe_domain_stability(domain, port=self.port)
                 except Exception as exc:
-                    logger.warning("域名 %s 稳定性探测失败: %s", domain, exc)
+                    logger.warning("Domain %s stability probe failed: %s", domain, exc)
                     errors.append(f"{domain}: {exc}")
                     probe = {
                         "domain": domain,
@@ -483,7 +483,7 @@ def extract_domain_region_from_log(
     if output_path is not None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(result.to_json_text(), encoding="utf-8")
-        logger.info("域名/区域分析已写入: %s", output_path)
+        logger.info("Domain/region analysis written: %s", output_path)
     return result
 
 
@@ -493,5 +493,5 @@ def load_domain_region_analysis_json(path: Path) -> dict[str, Any] | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        logger.warning("无法解析 %s: %s", path, exc)
+        logger.warning("Cannot parse %s: %s", path, exc)
         return None

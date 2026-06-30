@@ -124,8 +124,8 @@ def require_success_merged_config(
         else GAMETURBO_MERGED_CONFIG_PATH
     )
     raise RuntimeError(
-        f"测试通过但缺少 deploy 合并配置（已查 {winning_artifact_root} 与 {fallback}），"
-        "请确认 deploy.sh 已执行并生成合并配置"
+        f"Tests passed but deploy merge config missing (checked {winning_artifact_root} "
+        f"and {fallback}); confirm deploy.sh ran and produced merge config"
     )
 
 

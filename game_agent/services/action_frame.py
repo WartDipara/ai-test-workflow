@@ -151,6 +151,7 @@ async def run_action_frame(
     ocr_before: str = "",
     expected_stage: str = "",
     attempt_context: Any | None = None,
+    foreground_poll_interval_s: float | None = None,
 ) -> ActionFrameResult:
     """
     节点内微循环：执行 act_fn → 截图 OCR → verify_fn。
@@ -164,6 +165,21 @@ async def run_action_frame(
 
     for attempt in range(1, max(1, max_attempts) + 1):
         result.attempts = attempt
+        if foreground_poll_interval_s is not None:
+            from game_agent.modules.run_context import block_until_foreground_ready
+
+            if not block_until_foreground_ready(
+                attempt_context,
+                poll_interval_s=foreground_poll_interval_s,
+            ):
+                result.failure_traces = traces
+                result.passed = False
+                result.evidence = (
+                    attempt_context.get_fatal_reason()
+                    if attempt_context is not None
+                    else "foreground guard stop"
+                ) or "foreground guard stop"
+                return result
         act_msg = await act_fn(state, attempt)
         logger.info("[ActionFrame:%s] act attempt=%d %s", node, attempt, (act_msg or "")[:160])
         if attempt_context is not None:

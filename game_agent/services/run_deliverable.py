@@ -40,6 +40,8 @@ def build_in_game_play_summary(graph_state: dict | None) -> dict | None:
         "chains_built": int(graph_state.get("in_game_play_chains_built") or 0),
         "steps_executed": int(graph_state.get("in_game_play_steps_executed") or 0),
         "replans": int(graph_state.get("in_game_behavior_replan_count") or 0),
+        "scene_memory_hits": int(graph_state.get("scene_memory_hits") or 0),
+        "scene_memory_learns": int(graph_state.get("scene_memory_learns") or 0),
         "completed": bool(
             graph_state.get("in_game_play_completed") or graph_state.get("in_game_confirmed")
         ),
@@ -138,28 +140,33 @@ def publish_success_deliverable(
     winning_retry: int,
     total_attempts: int,
     session_restarts: int = 0,
+    external_evidence: dict | None = None,
 ) -> Path:
     """成功：产出通过验证的 GameTurbo 合并配置（.gameturbo_merged.json 副本）。"""
     passed_name = game_config_path.name
     passed_config = deliverable.root / passed_name
     shutil.copy2(game_config_path, passed_config)
 
+    payload: dict = {
+        "success": True,
+        "gid": deliverable.gid,
+        "task_id": deliverable.task_id,
+        "winning_retry": winning_retry,
+        "total_attempts": total_attempts,
+        "game_config": str(passed_config),
+        "merged_config": str(passed_config),
+        "source_config": str(game_config_path.resolve()),
+        "source_merged_config": str(game_config_path.resolve()),
+        "winning_artifact": str(winning_artifact_root.resolve()),
+        "session_restarts": session_restarts,
+        "finished_at": datetime.now(tz=UTC).isoformat(),
+    }
+    if external_evidence:
+        payload["external_evidence"] = external_evidence
+
     _write_json(
         deliverable.root / "result.json",
-        {
-            "success": True,
-            "gid": deliverable.gid,
-            "task_id": deliverable.task_id,
-            "winning_retry": winning_retry,
-            "total_attempts": total_attempts,
-            "game_config": str(passed_config),
-            "merged_config": str(passed_config),
-            "source_config": str(game_config_path.resolve()),
-            "source_merged_config": str(game_config_path.resolve()),
-            "winning_artifact": str(winning_artifact_root.resolve()),
-            "session_restarts": session_restarts,
-            "finished_at": datetime.now(tz=UTC).isoformat(),
-        },
+        payload,
     )
     return passed_config
 

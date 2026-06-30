@@ -8,6 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from game_agent.i18n import Concept, compile_lexicon_pattern
+
 
 class TapTarget(BaseModel):
     x: int = 0
@@ -116,7 +118,13 @@ Return valid JSON only (no markdown):
 """
 
 
-_SUB_ACCOUNT_STAGE_RE = re.compile(r"sub[_-]?account|小号|子账号|选角", re.IGNORECASE)
-_LOGIN_STAGE_RE = re.compile(r"^login$|login_form", re.IGNORECASE)
-_ANNOUNCEMENT_STAGE_RE = re.compile(r"announcement|公告", re.IGNORECASE)
-_CHARACTER_STAGE_RE = re.compile(r"character_creation|创角|创建角色", re.IGNORECASE)
+_SUB_ACCOUNT_STAGE_RE = compile_lexicon_pattern(Concept.SUB_ACCOUNT)
+_LOGIN_STAGE_RE = re.compile(
+    compile_lexicon_pattern(Concept.LOGIN).pattern + r"|login_form",
+    re.IGNORECASE,
+)
+_ANNOUNCEMENT_STAGE_RE = compile_lexicon_pattern(Concept.ANNOUNCEMENT, Concept.OVERLAY)
+_CHARACTER_STAGE_RE = re.compile(
+    compile_lexicon_pattern(Concept.CHARACTER_CREATION).pattern + r"|character_creation",
+    re.IGNORECASE,
+)

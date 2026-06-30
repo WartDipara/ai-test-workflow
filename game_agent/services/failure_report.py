@@ -16,19 +16,32 @@ ATTEMPT_FAILURE_REPORT_MD = "attempt_failure_report.md"
 ATTEMPT_FAILURE_REPORT_JSON = "attempt_failure_report.json"
 
 
+def user_interrupt_diagnosis_report() -> FailureDiagnosisReport:
+    """Static failure report on user interrupt; no LLM call."""
+    from game_agent.models.run_failure import USER_INTERRUPT_MESSAGE
+
+    return FailureDiagnosisReport(
+        executive_summary=USER_INTERRUPT_MESSAGE,
+        overall_verdict=USER_INTERRUPT_MESSAGE,
+        confidence="high",
+        human_triage_steps=["User interrupted the batch run or task, no AI troubleshooting required"],
+        non_config_issues=[USER_INTERRUPT_MESSAGE],
+    )
+
+
 def _guess_failure_stage(reason: str) -> str:
     lower = reason.lower()
-    if "前置处理" in reason or "deploy" in lower or "bootstrap" in lower:
+    if "preprocess" in lower or "deploy" in lower or "bootstrap" in lower:
         return "init"
     if "log anomaly" in lower or "tunnel closed" in lower or "channel closed" in lower:
         return "observer"
     if "screen anomaly" in lower or "network" in lower and "popup" in lower:
         return "observer"
-    if "执行者" in reason or "executor" in lower or "in-game" in lower or "check_in_game" in lower:
+    if "executor" in lower or "in-game" in lower or "check_in_game" in lower:
         return "executor"
-    if "screen" in lower or "画面" in reason or "observer" in lower or "parallel game" in lower:
+    if "screen" in lower or "observer" in lower or "parallel game" in lower:
         return "observer"
-    if "retry" in lower or "配置" in reason:
+    if "retry" in lower or "config" in lower or "modify" in lower:
         return "modify"
     return "unknown"
 
@@ -43,7 +56,6 @@ async def generate_and_save_attempt_failure_report(
     will_retry: bool,
     game_config_path: Path | None,
 ) -> Path | None:
-    """在本轮 artifact 目录写入 attempt_failure_report.md / .json。"""
     from game_agent.external_services.manager import ExternalServiceManager
 
     mgr = ExternalServiceManager(cfg)
@@ -85,7 +97,7 @@ async def generate_and_save_attempt_failure_report(
         encoding="utf-8",
     )
     json_path.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
-    logger.info("本轮失败报告已写入: %s", md_path)
+    logger.info("Attempt failure report written: %s", md_path)
     return md_path
 
 
@@ -137,7 +149,6 @@ async def generate_failure_diagnosis_report(
     attempt_records: list[tuple[int, Path]],
     game_config_path: Path | None,
 ) -> FailureDiagnosisReport:
-    """汇总各轮完整证据，由 AI 生成面向人工排障的失败报告。"""
     from game_agent.external_services.manager import ExternalServiceManager
 
     if ExternalServiceManager(cfg).gameturbo_enabled():

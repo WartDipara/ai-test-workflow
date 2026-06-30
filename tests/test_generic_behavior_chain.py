@@ -59,7 +59,10 @@ def test_parse_generic_combat_behavior_chain() -> None:
       ]
     }
     """
-    bboxes = [OcrBbox(text="技能", cx=930, cy=2100, x1=0, y1=0, x2=0, y2=0)]
+    bboxes = [
+        OcrBbox(text="Enemy", cx=820, cy=720, x1=780, y1=680, x2=860, y2=760),
+        OcrBbox(text="技能", cx=930, cy=2100, x1=0, y1=0, x2=0, y2=0),
+    ]
 
     chain = parse_behavior_chain_json(raw, screen_w=1080, screen_h=2400)
     assert chain is not None

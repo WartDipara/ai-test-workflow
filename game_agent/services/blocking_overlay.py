@@ -16,19 +16,19 @@ from game_agent.utils.ocr_util import OcrBbox
 
 logger = logging.getLogger(__name__)
 
+from game_agent.i18n import Concept, compile_lexicon_pattern
+
+_OVERLAY_BASE_RE = compile_lexicon_pattern(Concept.OVERLAY, Concept.ANNOUNCEMENT)
 _OVERLAY_OCR_RE = re.compile(
-    r"Notice|日常通知|公告|announcement|点击空白|点击.*关闭|不再提示|活动",
+    rf"(?:{_OVERLAY_BASE_RE.pattern})|点击.*关闭|點擊.*關閉",
     re.IGNORECASE,
 )
-_PROBE_BLOCKING_REASON_RE = re.compile(
-    r"modal|notice|通知|遮挡|covering|overlay|popup|弹窗|公告",
-    re.IGNORECASE,
-)
+_PROBE_BLOCKING_REASON_RE = compile_lexicon_pattern(Concept.OVERLAY)
 _DISMISS_BUTTON_RE = re.compile(
-    r"^(关闭|关\s*闭|确定|确认|我知道了|我已知晓|OK|Close|Confirm|×|X)$",
+    r"^(?:" + compile_lexicon_pattern(Concept.DISMISS_CLOSE, Concept.CONFIRM).pattern + r")$",
     re.IGNORECASE,
 )
-_DAILY_NOTICE_RE = re.compile(r"日常通知", re.IGNORECASE)
+_DAILY_NOTICE_RE = compile_lexicon_pattern(Concept.DAILY_NOTICE)
 
 OVERLAY_DISMISS_FOCUS = (
     "blocking overlay: dismiss before server/login/enter; "
@@ -169,6 +169,37 @@ def _plan_from_facts(facts: LaunchFacts | None) -> OverlayDismissPlan | None:
     return None
 
 
+def recover_exit_confirm_dialog_if_present(
+    adb,
+    bboxes: list[OcrBbox],
+    *,
+    screen_w: int,
+    screen_h: int,
+) -> str | None:
+    """
+    登录前若误触弹出「退出游戏」确认框，点「取消」等否定按钮关闭。
+    返回操作摘要；无弹窗时返回 None。
+    """
+    from game_agent.services.server_selector_check import (
+        find_exit_confirm_negative,
+        has_exit_confirm_dialog,
+    )
+
+    if not has_exit_confirm_dialog(bboxes):
+        return None
+    neg = find_exit_confirm_negative(bboxes)
+    if neg is None:
+        return None
+    nx, ny = neg
+    msg = adb.tap(nx, ny, width=screen_w, height=screen_h)
+    logger.info(
+        "[blocking_overlay] recovered accidental exit dialog tap cancel (%s,%s)",
+        nx,
+        ny,
+    )
+    return f"exit_confirm_cancel ({nx},{ny}): {(msg or '')[:80]}"
+
+
 async def resolve_dismiss_target(
     *,
     llm_cfg: LLMSection | None,
@@ -180,15 +211,18 @@ async def resolve_dismiss_target(
     facts: LaunchFacts | None = None,
     probe: ServerConnectivityProbe | None = None,
     round_id: int = 0,
+    attempt: int = 1,
+    skip_facts_xy: bool = False,
 ) -> OverlayDismissPlan | None:
     """解析 dismiss 坐标：probe → facts → interpreter → OCR 按钮 → 空白启发。"""
     from_probe = _plan_from_probe(probe) if probe else None
     if from_probe is not None:
         return from_probe
 
-    from_facts = _plan_from_facts(facts)
-    if from_facts is not None:
-        return from_facts
+    if not skip_facts_xy and attempt <= 1:
+        from_facts = _plan_from_facts(facts)
+        if from_facts is not None:
+            return from_facts
 
     if llm_cfg is not None:
         interp = await interpret_launch_screen(

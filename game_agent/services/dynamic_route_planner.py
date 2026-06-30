@@ -22,23 +22,20 @@ from game_agent.services.behavior_chain import (
     validate_behavior_chain,
 )
 from game_agent.utils.ocr_util import OcrBbox
+from game_agent.i18n import Concept, compile_lexicon_pattern
 
 logger = logging.getLogger(__name__)
 
 DynamicActionType = Literal["tap_xy", "tap_text", "swipe", "wait", "press_back", "none"]
 
-_ENTER_WORLD_RE = re.compile(
-    r"进入世界|Enter\s*World|进入游戏|开始游戏",
-    re.IGNORECASE,
-)
-_CREATE_ROLE_RE = re.compile(
-    r"创建角色|Click\s*to\s*Create|Create\s*Role|新建角色",
-    re.IGNORECASE,
-)
-_CHAR_SLOT_RE = re.compile(r"LV\.|等级|Lv\.|角色", re.IGNORECASE)
-_BEHAVIOR_CHAIN_HINT_RE = re.compile(
-    r"创角|创建角色|Enter\s*World|进入世界|进入游戏|开始游戏|Click\s*to\s*Create|LV\.|等级|角色",
-    re.IGNORECASE,
+_ENTER_WORLD_RE = compile_lexicon_pattern(Concept.ENTER_WORLD, Concept.START_GAME)
+_CREATE_ROLE_RE = compile_lexicon_pattern(Concept.CHARACTER_CREATION, Concept.ENTER_WORLD)
+_CHAR_SLOT_RE = compile_lexicon_pattern(Concept.CHAR_SLOT)
+_BEHAVIOR_CHAIN_HINT_RE = compile_lexicon_pattern(
+    Concept.CHARACTER_CREATION,
+    Concept.ENTER_WORLD,
+    Concept.START_GAME,
+    Concept.CHAR_SLOT,
 )
 
 
@@ -234,6 +231,8 @@ def should_build_dynamic_chain(
     *,
     ocr_summary: str = "",
 ) -> bool:
+    if state.get("session_agent_active"):
+        return False
     if not state.get("login_done"):
         return False
     if state.get("in_game_confirmed"):

@@ -43,7 +43,7 @@ def _find_aapt_executable() -> str:
 
 def _dump_apk_badging(apk_path: Path) -> str | None:
     if not apk_path.exists():
-        logger.warning("APK 文件不存在: %s", apk_path)
+        logger.warning("APK file missing: %s", apk_path)
         return None
     aapt = _find_aapt_executable()
     try:
@@ -57,11 +57,11 @@ def _dump_apk_badging(apk_path: Path) -> str | None:
         )
         return result.stdout
     except FileNotFoundError:
-        logger.error("aapt 命令未找到 (%s)，请安装 Android build-tools 并加入 PATH。", aapt)
+        logger.error("aapt not found (%s); install Android build-tools and add to PATH.", aapt)
         return None
     except subprocess.CalledProcessError as e:
         stderr = e.stderr or ""
-        logger.error("aapt 执行失败: %s", stderr)
+        logger.error("aapt failed: %s", stderr)
         return None
 
 
@@ -74,10 +74,10 @@ def get_apk_launch_info(apk_path: Path | str) -> ApkLaunchInfo | None:
     pkg_match = _PACKAGE_RE.search(badging)
     act_match = _LAUNCHABLE_ACTIVITY_RE.search(badging)
     if not pkg_match:
-        logger.warning("未能从 aapt 输出中找到 package name。")
+        logger.warning("package name not found in aapt output.")
         return None
     if not act_match:
-        logger.warning("未能从 aapt 输出中找到 launchable-activity。")
+        logger.warning("launchable-activity not found in aapt output.")
         return None
 
     return ApkLaunchInfo(

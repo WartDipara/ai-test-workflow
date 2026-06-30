@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from game_agent.models.server_panel_vision import ServerPanelVisionVerdict
 from game_agent.services.server_selector_check import PanelOcrVerdict
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +26,19 @@ def fuse_panel_verdict(
     fusion_enabled: bool = True,
 ) -> PanelFusionResult:
     """融合矩阵：OCR 快判 + Vision 语义确认。"""
+    if not fusion_enabled:
+        if ocr.passed:
+            return PanelFusionResult(
+                passed=True,
+                source="ocr_only",
+                message=f"ocr={ocr.evidence!r} (fusion_disabled)",
+            )
+        return PanelFusionResult(
+            passed=False,
+            source="fail",
+            message=f"ocr={ocr.evidence!r} (fusion_disabled)",
+        )
+
     if ocr.page_navigation:
         return PanelFusionResult(
             passed=False,
@@ -80,10 +96,13 @@ def fuse_panel_verdict(
         return PanelFusionResult(
             passed=True,
             source="ocr_only",
-            message=f"ocr={ocr.evidence!r} (no multimodal)",
+            message=f"ocr={ocr.evidence!r} (vision_unavailable)",
         )
+    vision_hint = "vision_unavailable"
+    if vision is not None and vision.parse_failed:
+        vision_hint = f"vision_parse_failed:{vision.reason!r}"
     return PanelFusionResult(
         passed=False,
         source="fail",
-        message=f"ocr={ocr.evidence!r} (no multimodal)",
+        message=f"ocr={ocr.evidence!r} ({vision_hint})",
     )

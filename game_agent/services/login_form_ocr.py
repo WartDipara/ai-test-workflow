@@ -17,30 +17,35 @@ from game_agent.utils.ocr_util import OcrLine, extract_text_with_bounds, parse_o
 if TYPE_CHECKING:
     from game_agent.services.adb_service import AdbService
 
-_COMPOUND_LOGIN_RE = re.compile(
-    r"(/|\\|with|sign\s*up|signup|register|注册|forgot|忘记|第三方|"
-    r"google|facebook|apple|wechat|qq|微博|手机验证码|login/sign)",
-    re.IGNORECASE,
-)
+from game_agent.i18n import Concept, compile_lexicon_pattern, phrase_in_text, text_contains
 
+_COMPOUND_LOGIN_RE = compile_lexicon_pattern(
+    Concept.COMPOUND_LOGIN,
+    Concept.FORGOT_PASSWORD,
+)
 _STANDALONE_LOGIN_RE = re.compile(
-    r"^(登录|立即登录|log\s*in|login|sign\s*in)\s*[.!…]*$",
+    r"^(?:" + compile_lexicon_pattern(Concept.LOGIN_BUTTON).pattern + r")\s*[.!…]*$",
     re.IGNORECASE,
 )
-
-_ACCOUNT_RE = re.compile(
-    r"(account|账号|用户名|邮箱|手机|email|cell\s*phone|手机号)",
+_ACCOUNT_RE = compile_lexicon_pattern(Concept.ACCOUNT_LABEL)
+_PASSWORD_LABEL_RE = re.compile(
+    r"^(?:" + compile_lexicon_pattern(Concept.PASSWORD_LABEL).pattern + r")\s*$",
     re.IGNORECASE,
 )
-
-_PASSWORD_LABEL_RE = re.compile(r"^(password|密码)\s*$", re.IGNORECASE)
-
-_PASSWORD_HINT_RE = re.compile(
-    r"(enter.*password|输入.*密码|please.*password|login\s*password)",
-    re.IGNORECASE,
-)
+_PASSWORD_HINT_RE = compile_lexicon_pattern(Concept.PASSWORD_HINT)
 
 _EMAIL_VALUE_RE = re.compile(r"@[\w.-]+\.\w+")
+_ACCOUNT_PLACEHOLDER_RE = re.compile(
+    r"账号.*(?:手机|邮箱|phone|email)|(?:手机|邮箱).*账号",
+    re.IGNORECASE,
+)
+
+
+def _field_tap_from_placeholder(line: OcrLine, *, screen_height: int) -> tuple[int, int]:
+    """占位符 OCR 中心偏下，更接近 WebView 输入区。"""
+    h = max(1, int(screen_height))
+    dy = min(40, max(14, int(h * 0.028)))
+    return line.x, line.y + dy
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,7 @@ def is_compound_login_label(text: str) -> bool:
         return True
     if _STANDALONE_LOGIN_RE.match(t):
         return False
-    if re.search(r"(?i)login|登录", t) and len(t.split()) > 2:
+    if re.search(r"(?i)login|登录|登入|登錄", t) and len(t.split()) > 2:
         return True
     return len(t) > 12
 
@@ -97,6 +102,8 @@ def resolve_login_form_targets(
                 "account" in lower and "account" not in (account_line.text or "").lower()
             ):
                 account_line = line
+        elif _ACCOUNT_PLACEHOLDER_RE.search(text) and account_line is None:
+            account_line = line
 
         if _PASSWORD_LABEL_RE.match(text):
             password_line = line
@@ -112,19 +119,30 @@ def resolve_login_form_targets(
     password_xy: tuple[int, int] | None = None
     password_text = ""
     if password_line is not None:
-        password_xy = (password_line.x, password_line.y)
+        password_xy = _field_tap_from_placeholder(password_line, screen_height=h)
         password_text = password_line.text
     elif password_hint_lines:
-        # 「Enter password」类占位：取密码区多条的中心
-        avg_x = sum(l.x for l in password_hint_lines) // len(password_hint_lines)
-        avg_y = sum(l.y for l in password_hint_lines) // len(password_hint_lines)
-        password_xy = (avg_x, avg_y)
-        password_text = password_hint_lines[0].text
+        hint = password_hint_lines[0]
+        below = [
+            ln
+            for ln in lines
+            if ln.y > hint.y + int(h * 0.02)
+            and ln.y < hint.y + int(h * 0.15)
+            and abs(ln.x - hint.x) < max(80, int(h * 0.12))
+            and not _PASSWORD_HINT_RE.search(ln.text)
+        ]
+        if below:
+            field = min(below, key=lambda ln: ln.y)
+            password_xy = (field.x, field.y)
+            password_text = field.text or hint.text
+        else:
+            password_xy = _field_tap_from_placeholder(hint, screen_height=h)
+            password_text = hint.text
 
     account_xy: tuple[int, int] | None = None
     account_text = ""
     if account_line is not None:
-        account_xy = (account_line.x, account_line.y)
+        account_xy = _field_tap_from_placeholder(account_line, screen_height=h)
         account_text = account_line.text
 
     password_y = password_xy[1] if password_xy else None
@@ -188,6 +206,10 @@ def capture_login_form_targets(
     ts = datetime.now().strftime("%H%M%S_%f")
     path = artifact_root / f"{tag}_ocr_{ts}.png"
     adb.screencap_png(path)
+    from game_agent.utils.screen_coord import resolve_screen_coord_space
+
+    space = resolve_screen_coord_space(adb, path)
+    screen_width, screen_height = space.tap_w, space.tap_h
     raw = extract_text_with_bounds(path, device_w=screen_width, device_h=screen_height)
     targets = resolve_login_form_targets(raw, screen_height=screen_height)
     summary = format_targets_summary(targets, screencap=path)

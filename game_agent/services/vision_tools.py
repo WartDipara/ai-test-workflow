@@ -13,33 +13,13 @@ from game_agent.services.run_audit_log import RunAuditLogger
 from game_agent.utils.ocr_util import extract_text_with_bounds, run_ocr_frame
 from game_agent.workers.vision_worker import VisionWorker
 
-logger = logging.getLogger(__name__)
+from game_agent.i18n.match import is_network_anomaly_text
 
-_NETWORK_ANOMALY_HINTS = (
-    "网络连接失败",
-    "网络异常",
-    "网络无连接",
-    "没有网络",
-    "请检查网络",
-    "连接超时",
-    "连接失败",
-    "服务器连接失败",
-    "与服务器断开连接",
-    "服务器加载失败",
-    "服务器获取失败",
-    "服务器繁忙",
-    "服务器维护中",
-    "资源下载失败",
-    "资源加载失败",
-    "更新失败",
-    "下载失败",
-    "当前地区不支持",
-    "当前区域暂未开放",
-)
+logger = logging.getLogger(__name__)
 
 
 def is_network_anomaly_reason(reason: str) -> bool:
-    return any(k in (reason or "") for k in _NETWORK_ANOMALY_HINTS)
+    return is_network_anomaly_text(reason or "")
 
 
 def _strip_json_fence(text: str) -> str:
@@ -71,7 +51,7 @@ async def run_analyze_screen(
     if llm_cfg is None:
         return format_vision_tool_response(
             error_code=VisionToolErrorCode.NO_MULTIMODAL,
-            error_message="llm_multimodal 未配置，无法调用多模态",
+            error_message="llm_multimodal not configured",
         )
 
     ts = datetime.now().strftime("%H%M%S_%f")
@@ -85,13 +65,19 @@ async def run_analyze_screen(
         )
 
     try:
-        dw, dh = adb.touch_size()
+        from game_agent.utils.screen_coord import resolve_screen_coord_space
+
+        space = resolve_screen_coord_space(adb, shot_path)
+        dw, dh = space.tap_w, space.tap_h
         ocr_summary = extract_text_with_bounds(shot_path, device_w=dw, device_h=dh)
     except Exception as e:
         ocr_summary = f"[OCR failed] {e}"
-        logger.warning("analyze_screen OCR 失败: %s", e)
+        logger.warning("analyze_screen OCR failed: %s", e)
 
-    vision = VisionWorker(llm_cfg)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
     try:
         raw = await vision.analyze_game_state(
             screenshot_path=shot_path,
@@ -99,11 +85,18 @@ async def run_analyze_screen(
             round_id=round_id,
         )
     except Exception as e:
-        logger.exception("analyze_screen 多模态 API 失败")
+        logger.exception("analyze_screen multimodal API failed")
         return format_vision_tool_response(
             error_code=VisionToolErrorCode.API_ERROR,
             error_message=str(e)[:800],
             data={"screenshot": str(shot_path), "ocr_preview": ocr_summary[:500]},
+        )
+
+    if discard_if_stale(work_gen, where="analyze_screen", ctx=attempt_context):
+        return format_vision_tool_response(
+            error_code=VisionToolErrorCode.API_ERROR,
+            error_message="stale_session_discard",
+            data={"screenshot": str(shot_path)},
         )
 
     try:
@@ -174,7 +167,10 @@ async def run_dismiss_blank_modal(
         )
 
     try:
-        dw, dh = adb.touch_size()
+        from game_agent.utils.screen_coord import resolve_screen_coord_space
+
+        space = resolve_screen_coord_space(adb, shot_path)
+        dw, dh = space.tap_w, space.tap_h
         ocr_summary, bboxes = run_ocr_frame(
             shot_path,
             device_w=dw,

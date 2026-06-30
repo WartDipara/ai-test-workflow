@@ -33,7 +33,7 @@ def list_connected_devices(*, timeout_s: float = 15.0) -> list[str]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(f"执行 adb devices 失败: {exc}") from exc
+        raise RuntimeError(f"adb devices failed: {exc}") from exc
 
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
@@ -51,5 +51,5 @@ def list_connected_devices(*, timeout_s: float = 15.0) -> list[str]:
         if match:
             serials.append(match.group(1))
 
-    logger.info("adb devices 可用设备 (%d): %s", len(serials), ", ".join(serials) or "(无)")
+    logger.info("adb devices (%d): %s", len(serials), ", ".join(serials) or "(none)")
     return serials

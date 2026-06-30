@@ -15,6 +15,39 @@ from game_agent.services.run_deliverable import new_task_id
 logger = logging.getLogger(__name__)
 
 
+def _read_lock_pid(lock_path: Path) -> int | None:
+    try:
+        raw = lock_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _clear_stale_lock(lock_path: Path) -> bool:
+    pid = _read_lock_pid(lock_path)
+    if pid is None or _process_alive(pid):
+        return False
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to clean stale task queue lock %s: %s", lock_path, exc)
+        return False
+    logger.warning("Cleaned stale task queue lock %s (holder pid=%s exited)", lock_path, pid)
+    return True
+
+
 class ApkTaskStatus(str, Enum):
     PENDING = "pending"
     CLAIMED = "claimed"
@@ -80,21 +113,25 @@ class TaskQueueLock:
 
     def acquire(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode("ascii"))
-            self._fd = fd
-            logger.info("已获取任务队列锁: %s", self._path)
-        except FileExistsError as exc:
-            holder = ""
+        for attempt in range(2):
             try:
-                holder = self._path.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                pass
-            detail = f" (holder pid={holder})" if holder else ""
-            raise RuntimeError(
-                f"另一进程正在消费任务队列: {self._path}{detail}",
-            ) from exc
+                fd = os.open(str(self._path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode("ascii"))
+                self._fd = fd
+                logger.info("Acquired task queue lock: %s", self._path)
+                return
+            except FileExistsError as exc:
+                if attempt == 0 and _clear_stale_lock(self._path):
+                    continue
+                holder = ""
+                try:
+                    holder = self._path.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    pass
+                detail = f" (holder pid={holder})" if holder else ""
+                raise RuntimeError(
+                    f"另一进程正在消费任务队列: {self._path}{detail}",
+                ) from exc
 
     def release(self) -> None:
         if self._fd is not None:
@@ -106,9 +143,9 @@ class TaskQueueLock:
         try:
             self._path.unlink(missing_ok=True)
         except OSError as exc:
-            logger.warning("释放任务队列锁失败: %s", exc)
+            logger.warning("Failed to release task queue lock: %s", exc)
         else:
-            logger.info("已释放任务队列锁: %s", self._path)
+            logger.info("Released task queue lock: %s", self._path)
 
     def __enter__(self) -> TaskQueueLock:
         self.acquire()
@@ -134,7 +171,7 @@ class GlobalTaskQueue:
     def init(cls, urls: list[str], batch_root: Path) -> GlobalTaskQueue:
         with cls._instance_guard:
             if cls._instance is not None:
-                raise RuntimeError("GlobalTaskQueue 已初始化，不可重复创建")
+                raise RuntimeError("GlobalTaskQueue already initialized")
             tasks = [
                 ApkTask(task_id=new_task_id(), index=index, url=url)
                 for index, url in enumerate(urls)
@@ -170,7 +207,7 @@ class GlobalTaskQueue:
                     (self._batch_root / f"task_{task.index}").resolve(),
                 )
                 logger.info(
-                    "设备 %s 认领任务 index=%d task_id=%s",
+                    "Device %s claimed task index=%d task_id=%s",
                     serial,
                     task.index,
                     task.task_id,
@@ -189,7 +226,7 @@ class GlobalTaskQueue:
         with self._lock:
             task = self._by_id.get(task_id)
             if task is None:
-                raise KeyError(f"未知 task_id: {task_id}")
+                raise KeyError(f"Unknown task_id: {task_id}")
             task.status = ApkTaskStatus.SUCCEEDED if success else ApkTaskStatus.FAILED
             task.finished_at = _utc_now()
             task.result_code = result_code

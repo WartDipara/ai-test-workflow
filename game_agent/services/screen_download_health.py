@@ -4,6 +4,7 @@ import re
 import time
 from dataclasses import dataclass, field
 
+from game_agent.i18n.match import first_network_anomaly_phrase
 from game_agent.services.vision_tools import is_network_anomaly_reason
 
 _DOWNLOAD_STALL_STAGES = frozenset({
@@ -25,14 +26,6 @@ _NON_STALL_STAGES = frozenset({
 _DOWNLOAD_PCT_RE = re.compile(r"(\d{1,3})%")
 _OCR_LINE_RE = re.compile(
     r"^\s*(\d+)\s*,\s*(\d+)\s+(.+?)\s+[\d.]+\s*$",
-)
-_NETWORK_DIALOG_HINTS = (
-    "网络连接失败",
-    "网络异常",
-    "资源下载失败",
-    "下载失败",
-    "连接超时",
-    "连接失败",
 )
 
 
@@ -162,9 +155,9 @@ def detect_network_dialog_in_ocr(ocr_summary: str, *, min_y_ratio: float = 0.12)
             if y < min_y:
                 continue
             text = match.group(3)
-        for hint in _NETWORK_DIALOG_HINTS:
-            if hint in text:
-                return hint
+        hint = first_network_anomaly_phrase(text)
+        if hint:
+            return hint
         if is_network_anomaly_reason(text):
             return text[:120]
     return ""

@@ -68,19 +68,19 @@ def finalize_merged_config_after_deploy(gid: str, target: Path) -> Path:
         if native.is_file() and native.resolve() != target.resolve():
             try:
                 native.unlink()
-                logger.info("已删除 GameTurbo-Native 合并配置残留: %s", native)
+                logger.info("Removed GameTurbo-Native merge config leftover: %s", native)
             except OSError as exc:
-                logger.warning("删除合并配置残留失败 %s: %s", native, exc)
+                logger.warning("Failed to remove merge config leftover %s: %s", native, exc)
         return target
 
     if native.is_file():
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(native), str(target))
-        logger.info("已将合并配置移至产物目录: %s", target)
+        logger.info("Moved merge config to deliverables: %s", target)
         return target
 
     raise RuntimeError(
-        f"deploy 未生成合并配置（期望 {target} 或 {native}）",
+        f"deploy did not produce merge config (expected {target} or {native})",
     )
 
 
@@ -122,11 +122,18 @@ def needs_gameturbo_deploy(
     output_apk: Path,
     *,
     package_installed: bool,
+    game_config_path: Path | None = None,
 ) -> bool:
     if package_installed:
         return False
     if not output_apk.is_file():
         return True
+    if game_config_path is not None and game_config_path.is_file():
+        try:
+            if output_apk.stat().st_mtime >= game_config_path.stat().st_mtime:
+                return False
+        except OSError:
+            pass
     return True
 
 
@@ -157,7 +164,7 @@ def discover_source_apk(
         if apk.name != OUTPUT_APK_NAME and "gameturbo" not in apk.name.lower()
     )
     if len(candidates) != 1:
-        names = ", ".join(path.name for path in candidates) or "无"
+        names = ", ".join(path.name for path in candidates) or "none"
         raise RuntimeError(
             f"packages 目录必须且只能放一个原包 APK（排除 {OUTPUT_APK_NAME}），当前: {names}",
         )
@@ -199,7 +206,7 @@ def resolve_existing_game_config(gid: str, games_dir: Path = GAMES_DIR) -> Path:
     matches = sorted(games_dir.glob(f"gameturbo_{gid}_*.json"))
     if not matches:
         raise RuntimeError(
-            f"已存在 gameturbo 产物，但找不到 gameturbo_{gid}_*.json",
+            f"gameturbo artifacts exist but no gameturbo_{gid}_*.json found",
         )
     return matches[0]
 
@@ -207,7 +214,7 @@ def resolve_existing_game_config(gid: str, games_dir: Path = GAMES_DIR) -> Path:
 def init_game_config_from_template(gid: str, games_dir: Path = GAMES_DIR) -> Path:
     template_path = games_dir / "template.json"
     if not template_path.is_file():
-        raise RuntimeError(f"找不到 GameTurbo 配置模板: {template_path}")
+        raise RuntimeError(f"GameTurbo config template not found: {template_path}")
     data = json.loads(template_path.read_text(encoding="utf-8"))
     data["game_id"] = gid
     target = games_dir / f"gameturbo_{gid}_test.json"

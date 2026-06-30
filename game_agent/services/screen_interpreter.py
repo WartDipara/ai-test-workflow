@@ -23,11 +23,15 @@ async def interpret_launch_screen(
     ocr_summary: str,
     focus: str = "",
     round_id: int = 0,
+    attempt_context=None,
 ) -> ScreenInterpretation:
     if llm_cfg is None:
         return ScreenInterpretation(reason="llm_multimodal not configured")
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
     prompt = build_interpretation_prompt(ocr_summary=ocr_summary, focus=focus)
-    vision = VisionWorker(llm_cfg)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
     try:
         raw = await vision.interpret_launch_screen(
             screenshot_path=screenshot_path,
@@ -37,6 +41,8 @@ async def interpret_launch_screen(
     except Exception as e:
         logger.warning("[ScreenInterpreter] failed: %s", e)
         return ScreenInterpretation(reason=str(e)[:200])
+    if discard_if_stale(work_gen, where="interpret_launch_screen", ctx=attempt_context):
+        return ScreenInterpretation(reason="stale_session_discard")
     interp = parse_interpretation_json(raw)
     if not interp.reason and raw:
         interp = interp.model_copy(update={"reason": "parsed from vision"})

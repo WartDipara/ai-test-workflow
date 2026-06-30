@@ -128,6 +128,21 @@ def test_dfs_server_check_blocked_by_announcement() -> None:
     assert d.action == "dismiss_blocking_overlay"
 
 
+def test_dfs_skips_server_check_when_disabled() -> None:
+    d = _decide(
+        facts=LaunchFacts(
+            server_slot_visible=True,
+            enter_cta_visible=True,
+            enter_cta_xy=(400, 800),
+        ),
+        login_done=True,
+        privacy_checked=True,
+        server_checked=True,
+        server_selector_check_enabled=False,
+    )
+    assert d.action == "tap_enter_game"
+
+
 def test_dfs_check_in_game_after_enter_tap_even_if_cta_visible() -> None:
     d = _decide(
         facts=LaunchFacts(
@@ -177,7 +192,6 @@ def test_dfs_in_game_agent_after_stability_complete() -> None:
         in_game_entry_passed=True,
         stability_observe_complete=True,
         in_game_agent_started_at=1.0,
-        in_game_agent_deadline=999999.0,
         in_game_confirmed=False,
     )
     assert d.action == "in_game_agent"

@@ -55,7 +55,7 @@ class TaskRunJournal:
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
         except OSError as e:
-            logger.warning("写入 task_journal 失败: %s", e)
+            logger.warning("Failed to write task_journal: %s", e)
 
 
 def _chmod_writable_and_retry(func, path: str, exc_info) -> None:
@@ -115,10 +115,10 @@ def cleanup_attempt_artifacts(artifact_roots: list[Path]) -> tuple[list[str], li
         try:
             _remove_tree(path)
             removed.append(str(path))
-            logger.info("已清理 artifacts: %s", path)
+            logger.info("Cleaned artifacts: %s", path)
         except OSError as e:
             failed.append(f"{path}: {e}")
-            logger.warning("清理 artifacts 失败: %s — %s", path, e)
+            logger.warning("Artifact cleanup failed: %s — %s", path, e)
     return removed, failed
 
 
@@ -146,7 +146,7 @@ def cleanup_task_artifacts(
         try:
             _remove_tree(child)
             removed.append(str(child.resolve()))
-            logger.info("已清理遗留 artifacts: %s", child)
+            logger.info("Cleaned stale artifacts: %s", child)
         except OSError as e:
             failed.append(f"{child}: {e}")
     return removed, failed
@@ -177,6 +177,19 @@ def finalize_task_deliverable(
 
     journal = TaskRunJournal(deliverable.root)
     journal.log("finalize", "start", success=success)
+
+    from game_agent.services.scene_memory_store import export_scene_memory_to_deliverable
+
+    scene_mem_dst = export_scene_memory_to_deliverable(
+        deliverable.root,
+        attempt_records,
+    )
+    if scene_mem_dst is not None:
+        journal.log(
+            "finalize",
+            "scene_memory_exported",
+            path=str(scene_mem_dst.resolve()),
+        )
 
     archive_plan = (
         ExternalServiceManager(app_config).execution_log_archive_plan()
@@ -259,12 +272,14 @@ def finalize_task_deliverable(
             data["artifacts_cleaned"] = removed
             if failed:
                 data["artifacts_cleanup_errors"] = failed
+            if scene_mem_dst is not None:
+                data["scene_memory"] = str(scene_mem_dst.resolve())
             result_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
         except (OSError, json.JSONDecodeError) as e:
-            logger.warning("更新 result.json 失败: %s", e)
+            logger.warning("Failed to update result.json: %s", e)
 
     return TaskFinalizeResult(
         final_log_path=final_path,

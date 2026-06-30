@@ -62,7 +62,7 @@ def apply_gameturbo_config_patch(
 ) -> ConfigApplyResult:
     data = json.loads(config_path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError(f"GameTurbo 配置不是 JSON object: {config_path}")
+        raise ValueError(f"GameTurbo config is not a JSON object: {config_path}")
 
     summary: list[str] = []
 

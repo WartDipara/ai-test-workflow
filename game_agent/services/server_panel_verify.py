@@ -63,13 +63,24 @@ async def probe_server_panel_opened(
     screenshot_path: Path,
     ocr_summary: str = "",
     round_id: int = 0,
+    attempt_context=None,
 ) -> ServerPanelVisionVerdict:
-    vision = VisionWorker(llm_cfg)
+    from game_agent.modules.session_invalidation import capture_session_generation, discard_if_stale
+
+    work_gen = capture_session_generation(attempt_context)
+    vision = VisionWorker(llm_cfg, attempt_context=attempt_context)
     raw = await vision.probe_server_panel_opened(
         screenshot_path=screenshot_path,
         ocr_summary=ocr_summary,
         round_id=round_id,
     )
+    if discard_if_stale(work_gen, where="server_panel_probe", ctx=attempt_context):
+        return ServerPanelVisionVerdict(
+            passed=False,
+            same_screen=True,
+            confidence=0.0,
+            reason="stale_session_discard",
+        )
     verdict = parse_server_panel_vision(raw)
     logger.info("%s round=%s", format_panel_vision_summary(verdict), round_id)
     return verdict
